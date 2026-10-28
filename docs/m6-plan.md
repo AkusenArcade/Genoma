@@ -59,16 +59,27 @@ emoji, performance mode, privacy, the lock screen, the greeter…).
 
 ### 0. Ground
 
-- [ ] The feature list the port is measured against: taken from the current
+- [x] The feature list the port is measured against: taken from the current
       code, checked against the PRD's cell catalogue (§9). What the code has
       and the PRD does not is ported; what the PRD has and the code never
       built is not the port's, it is Bioma's own work (`genoma/PORT.md`).
-- [ ] `Bioma/genoma/` with its `shell.luau`, a start script beside
+- [x] `Bioma/genoma/` with its `shell.luau`, a start script beside
       `scripts/bioma`, and Bioma's `CLAUDE.md` saying what the directory is.
-- [ ] Ownership by surface: a key in the configuration that both runtimes
+- [x] Ownership by surface: a key in the configuration that both runtimes
       read; Quickshell skips what Genoma owns.
-- [ ] How the runtime is found while Genoma is unpackaged (a path to its
-      build), and how it starts at login once it is.
+- [x] How the runtime is found while Genoma is unpackaged (a path to its
+      build); how it starts at login is step 7's.
+
+*Done 2026-10-28.* A membrane or floating block marked `"runtime": "genoma"`
+is skipped by `shell.qml`'s `membraneMatches` (the Settings page copies
+blocks whole, so the key survives an edit) and found by `genoma/shell.luau`,
+which reads `config/default.json` and the override as `core/Config.qml`
+merges them. `scripts/genoma` runs `$GENOMA_BIN`, else `genoma` on the PATH.
+Checked with a copy of Akusen's override marking DP-1's top membrane: Genoma
+found that one block (and none in his real configuration), and an isolated
+Bioma on Quickshell drew HDMI-A-1's bottom membrane and not DP-1's top. For
+it Genoma gained `g.dir`, relative `g.file` paths from the interface's
+directory, `g.parse_json` and `g.to_json`.
 
 ### 1. Core
 

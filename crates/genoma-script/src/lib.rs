@@ -977,8 +977,39 @@ impl Script {
         g.set("timer", lua.create_function(move |_, t: Table| io::timer(&host, t))?)?;
         let host = self.host.clone();
         g.set("process", lua.create_function(move |_, t: Table| io::process(&host, t))?)?;
-        let host = self.host.clone();
-        g.set("file", lua.create_function(move |_, t: Table| io::file(&host, t))?)?;
+        // A relative path is the interface's own: `../config/default.json`
+        // from Bioma's genoma/ directory.
+        let (host, dir) = (self.host.clone(), self.dir.clone());
+        g.set(
+            "file",
+            lua.create_function(move |_, t: Table| {
+                let path: String = t.get("path")?;
+                if !(path.starts_with('/') || path.starts_with('~') || path.starts_with('$')) {
+                    t.set("path", dir.join(&path).display().to_string())?;
+                }
+                io::file(&host, t)
+            })?,
+        )?;
+        // g.dir: the interface's directory.
+        g.set("dir", self.dir.display().to_string())?;
+        // g.parse_json(text) → the value; g.to_json(value, pretty) → text.
+        g.set(
+            "parse_json",
+            lua.create_function(|lua, text: String| {
+                use mlua::LuaSerdeExt;
+                let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| err(format!("g.parse_json: {e}")))?;
+                lua.to_value(&value)
+            })?,
+        )?;
+        g.set(
+            "to_json",
+            lua.create_function(|lua, (value, pretty): (LuaValue, Option<bool>)| {
+                use mlua::LuaSerdeExt;
+                let value: serde_json::Value = lua.from_value(value)?;
+                let text = if pretty.unwrap_or(false) { serde_json::to_string_pretty(&value) } else { serde_json::to_string(&value) };
+                text.map_err(|e| err(format!("g.to_json: {e}")))
+            })?,
+        )?;
         let host = self.host.clone();
         g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
         let host = self.host.clone();
