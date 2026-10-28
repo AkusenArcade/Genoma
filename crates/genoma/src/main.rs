@@ -195,6 +195,8 @@ fn run(dir: PathBuf) {
     .expect("watcher");
     watcher.watch(&dir, notify::RecursiveMode::NonRecursive).expect("watch");
     let script = Rc::new(RefCell::new(script));
+    let dispatcher = script.clone();
+    app.on_input(move |node, input| dispatcher.borrow().dispatch(node, input));
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();
     handle

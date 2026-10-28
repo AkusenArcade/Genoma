@@ -16,15 +16,20 @@ last step (PRD §12, question 5).
 
 ### 1. Pointer events reach the interface
 
-- [ ] **Hit testing** on the laid-out tree. The topmost node under the
+*Done 2026-10-28.* Checked with a synthetic pointer on HDMI-A-1, the raw
+Wayland events logged beside the handlers' output: one Enter, two
+Press/Release pairs giving two `on_click(272)`, and wheel steps as ±1.
+`on_hover` follows Enter and Leave. Momentum on the touchpad comes in step 5.
+
+- [x] **Hit testing** on the laid-out tree. The topmost node under the
       point that has a handler takes the event.
-- [ ] **Handlers in Luau**: `on_click`, `on_press`, `on_release`,
+- [x] **Handlers in Luau**: `on_click`, `on_press`, `on_release`,
       `on_wheel(dx, dy)`, and `hovered`, a signal a binding can read. They
       run inside the reactive graph like any binding.
-- [ ] **Input region** from the nodes that take input. Everything else
+- [x] **Input region** from the nodes that take input. Everything else
       passes the pointer through to the windows below. Rebuilt from layout,
       never maintained by hand (PRD §6.2).
-- [ ] Wheel and touchpad are told apart by the scroll source. Discrete
+- [x] Wheel and touchpad are told apart by the scroll source. Discrete
       wheel steps go to `on_wheel` as steps; touchpad scrolling comes with
       momentum (step 5).
 

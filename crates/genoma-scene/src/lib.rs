@@ -100,6 +100,10 @@ pub struct Node {
     fill_bottom: [f32; 4],
     arc_rate: f32,
     offset: [f32; 2],
+    /// Takes pointer input: it is hit-tested and belongs to the input region.
+    interactive: bool,
+    /// Where the node was last drawn, logical units: x, y, width, height.
+    bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
     /// the centre, to pace its frames.
     arc_radius: f32,
@@ -147,6 +151,8 @@ impl Node {
             fill_bottom: [0.0; 4],
             arc_rate: 0.0,
             offset: [0.0; 2],
+            interactive: false,
+            bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
             wave_period: 1.0,
@@ -251,6 +257,54 @@ impl Scene {
     pub fn set_icon_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
         self.icons.dirs = dirs;
         self.dirty = true;
+    }
+
+    /// The node's parent, for an event that bubbles up.
+    pub fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.tree.parent(node)
+    }
+
+    /// Marks a node as taking pointer input.
+    pub fn set_interactive(&mut self, node: NodeId, interactive: bool) {
+        if let Some(n) = self.tree.get_node_context_mut(node) {
+            n.interactive = interactive;
+            self.dirty = true;
+        }
+    }
+
+    /// The topmost interactive node under a point, logical units, as last
+    /// drawn: the last one in drawing order wins, as it is drawn on top.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(self.root, &mut |id, n| {
+            let [bx, by, bw, bh] = n.bounds;
+            if n.interactive && x >= bx && y >= by && x < bx + bw && y < by + bh {
+                found = Some(id);
+            }
+        });
+        found
+    }
+
+    /// The rectangles that take the pointer, logical units: the input region.
+    pub fn input_rects(&self) -> Vec<[f32; 4]> {
+        let mut rects = Vec::new();
+        self.walk(self.root, &mut |_, n| {
+            if n.interactive {
+                rects.push(n.bounds);
+            }
+        });
+        rects
+    }
+
+    fn walk(&self, node: NodeId, f: &mut dyn FnMut(NodeId, &Node)) {
+        let Some(n) = self.tree.get_node_context(node) else { return };
+        if !n.present {
+            return;
+        }
+        f(node, n);
+        for child in self.tree.children(node).unwrap_or_default() {
+            self.walk(child, f);
+        }
     }
 
     /// The shapes the compositor should blur behind, as last drawn.
@@ -694,6 +748,7 @@ fn collect(
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
     if let Some(n) = tree.get_node_context_mut(node) {
         n.arc_radius = layout.size.width / 2.0;
+        n.bounds = own;
     }
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {

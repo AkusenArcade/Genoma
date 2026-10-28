@@ -21,6 +21,34 @@ use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{clock::Clock, niri::Niri, vitals::Vitals};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
+/// Pointer input for a node, as the surface saw it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Input {
+    Hover(bool),
+    Press(u32),
+    Release(u32),
+    /// A press and a release on the same node.
+    Click(u32),
+    /// Discrete wheel steps, or touchpad movement in logical units.
+    Wheel(f64, f64),
+}
+
+impl Input {
+    fn handler(&self) -> &'static str {
+        match self {
+            Input::Hover(_) => "on_hover",
+            Input::Press(_) => "on_press",
+            Input::Release(_) => "on_release",
+            Input::Click(_) => "on_click",
+            Input::Wheel(..) => "on_wheel",
+        }
+    }
+}
+
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel"];
+
+type Handlers = Rc<RefCell<HashMap<genoma_scene::NodeId, HashMap<&'static str, Function>>>>;
+
 /// Where and how the shell's surface sits on the output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceSpec {
@@ -151,6 +179,7 @@ pub struct Script {
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
     services: Services,
     wanted: Rc<RefCell<Vec<&'static str>>>,
+    handlers: Handlers,
 }
 
 fn err(message: impl Into<String>) -> mlua::Error {
@@ -167,6 +196,34 @@ impl Script {
             states: Rc::default(),
             services,
             wanted: Rc::default(),
+            handlers: Rc::default(),
+        }
+    }
+
+    /// Delivers pointer input to the node hit, or to the nearest ancestor
+    /// that handles it: a wheel over a row reaches the list.
+    pub fn dispatch(&self, node: genoma_scene::NodeId, input: Input) {
+        let name = input.handler();
+        let mut at = Some(node);
+        while let Some(id) = at {
+            let handler = self.handlers.borrow().get(&id).and_then(|h| h.get(name)).cloned();
+            if let Some(f) = handler {
+                let result = match input {
+                    Input::Hover(entered) => f.call::<()>(entered),
+                    Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(b),
+                    Input::Wheel(dx, dy) => f.call::<()>((dx, dy)),
+                };
+                if let Err(e) = result {
+                    log::error!("{name}: {e}");
+                }
+                return;
+            }
+            // Hover stays with its own node: entering a child is not
+            // entering every ancestor again.
+            if matches!(input, Input::Hover(_)) {
+                return;
+            }
+            at = self.scene.borrow().parent(id);
         }
     }
 
@@ -206,12 +263,13 @@ impl Script {
         // the old one.
         let scene = self.scene.clone();
         let root = scene.borrow().root();
+        let handlers: Handlers = Rc::default();
         let (scope, result) = Scope::new(|| {
             let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
             // The holder takes the surface's whole span, so content that grows
             // (a membrane's row) can reach the far edge.
             let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
-            mount(&scene, &content, holder).map(|_| holder)
+            mount(&scene, &handlers, &content, holder).map(|_| holder)
         });
         match result {
             Ok(holder) => {
@@ -224,6 +282,7 @@ impl Script {
                 drop(s);
                 self.scope = Some(scope);
                 self.lua = lua;
+                *self.handlers.borrow_mut() = std::mem::take(&mut *handlers.borrow_mut());
                 Ok(spec)
             }
             Err(e) => {
@@ -470,7 +529,7 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
 }
 
 /// Creates the node `t` describes under `parent`, with its bindings.
-fn mount(scene: &Rc<RefCell<Scene>>, t: &Table, parent: genoma_scene::NodeId) -> mlua::Result<()> {
+fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: genoma_scene::NodeId) -> mlua::Result<()> {
     let kind = kind_of(t)?;
     let role = role_of(t.get("role")?)?;
     let node = scene.borrow_mut().create(kind, role);
@@ -506,6 +565,14 @@ fn mount(scene: &Rc<RefCell<Scene>>, t: &Table, parent: genoma_scene::NodeId) ->
         if matches!(key.as_str(), "__kind" | "role" | "name" | "id" | "transition") {
             continue;
         }
+        if let Some(&name) = HANDLERS.iter().find(|h| **h == key) {
+            let LuaValue::Function(f) = value else {
+                return Err(err(format!("{key} wants a function")));
+            };
+            handlers.borrow_mut().entry(node).or_default().insert(name, f);
+            scene.borrow_mut().set_interactive(node, true);
+            continue;
+        }
         let prop = Prop::from_name(&key).ok_or_else(|| err(format!("{kind:?} has no property {key}")))?;
         let timing_name = transitions.get(&prop).cloned();
         match value {
@@ -518,7 +585,7 @@ fn mount(scene: &Rc<RefCell<Scene>>, t: &Table, parent: genoma_scene::NodeId) ->
     }
 
     for child in t.sequence_values::<Table>() {
-        mount(scene, &child?, node)?;
+        mount(scene, handlers, &child?, node)?;
     }
     Ok(())
 }

@@ -8,7 +8,8 @@ use smithay_client_toolkit::reexports::calloop::{LoopHandle, RegistrationToken, 
 
 use genoma_render::{Renderer, SurfaceId};
 use genoma_scene::Scene;
-use genoma_script::SurfaceSpec;
+use genoma_scene::NodeId;
+use genoma_script::{Input, SurfaceSpec};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
@@ -66,6 +67,13 @@ pub struct App {
     effect: Option<ExtBackgroundEffectSurfaceV1>,
     /// The blur shapes last sent, so the region is set only when they move.
     blurred: Vec<[i32; 5]>,
+    /// The input rectangles last sent, for the same reason; `None` until the
+    /// first is sent, because Wayland's default is the whole surface.
+    inputs: Option<Vec<[i32; 4]>>,
+    /// Where pointer input goes: the script's dispatcher.
+    input: Option<Box<dyn FnMut(NodeId, Input)>>,
+    hovered: Option<NodeId>,
+    pressed: Option<NodeId>,
 
     renderer: Option<Renderer>,
     scene: Option<Rc<RefCell<Scene>>>,
@@ -107,6 +115,10 @@ impl App {
             effects: BackgroundEffectState::new(&globals, &qh),
             effect: None,
             blurred: Vec::new(),
+            inputs: None,
+            input: None,
+            hovered: None,
+            pressed: None,
             compositor,
             layer_shell,
             viewporter,
@@ -149,6 +161,17 @@ impl App {
         }
         let _ = &app.globals;
         (app, queue)
+    }
+
+    /// Where pointer input is delivered.
+    pub fn on_input(&mut self, f: impl FnMut(NodeId, Input) + 'static) {
+        self.input = Some(Box::new(f));
+    }
+
+    fn deliver(&mut self, node: NodeId, input: Input) {
+        if let Some(f) = self.input.as_mut() {
+            f(node, input);
+        }
     }
 
     pub fn connection(&self) -> Connection {
@@ -326,6 +349,23 @@ impl App {
             }
             self.blurred = shapes;
         }
+        // The input region: only what takes the pointer. The rest of the
+        // surface lets it through to the windows below.
+        let inputs: Vec<[i32; 4]> = scene
+            .borrow()
+            .input_rects()
+            .iter()
+            .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
+            .collect();
+        if self.inputs.as_ref() != Some(&inputs) {
+            if let Ok(region) = Region::new(&self.compositor) {
+                for &[x, y, w, h] in &inputs {
+                    region.add(x, y, w, h);
+                }
+                surface.set_input_region(Some(region.wl_region()));
+            }
+            self.inputs = Some(inputs);
+        }
         // The scene's own record of this change is consumed by this frame.
         scene.borrow_mut().take_dirty();
 
@@ -480,8 +520,57 @@ impl SeatHandler for App {
 }
 
 impl PointerHandler for App {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, _: &[PointerEvent]) {
-        // Input reaches the interface in M3.
+    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+        use smithay_client_toolkit::seat::pointer::PointerEventKind as K;
+        for event in events {
+            log::trace!("pointer {:?} at {:?}", event.kind, event.position);
+            let Some(scene) = self.scene.clone() else { return };
+            let (x, y) = (event.position.0 as f32, event.position.1 as f32);
+            let hit = match event.kind {
+                K::Leave { .. } => None,
+                _ => scene.borrow().hit_test(x, y),
+            };
+            if hit != self.hovered {
+                if let Some(old) = self.hovered.take() {
+                    self.deliver(old, Input::Hover(false));
+                }
+                if let Some(new) = hit {
+                    self.deliver(new, Input::Hover(true));
+                }
+                self.hovered = hit;
+            }
+            match event.kind {
+                K::Press { button, .. } => {
+                    self.pressed = hit;
+                    if let Some(node) = hit {
+                        self.deliver(node, Input::Press(button));
+                    }
+                }
+                K::Release { button, .. } => {
+                    if let Some(node) = hit {
+                        self.deliver(node, Input::Release(button));
+                        if self.pressed == Some(node) {
+                            self.deliver(node, Input::Click(button));
+                        }
+                    }
+                    self.pressed = None;
+                }
+                K::Axis { horizontal, vertical, .. } => {
+                    let Some(node) = hit else { continue };
+                    // A wheel speaks in steps of 120; a touchpad in logical
+                    // distance, and only when it speaks at all.
+                    let step = |a: &smithay_client_toolkit::seat::pointer::AxisScroll| {
+                        if a.value120 != 0 { a.value120 as f64 / 120.0 } else { a.absolute }
+                    };
+                    let (dx, dy) = (step(&horizontal), step(&vertical));
+                    if dx != 0.0 || dy != 0.0 {
+                        self.deliver(node, Input::Wheel(dx, dy));
+                    }
+                }
+                K::Leave { .. } => self.pressed = None,
+                _ => {}
+            }
+        }
     }
 }
 
