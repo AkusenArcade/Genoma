@@ -990,6 +990,7 @@ dependencies = [
  "genoma-services",
  "log",
  "notify",
+ "rustix",
  "smithay-client-toolkit",
 ]
 
@@ -1047,6 +1048,7 @@ dependencies = [
  "futures-util",
  "genoma-core",
  "jiff",
+ "libc",
  "log",
  "pipewire",
  "serde_json",

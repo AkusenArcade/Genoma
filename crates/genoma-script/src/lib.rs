@@ -13,7 +13,9 @@ use std::{
     rc::Rc,
 };
 
+mod auth;
 pub mod dbus;
+mod greetd;
 pub mod io;
 
 use genoma_core::{
@@ -789,6 +791,8 @@ impl Script {
         g.set("file", lua.create_function(move |_, t: Table| io::file(&host, t))?)?;
         let host = self.host.clone();
         g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
+        let host = self.host.clone();
+        g.set("greetd", lua.create_function(move |_, t: Table| greetd::connect(&host, t))?)?;
         let dbus_table = lua.create_table()?;
         let get_dbus = {
             let (host, cell) = (self.host.clone(), self.dbus.clone());
@@ -807,8 +811,13 @@ impl Script {
         dbus_table.set("get", lua.create_function(move |_, t: Table| dbus::get_from(&f()?, t))?)?;
         let f = get_dbus.clone();
         dbus_table.set("set", lua.create_function(move |_, t: Table| dbus::set_from(&f()?, t))?)?;
-        let f = get_dbus;
+        let f = get_dbus.clone();
         dbus_table.set("watch", lua.create_function(move |_, t: Table| dbus::watch_from(&f()?, t))?)?;
+        // g.pam.start { … }: PAM, through the same channel into the loop.
+        let pam_table = lua.create_table()?;
+        let f = get_dbus;
+        pam_table.set("start", lua.create_function(move |_, t: Table| auth::start(&f()?, t))?)?;
+        g.set("pam", pam_table)?;
         // g.dbus.variant("y", 2): a value with the type it takes in a `v`.
         dbus_table.set(
             "variant",

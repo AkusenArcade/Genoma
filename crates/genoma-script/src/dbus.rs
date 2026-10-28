@@ -46,6 +46,8 @@ pub enum Dyn {
 pub struct Delivery {
     pub id: u64,
     pub result: Result<Vec<Dyn>, String>,
+    /// The last for this callback: it is dropped after.
+    pub last: bool,
 }
 
 fn err(message: impl Into<String>) -> mlua::Error {
@@ -316,7 +318,7 @@ impl Dbus {
         // Each load has its own Luau state: the callback's own.
         let lua = f.weak_lua().upgrade();
         let lua = &lua;
-        if once {
+        if once || delivery.last {
             self.waiting.borrow_mut().remove(&delivery.id);
         }
         let result = match delivery.result {
@@ -335,6 +337,12 @@ impl Dbus {
         if let Err(e) | Ok(Err(e)) = result {
             log::error!("g.dbus: {e}");
         }
+    }
+
+    /// A number for `f`, called with each delivery's values until the last
+    /// (`g.pam` and the like, which share this channel into the loop).
+    pub(crate) fn listen(self: &Rc<Self>, f: Function) -> (u64, Sender<Delivery>) {
+        (self.wait(f, false), self.sender.clone())
     }
 
     /// A number for `f`, dropped with the load that asked.
@@ -358,7 +366,7 @@ impl Dbus {
             let result = work.await;
             match id {
                 Some(id) => {
-                    let _ = sender.send(Delivery { id, result });
+                    let _ = sender.send(Delivery { id, result, last: true });
                 }
                 None => {
                     if let Err(e) = result {
@@ -495,7 +503,7 @@ pub fn watch_from(dbus: &Rc<Dbus>, t: Table) -> mlua::Result<Watch> {
             while let Some(message) = stream.next().await {
                 let Ok(message) = message else { continue };
                 if let Ok(args) = arguments(&message) {
-                    let _ = out.send(Delivery { id, result: Ok(args) });
+                    let _ = out.send(Delivery { id, result: Ok(args), last: false });
                 }
             }
             Ok(())

@@ -18,3 +18,4 @@ accesskit = "0.25"
 accesskit_unix = "0.24"
 notify = "8"
 smithay-client-toolkit.workspace = true
+rustix = { version = "1.1", features = ["termios", "stdio"] }

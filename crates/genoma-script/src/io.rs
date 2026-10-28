@@ -64,7 +64,7 @@ fn call(f: &Function, what: &str, args: impl IntoLuaMulti) {
 /// `~/` is the home directory, as in Bioma's paths, and a leading `$NAME`
 /// that variable (`$XDG_RUNTIME_DIR/…`, `$NIRI_SOCKET`): the sandbox gives
 /// Luau no environment of its own.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         return PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest);
     }
@@ -77,14 +77,14 @@ fn expand(path: &str) -> PathBuf {
 }
 
 /// The loop's sources a block holds, and what else stopping it means.
-struct Stop {
+pub(crate) struct Stop {
     host: HostRef,
     tokens: RefCell<Vec<RegistrationToken>>,
-    also: RefCell<Option<Box<dyn FnOnce()>>>,
+    pub(crate) also: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl Stop {
-    fn new(host: &HostRef) -> Rc<Stop> {
+    pub(crate) fn new(host: &HostRef) -> Rc<Stop> {
         let stop = Rc::new(Stop { host: host.clone(), tokens: RefCell::default(), also: RefCell::default() });
         // Owned by the load: the next one stops it.
         let s = stop.clone();
@@ -92,11 +92,11 @@ impl Stop {
         stop
     }
 
-    fn hold(&self, token: Option<RegistrationToken>) {
+    pub(crate) fn hold(&self, token: Option<RegistrationToken>) {
         self.tokens.borrow_mut().extend(token);
     }
 
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         for token in self.tokens.borrow_mut().drain(..) {
             self.host.remove(token);
         }

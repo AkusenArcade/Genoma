@@ -202,12 +202,30 @@ was not caught in its six seconds.
 
 ### 8. Greeter and PAM
 
-- [ ] greetd IPC: create a session, answer its prompts, start it. Checked
+- [x] greetd IPC: create a session, answer its prompts, start it. Checked
       against a stand-in greetd socket, never the real greeter (never
       restart greetd from inside the session).
-- [ ] PAM: a direct libpam binding (§12 question 4), the conversation
+- [x] PAM: a direct libpam binding (§12 question 4), the conversation
       answered from Luau. **Akusen checks this one:** it asks for his
       password.
+
+*Built 2026-10-28,* to what Bioma's `greeter.qml` and `lock.qml` use.
+- **PAM:** `pam_start_confdir`, `pam_authenticate`, `pam_acct_mgmt`,
+  `pam_end`, `pam_strerror` and the conversation, so Bioma's own
+  `assets/pam/bioma-lock` is read from its directory. It blocks, so it runs
+  on a thread; prompts wait for `auth:respond`, as Quickshell's
+  `PamContext.respond`. `g.pam.start { service, directory, user, on_prompt,
+  on_message, on_done }`, and `genoma pam [service] [directory]` from a
+  terminal. A wrong password: `failure` after PAM's 2 s delay, from the
+  command and from Luau; a missing service: `error` at once.
+- **greetd:** `g.greetd { on_auth_message, on_ready, on_launched,
+  on_failure, on_error }` with `create_session`, `respond`,
+  `start_session`, `cancel_session`; length-prefixed JSON on
+  `$GREETD_SOCK`, replies read through the loop. Against a stand-in greetd
+  (scratchpad `fake-greetd.py`): a wrong password, `failure`, cancel, a new
+  session, the right one, `ready`, `start_session`, `launched`, and the six
+  requests it received were the ones meant.
+- [ ] **Akusen:** the right password through `genoma pam`.
 
 ### 9. Tray and polkit
 

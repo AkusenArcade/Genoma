@@ -47,6 +47,7 @@ fn main() {
     match arg.as_deref() {
         Some("types") => print!("{}", genoma_scene::luau_definitions()),
         Some("probe") => probe(),
+        Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         other => run(PathBuf::from(other.unwrap_or("examples/clock"))),
     }
 }
@@ -257,6 +258,40 @@ impl genoma_script::io::Host for LoopHost {
             .ok()?;
         Some(sender)
     }
+}
+
+/// `genoma pam [service] [directory]`: one authentication of the current
+/// user, the answers read from the terminal without echo, and only the
+/// outcome printed. Bioma's lock screen is `bioma-lock` in its `assets/pam`.
+fn pam_check(service: Option<String>, directory: Option<String>) {
+    use genoma_services::pam::{Event, authenticate};
+    let service = service.unwrap_or_else(|| "bioma-lock".into());
+    let user = std::env::var("USER").unwrap_or_default();
+    let (answers, receiver) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    let mut events = |event: Event| match event {
+        Event::Prompt { message, echo } => {
+            eprint!("{message}");
+            let stdin = rustix::stdio::stdin();
+            // Without echo for a secret, when there is a terminal to ask.
+            let saved = rustix::termios::tcgetattr(stdin).ok();
+            if let (Some(t), false) = (&saved, echo) {
+                let mut quiet = t.clone();
+                quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
+                let _ = rustix::termios::tcsetattr(stdin, rustix::termios::OptionalActions::Now, &quiet);
+            }
+            let mut line = String::new();
+            let read = std::io::stdin().read_line(&mut line);
+            if let (Some(t), false) = (&saved, echo) {
+                let _ = rustix::termios::tcsetattr(stdin, rustix::termios::OptionalActions::Now, t);
+                eprintln!();
+            }
+            let _ = answers.send(read.ok().map(|_| line.trim_end_matches(['\n', '\r']).to_owned()));
+        }
+        Event::Message { message, error } => eprintln!("{}{message}", if error { "error: " } else { "" }),
+        Event::Done(outcome) => println!("pam {service} for {user}: {} in {:.1} s", outcome.name(), started.elapsed().as_secs_f64()),
+    };
+    authenticate(&service, directory.as_deref(), &user, &mut events, &receiver);
 }
 
 /// Every service, without a surface: what each says, as it changes.
