@@ -13,6 +13,7 @@ use std::{
     rc::Rc,
 };
 
+pub mod dbus;
 pub mod io;
 
 use genoma_core::{
@@ -259,6 +260,9 @@ pub struct Script {
     /// sockets, timers): stopped when the next load is mounted.
     io_scope: Option<Scope>,
     host: io::HostRef,
+    /// `g.dbus`'s callbacks and channel, made on first use and kept across
+    /// loads.
+    dbus: Rc<RefCell<Option<Rc<dbus::Dbus>>>>,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
     services: Services,
     wanted: Rc<RefCell<Vec<&'static str>>>,
@@ -285,6 +289,7 @@ impl Script {
             scope: None,
             io_scope: None,
             host,
+            dbus: Rc::default(),
             states: Rc::default(),
             services,
             wanted: Rc::default(),
@@ -447,6 +452,37 @@ impl Script {
         g.set("file", lua.create_function(move |_, t: Table| io::file(&host, t))?)?;
         let host = self.host.clone();
         g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
+        let dbus_table = lua.create_table()?;
+        let get_dbus = {
+            let (host, cell) = (self.host.clone(), self.dbus.clone());
+            move || -> mlua::Result<Rc<dbus::Dbus>> {
+                if let Some(d) = cell.borrow().as_ref() {
+                    return Ok(d.clone());
+                }
+                let d = dbus::Dbus::new(&host)?;
+                *cell.borrow_mut() = Some(d.clone());
+                Ok(d)
+            }
+        };
+        let f = get_dbus.clone();
+        dbus_table.set("call", lua.create_function(move |_, t: Table| dbus::call_from(&f()?, t))?)?;
+        let f = get_dbus.clone();
+        dbus_table.set("get", lua.create_function(move |_, t: Table| dbus::get_from(&f()?, t))?)?;
+        let f = get_dbus.clone();
+        dbus_table.set("set", lua.create_function(move |_, t: Table| dbus::set_from(&f()?, t))?)?;
+        let f = get_dbus;
+        dbus_table.set("watch", lua.create_function(move |_, t: Table| dbus::watch_from(&f()?, t))?)?;
+        // g.dbus.variant("y", 2): a value with the type it takes in a `v`.
+        dbus_table.set(
+            "variant",
+            lua.create_function(|lua, (signature, value): (String, LuaValue)| {
+                let t = lua.create_table()?;
+                t.raw_set("__dbus_signature", signature)?;
+                t.raw_set("__dbus_value", value)?;
+                Ok(t)
+            })?,
+        )?;
+        g.set("dbus", dbus_table)?;
         for kind in ["box", "capsule", "text", "icon", "thread", "emitter", "each"] {
             g.set(
                 kind,

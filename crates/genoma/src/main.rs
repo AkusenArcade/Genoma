@@ -154,7 +154,7 @@ impl Sources {
 impl Sources {
     fn bus(&mut self) -> Option<Bus> {
         if self.bus.is_none() {
-            match Bus::start() {
+            match Bus::shared() {
                 Ok(bus) => self.bus = Some(bus),
                 Err(e) => log::warn!("no bus thread: {e}"),
             }
@@ -188,6 +188,22 @@ impl genoma_script::io::Host for LoopHost {
 
     fn remove(&self, token: RegistrationToken) {
         self.0.remove(token);
+    }
+
+    fn channel(
+        &self,
+        mut deliver: Box<dyn FnMut(genoma_script::dbus::Delivery)>,
+    ) -> Option<smithay_client_toolkit::reexports::calloop::channel::Sender<genoma_script::dbus::Delivery>> {
+        let (sender, receiver) = channel();
+        self.0
+            .insert_source(receiver, move |event, _, _| {
+                if let ChannelEvent::Msg(delivery) = event {
+                    deliver(delivery);
+                }
+            })
+            .map_err(|e| log::error!("channel: {e}"))
+            .ok()?;
+        Some(sender)
     }
 }
 

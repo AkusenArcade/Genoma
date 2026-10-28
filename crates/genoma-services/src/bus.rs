@@ -6,10 +6,11 @@
 //! The thread starts with the first service that needs a bus, and a bus is
 //! connected the first time a task asks for it.
 
-use std::future::Future;
+use std::{future::Future, sync::OnceLock};
 
 use zruntime::{SharedRuntime, lock::OnceCell};
 
+static THREAD: OnceLock<Bus> = OnceLock::new();
 static SYSTEM: OnceCell<zbus::Connection> = OnceCell::new();
 static SESSION: OnceCell<zbus::Connection> = OnceCell::new();
 
@@ -21,7 +22,16 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn start() -> std::io::Result<Bus> {
+    /// The process's bus thread, started on the first call.
+    pub fn shared() -> std::io::Result<Bus> {
+        if let Some(bus) = THREAD.get() {
+            return Ok(bus.clone());
+        }
+        let bus = Bus::start()?;
+        Ok(THREAD.get_or_init(|| bus).clone())
+    }
+
+    fn start() -> std::io::Result<Bus> {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::Builder::new().name("genoma-bus".into()).spawn(move || {
             // The runtime of this thread: connections built in its tasks
@@ -39,6 +49,11 @@ impl Bus {
         })?;
         let runtime = receiver.recv().map_err(|_| std::io::Error::other("the bus thread did not start"))??;
         Ok(Bus { runtime })
+    }
+
+    /// Runs `work` on the bus thread until it ends or the task is dropped.
+    pub fn task<T: Send + 'static>(&self, name: &'static str, work: impl Future<Output = T> + Send + 'static) -> zruntime::Task<T, zruntime::Shared> {
+        self.runtime.spawn(name, work)
     }
 
     /// Runs `work` on the bus thread. A failure is logged under `name`: a

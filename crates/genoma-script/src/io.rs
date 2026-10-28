@@ -41,6 +41,12 @@ pub trait Host {
     /// loop owns `fd` and closes it then.
     fn readable(&self, fd: OwnedFd, ready: Box<dyn FnMut(BorrowedFd<'_>) -> bool>) -> Option<RegistrationToken>;
     fn remove(&self, token: RegistrationToken);
+    /// A channel into the loop: what is sent from the bus thread is handed
+    /// to `deliver` on the main thread.
+    fn channel(
+        &self,
+        deliver: Box<dyn FnMut(crate::dbus::Delivery)>,
+    ) -> Option<calloop::channel::Sender<crate::dbus::Delivery>>;
 }
 
 pub type HostRef = Rc<dyn Host>;

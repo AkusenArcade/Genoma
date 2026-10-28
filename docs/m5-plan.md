@@ -54,7 +54,7 @@ Bioma writes about 39 services of its own; they need these, not Rust:
 - [x] `g.process`: spawn, stdout lines as they come, exit status.
 - [x] `g.file`: read, watch, write atomically (`FileView`'s counterpart).
 - [x] `g.socket`: Unix sockets, line-delimited.
-- [ ] `g.dbus`: call, get and set properties, watch signals, either bus.
+- [x] `g.dbus`: call, get and set properties, watch signals, either bus.
 - [x] `g.timer`: a declared interval, for what only polling can give.
 
 *Built 2026-10-28, all but D-Bus.* None owns a thread: the script asks the
@@ -73,6 +73,19 @@ lines 0.3 s apart in order; stdin through `cat`; niri's socket answering
 `"FocusedOutput"`; the watched file following a write, an atomic replace and
 a removal on screen; `f:write` leaving no temporary file; a `sleep` killed
 by a reload and another by killing Genoma, no zombie.
+
+*`g.dbus`, built 2026-10-28.* `call`, `get`, `set` and `watch`, on the bus
+thread. Arguments are Luau values with the signature the method wants
+(`"susssasa{sv}i"`); inside a `v` the type is guessed from the value, or
+given with `g.dbus.variant("y", 2)`. Replies and signals come back as Luau
+values, to the callback they were asked for, by its number: `reply(true,
+…)` or `reply(false, error)`. A watch is a task on the bus thread, ended when
+its load is. Checked on the real buses: `ListNames`, `GetNameOwner` (the
+owner `busctl` gives), the bus's own `NameHasNoOwner` error, the portal's
+nested `a{sa{sv}}`, power-profiles' `Profiles` read and `ActiveProfile`
+written (and put back), `NameOwnerChanged` watched, once per name after three
+reloads. A `Notify` with `as` and `a{sv}` hints, sent on a private bus and
+read back with `dbus-monitor`, arrived as written, the urgency as a byte.
 
 ### 3. Network
 

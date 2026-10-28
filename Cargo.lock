@@ -962,6 +962,7 @@ name = "genoma-script"
 version = "0.0.0"
 dependencies = [
  "calloop",
+ "futures-util",
  "genoma-core",
  "genoma-scene",
  "genoma-services",
@@ -969,6 +970,8 @@ dependencies = [
  "mlua",
  "rustix",
  "serde_json",
+ "zbus 6.1.0",
+ "zruntime",
 ]
 
 [[package]]
