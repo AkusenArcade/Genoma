@@ -609,6 +609,37 @@ in drawing them faster. The ways past ⅓ are:
 That choice is Akusen's. The laptop, where the stutter is, has not been
 measured yet.
 
+**M2, after Akusen's side-by-side look, 2026-10-28.** He watched the two
+membranes stacked on HDMI-A-1 and listed what differed:
+- the workspace bars touching;
+- the beat too slow and too small;
+- the liquid's wave too high;
+- the satellite too small;
+- the clock's paddings, and the window title's right padding.
+
+Each was corrected from Bioma's QML and checked by pixel. Until "now they
+are the same", the window title had been hidden in Genoma by a wrong
+assumption. With it shown in both, its loader runs while a window is
+working, and two series of 60 s runs gave:
+
+| | series 1 | series 2 |
+|---|---|---|
+| Genoma, whole process | 1.85% | 1.83% |
+| the membrane in Bioma (with − without) | 5.60% | 5.74% |
+| **shell CPU ratio** | **0.33** | **0.32** |
+| with niri's share added | 0.40 | 0.38 |
+| Genoma PSS / Bioma PSS | 27 / 341 MB | 27 / 336 MB |
+
+**The shell-CPU gate passes, narrowly.** The ratio depends on content.
+Without the title and its loader it was 0.47. Genoma's advantage grows with
+every slow mover, because Bioma redraws on every refresh while any animation
+runs, and Genoma redraws only for a quarter pixel of movement. With niri's
+share added, the ratio is 0.38–0.40, since the compositor's work is the same
+in both. Memory is a twelfth. Frame time is 0.43 ms at p99.
+
+Still to measure: the RTX 3060 laptop, where the stutter that started all
+this is.
+
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
   region it touched. That costs nothing at this size; it moves to M2, where a
