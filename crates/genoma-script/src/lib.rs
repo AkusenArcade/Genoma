@@ -21,7 +21,7 @@ use genoma_core::{
     timing::{self, Curve, Timing},
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
-use genoma_services::{clock::Clock, niri::Niri, power::Power, vitals::Vitals};
+use genoma_services::{clock::Clock, network::Network, niri::Niri, power::Power, vitals::Vitals};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
 /// Pointer input for a node, as the surface saw it.
@@ -140,6 +140,7 @@ pub struct Services {
     pub niri: Option<Rc<Niri>>,
     pub vitals: Rc<Vitals>,
     pub power: Rc<Power>,
+    pub network: Rc<Network>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -234,6 +235,83 @@ impl UserData for PowerRef {
         // power.profile.
         methods.add_method("set_profile", |_, this, profile: String| {
             this.0.set_profile(profile);
+            Ok(())
+        });
+    }
+}
+
+struct NetworkRef(Rc<Network>);
+
+impl UserData for NetworkRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // "unknown", "none", "portal", "limited", "full"
+        fields.add_field_method_get("connectivity", |_, this| Ok(this.0.connectivity.get()));
+        fields.add_field_method_get("can_check", |_, this| Ok(this.0.can_check.get()));
+        fields.add_field_method_get("wifi_enabled", |_, this| Ok(this.0.wifi_enabled.get()));
+        fields.add_field_method_get("wifi_hardware", |_, this| Ok(this.0.wifi_hardware.get()));
+        fields.add_field_method_get("failure", |_, this| Ok(this.0.failure.get()));
+        // network.devices → { { interface, kind, state, connected, carrier,
+        // speed, connection }, … }, the connected ones first.
+        fields.add_field_method_get("devices", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, d) in this.0.devices.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("interface", d.interface)?;
+                t.set("kind", d.kind)?;
+                t.set("state", d.state)?;
+                t.set("connected", d.connected)?;
+                t.set("carrier", d.carrier)?;
+                t.set("speed", d.speed)?;
+                t.set("connection", d.connection)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // network.networks → { { ssid, strength 0…1, secured, connected,
+        // frequency, known }, … }: the connected one first, then by strength.
+        fields.add_field_method_get("networks", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, n) in this.0.networks.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("ssid", n.ssid)?;
+                t.set("strength", n.strength)?;
+                t.set("secured", n.secured)?;
+                t.set("connected", n.connected)?;
+                t.set("frequency", n.frequency)?;
+                t.set("known", n.known)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("set_wifi_enabled", |_, this, on: bool| {
+            this.0.set_wifi_enabled(on);
+            Ok(())
+        });
+        // network:set_scanning(true) while a list is on screen, false after.
+        methods.add_method("set_scanning", |_, this, on: bool| {
+            this.0.set_scanning(on);
+            Ok(())
+        });
+        methods.add_method("check_connectivity", |_, this, ()| {
+            this.0.check_connectivity();
+            Ok(())
+        });
+        // network:join("ssid") through its saved profile, or
+        // network:join("ssid", "password") with a new one.
+        methods.add_method("join", |_, this, (ssid, password): (String, Option<String>)| {
+            this.0.join(ssid, password);
+            Ok(())
+        });
+        methods.add_method("leave", |_, this, ()| {
+            this.0.leave();
+            Ok(())
+        });
+        methods.add_method("forget", |_, this, ssid: String| {
+            this.0.forget(ssid);
             Ok(())
         });
     }
@@ -597,12 +675,13 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
                         "niri" => "niri",
                         "power" => "power",
+                        "network" => "network",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -615,6 +694,7 @@ impl Script {
                             None => return Err(err("niri's socket is not available")),
                         },
                         "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
+                        "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

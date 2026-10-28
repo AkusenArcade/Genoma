@@ -51,6 +51,14 @@ impl Bus {
         Ok(Bus { runtime })
     }
 
+    /// A pause on the bus thread, for a task gathering a burst of signals.
+    pub fn sleep(&self, duration: std::time::Duration) -> impl Future<Output = ()> + Send + 'static {
+        let sleep = self.runtime.sleep(duration);
+        async move {
+            sleep.await;
+        }
+    }
+
     /// Runs `work` on the bus thread until it ends or the task is dropped.
     pub fn task<T: Send + 'static>(&self, name: &'static str, work: impl Future<Output = T> + Send + 'static) -> zruntime::Task<T, zruntime::Shared> {
         self.runtime.spawn(name, work)

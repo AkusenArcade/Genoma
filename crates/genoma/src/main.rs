@@ -65,7 +65,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -80,7 +80,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power"] {
+        for service in ["clock", "vitals", "niri", "power", "network"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -116,6 +116,19 @@ impl Sources {
                         })
                         .expect("power channel");
                     self.services.power.start(&bus, post);
+                }
+                "network" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let network = self.services.network.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                network.apply(update);
+                            }
+                        })
+                        .expect("network channel");
+                    self.services.network.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -237,6 +250,40 @@ fn probe() {
     });
     let p = services.power.clone();
     Effect::new(move || println!("power   profile {:?} of {:?}", p.profile.get(), p.profiles.get()));
+    let n = services.network.clone();
+    Effect::new(move || {
+        println!(
+            "network connectivity {} (check {}), wifi {} (hardware {}){}",
+            n.connectivity.get(),
+            n.can_check.get(),
+            n.wifi_enabled.get(),
+            n.wifi_hardware.get(),
+            match n.failure.get() {
+                f if f.is_empty() => String::new(),
+                f => format!(", failed: {f}"),
+            }
+        )
+    });
+    let n = services.network.clone();
+    Effect::new(move || {
+        for d in n.devices.get() {
+            println!(
+                "network device {} {} {} connected {} carrier {} {} Mb/s {:?}",
+                d.interface, d.kind, d.state, d.connected, d.carrier, d.speed, d.connection
+            );
+        }
+    });
+    let n = services.network.clone();
+    Effect::new(move || {
+        let networks = n.networks.get();
+        println!("network {} networks seen", networks.len());
+        for w in networks.iter().take(5) {
+            println!(
+                "network   {:?} {:.2} secured {} connected {} {} MHz known {}",
+                w.ssid, w.strength, w.secured, w.connected, w.frequency, w.known
+            );
+        }
+    });
     let mut sources = Sources { services, niri_stream: stream, bus: None, started: Vec::new() };
     sources.start(|_| true, &handle);
     event_loop.run(None, &mut (), |_| {}).expect("event loop");

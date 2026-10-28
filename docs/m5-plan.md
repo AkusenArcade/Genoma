@@ -89,9 +89,28 @@ read back with `dbus-monitor`, arrived as written, the urgency as a byte.
 
 ### 3. Network
 
-- [ ] NetworkManager: connectivity, the primary connection, Wi-Fi devices
+- [x] NetworkManager: connectivity, the primary connection, Wi-Fi devices
       (state, strength, SSID, access points on scan) and wired devices
       (carrier, speed). Checked against `nmcli`.
+
+*Built 2026-10-28,* to what Bioma's `services/Network.qml` reads from
+`Quickshell.Networking`: devices (kind, state, carrier, speed, profile), the
+radio's soft and hardware switches, the networks a Wi-Fi device sees (one
+per SSID, the strongest access point, hidden ones left out, whether a saved
+profile knows it), connectivity and its check, the last failure's reason;
+and the actions: the radio, a scanner while a list is open, join with a
+saved profile or a password, leave, forget. One subscription to everything
+NetworkManager signals; a burst is given 60 ms, then the state is read
+again and posted whole.
+- The probe matched `nmcli`: `full`, eno1 with carrier at 2500 Mb/s on
+  "Wired connection 1", wlan0 unavailable with its radio off.
+- From Luau, the radio on and the scanner started: wlan0 went to
+  `disconnected` and the three named networks `nmcli device wifi list`
+  shows came through (SoToUniFi's two access points as one); then the radio
+  off again. No saved Wi-Fi profile, so nothing joined.
+- At rest the bus thread woke 0 times in 30 s.
+- [ ] **On the laptop, with his Wi-Fi:** join with and without a password,
+      the failure reason for a wrong one, leave, forget.
 
 ### 4. Media
 

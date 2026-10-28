@@ -10,6 +10,7 @@
 pub mod bus;
 pub mod clock;
 pub mod icons;
+pub mod network;
 pub mod niri;
 pub mod power;
 pub mod vitals;
