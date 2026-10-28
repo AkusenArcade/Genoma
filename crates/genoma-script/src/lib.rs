@@ -372,7 +372,7 @@ impl Script {
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
         let g = lua.create_table()?;
-        for kind in ["box", "capsule", "text", "icon", "thread"] {
+        for kind in ["box", "capsule", "text", "icon", "thread", "emitter"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -561,6 +561,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "text" => Kind::Text,
         "icon" => Kind::Icon,
         "thread" => Kind::Thread,
+        "emitter" => Kind::Emitter,
         other => return Err(err(format!("unknown node {other}"))),
     })
 }

@@ -6,6 +6,7 @@
 -- so the thread bends while the capsule moves and settles after it.
 local g = require("@genoma")
 local theme = require("theme")
+local vitals = require("@genoma/vitals")
 
 g.timing {
     -- Cell.qml's grow, on easeOpenFlat; and Timing.close on easeClose.
@@ -99,6 +100,27 @@ return g.surface {
                     bud = function() return if budded.value then "bud_open" else "bud_close" end,
                 },
             },
+        },
+        -- Particles along the link, as many as the processor is busy: a
+        -- flow with data behind it (PRD §8.3), carried from the first capsule
+        -- to the second, still when nothing is linked.
+        g.emitter {
+            overlay = true,
+            width = W,
+            height = H,
+            from_x = A_X + 60,
+            from_y = ROW,
+            to_x = function() return bX() - 60 end,
+            to_y = ROW,
+            -- Along the thread's own curve, on the thread's own springs.
+            bend_x = function() return (A_X + 60 + bX() - 60) / 2 end,
+            bend_y = ROW + 36,
+            transition = { to_x = "travel", bend_x = "sway" },
+            rate = function() return if linked.value then vitals.cpu * 300 else 0 end,
+            lifetime = 1.2,
+            spread = 0.5,
+            particle_size = 3,
+            fill = theme.primary,
         },
         -- The thread last, so its nodes show whole over the capsules' rims.
         g.thread {

@@ -71,14 +71,26 @@ documents, not here.
 
 ### 4. Particles with data behind them (§8.3, §5.4)
 
-- [ ] An `emitter` node with properties that bind like any other: rate,
+*Built 2026-10-28, `examples/living` (the link's flow).* One correction to
+the plan: positions are a function of age and seed on the GPU, but the
+births are the CPU's, in a ring. A position from index and time alone
+would make particles in flight jump when the rate changes, and freeze in
+mid-air at rate 0. The CPU writes one float when a particle is born and
+nothing else.
+- Ballistic, or carried to a target along the thread's own Bézier.
+- In the example the rate is the processor's load × 300 while linked.
+- Measured with the flow running: 120 frames/s (the particles are fast),
+  2.05% of a core, 30 MB, render p99 177 µs.
+- After unlinking, once the last life is over: 0 frames in 5 s.
+
+- [x] An `emitter` node with properties that bind like any other: rate,
       lifetime, speed, spread, size, colour, and gravity or attraction to a
       point.
-- [ ] Particles are **stateless on the GPU**: each one's position is a
+- [x] Particles are **stateless on the GPU**: each one's position is a
       function of its index, its seed and the time, computed in the vertex
       shader. The CPU sends only the emitter's parameters, and only when they
       change. There is no compute pass and no particle buffer to update.
-- [ ] Frames are paced by the particles' speed, as the orbit is. At rate 0,
+- [x] Frames are paced by the particles' speed, as the orbit is. At rate 0,
       once the last particle's lifetime is over, it costs nothing.
 
 ### 5. Depth (§5.5, §8.4)

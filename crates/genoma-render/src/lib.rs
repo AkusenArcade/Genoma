@@ -23,8 +23,10 @@ use raw_window_handle::{
 
 mod gpu;
 mod image;
+mod particles;
 mod rect;
 
+pub use particles::{Emitter, EmitterParams};
 pub use rect::Rect;
 
 /// Fonts, shared by the main thread (which shapes text to lay it out) and the
@@ -92,6 +94,8 @@ pub struct DrawList {
     pub rects: Vec<Rect>,
     pub images: Vec<Image>,
     pub texts: Vec<Text>,
+    /// Drawn over the rects and images, under the text.
+    pub emitters: Vec<Emitter>,
 }
 
 /// A surface the render thread knows, named by the main thread.

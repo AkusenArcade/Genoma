@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
-use crate::{DrawList, Error, Fonts, SurfaceId, image, raw_handles, rect};
+use crate::{DrawList, Error, Fonts, SurfaceId, image, particles, raw_handles, rect};
 
 pub(crate) struct Gpu {
     instance: wgpu::Instance,
@@ -12,6 +12,7 @@ pub(crate) struct Gpu {
     fonts: Fonts,
     rects: Option<rect::Pipeline>,
     images: Option<image::Pipeline>,
+    particles: Option<particles::Pipeline>,
     text: Option<Text>,
     targets: HashMap<SurfaceId, Target>,
 }
@@ -92,6 +93,7 @@ impl Gpu {
             fonts,
             rects: None,
             images: None,
+            particles: None,
             text: None,
             targets: HashMap::new(),
         })
@@ -179,6 +181,8 @@ impl Gpu {
         rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects);
         let images = self.images.get_or_insert_with(|| image::Pipeline::new(&self.device, format));
         images.upload(&self.device, &self.queue, [width as f32, height as f32], &list.images);
+        let particles = self.particles.get_or_insert_with(|| particles::Pipeline::new(&self.device, format));
+        particles.upload(&self.device, &self.queue, [width as f32, height as f32], &list.emitters);
 
         let text = self.text.get_or_insert_with(|| {
             let cache = glyphon::Cache::new(&self.device);
@@ -253,6 +257,7 @@ impl Gpu {
             });
             rects.draw(&mut pass);
             images.draw(&mut pass);
+            particles.draw(&mut pass);
             if !list.texts.is_empty() {
                 if let Err(e) = text.renderer.render(&text.atlas, viewport, &mut pass) {
                     log::warn!("text: {e}");

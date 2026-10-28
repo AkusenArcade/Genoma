@@ -71,6 +71,13 @@ pub enum Prop {
     BendY,
     NodeSize,
     Bud,
+    Rate,
+    Lifetime,
+    Speed,
+    Spread,
+    Heading,
+    Gravity,
+    ParticleSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +164,13 @@ pub const PROPS: &[PropInfo] = &[
     p("bend_x", Prop::BendX, Ty::Number, true, "A thread's control point: where the curve is pulled toward. A spring on it makes the thread bend and settle."),
     p("bend_y", Prop::BendY, Ty::Number, true, "A thread's control point."),
     p("bud", Prop::Bud, Ty::Number, true, "Joined to the nearest capsule above by a smooth union this soft, logical units: a neck that narrows as it falls to 0 and parts (budding, and reabsorption back)."),
+    p("rate", Prop::Rate, Ty::Number, false, "An emitter's particles a second: bind it to the value it shows. At 0 the last ones finish their lives and then nothing runs."),
+    p("lifetime", Prop::Lifetime, Ty::Number, false, "Seconds a particle lives."),
+    p("speed", Prop::Speed, Ty::Number, false, "Logical units a second, for ballistic particles."),
+    p("spread", Prop::Spread, Ty::Number, false, "Degrees around the heading, ballistic; or how far carried particles sway."),
+    p("heading", Prop::Heading, Ty::Number, false, "Degrees clockwise from up: where ballistic particles go."),
+    p("gravity", Prop::Gravity, Ty::Number, false, "Logical units a second squared, downward."),
+    p("particle_size", Prop::ParticleSize, Ty::Number, false, "A particle's diameter, logical units."),
     p("node", Prop::NodeSize, Ty::Number, false, "A thread's nodes: discs this wide at its start and at its tip, in `color`. 0 is none."),
     p("crisp", Prop::Crisp, Ty::Bool, false, "A hairline: position and size rounded to whole physical pixels, never under one (Metrics.crisp)."),
     p("italic", Prop::Italic, Ty::Bool, false, "Text in the font's italic."),

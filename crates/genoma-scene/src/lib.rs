@@ -34,6 +34,8 @@ pub enum Kind {
     Icon,
     /// A quadratic Bézier with a width, grown along its length.
     Thread,
+    /// Particles born at a rate, from `from` toward a heading or to `to`.
+    Emitter,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -118,6 +120,10 @@ pub struct Node {
     path: [f32; 6],
     node_size: f32,
     bud: f32,
+    /// A key no other node in the process has: emitters are kept on the
+    /// shared GPU by it.
+    uid: u64,
+    emit: Emit,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -181,6 +187,8 @@ impl Node {
             path: [0.0; 6],
             node_size: 0.0,
             bud: 0.0,
+            uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            emit: Emit::default(),
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -241,6 +249,79 @@ fn from_components(like: &Value, x: &[f32]) -> Value {
     }
 }
 
+static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// An emitter's settings and its ring of births.
+#[derive(Clone, Debug)]
+struct Emit {
+    rate: f32,
+    lifetime: f32,
+    speed: f32,
+    spread: f32,
+    heading: f32,
+    gravity: f32,
+    size: f32,
+    target: bool,
+    /// A control point is set: carried particles follow the curve.
+    bend: bool,
+    /// When each slot's particle was born, seconds since the scene's epoch;
+    /// negative is an empty slot.
+    births: Vec<f32>,
+    cursor: usize,
+    /// Particles owed by the rate and not yet born.
+    owed: f32,
+    generation: u64,
+}
+
+impl Default for Emit {
+    fn default() -> Self {
+        Emit {
+            rate: 0.0,
+            lifetime: 1.0,
+            speed: 40.0,
+            spread: 30.0,
+            heading: 0.0,
+            gravity: 0.0,
+            size: 3.0,
+            target: false,
+            bend: false,
+            births: Vec::new(),
+            cursor: 0,
+            owed: 0.0,
+            generation: 0,
+        }
+    }
+}
+
+impl Emit {
+    /// Births owed since the last step, spread across it; whether any
+    /// particle is still alive at `now`.
+    fn step(&mut self, now: f32, dt: f32) -> bool {
+        let wanted = ((self.rate * self.lifetime).ceil() as usize + 1).max(1);
+        if self.births.len() < wanted && self.rate > 0.0 {
+            self.births.resize(wanted, -1.0);
+        }
+        if self.rate > 0.0 && !self.births.is_empty() {
+            self.owed += self.rate * dt;
+            let mut born = 0;
+            while self.owed >= 1.0 {
+                self.owed -= 1.0;
+                let at = now - self.owed / self.rate;
+                let n = self.births.len();
+                self.births[self.cursor % n] = at;
+                self.cursor = (self.cursor + 1) % n;
+                born += 1;
+            }
+            if born > 0 {
+                self.generation += 1;
+            }
+        } else {
+            self.owed = 0.0;
+        }
+        self.births.iter().any(|&b| b >= 0.0 && now - b < self.lifetime)
+    }
+}
+
 /// One node as assistive technology sees it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Accessible {
@@ -283,6 +364,9 @@ pub struct Scene {
     last_step: Option<Instant>,
     dirty: bool,
     icons: icons::Icons,
+    /// Particles' clock: their births and their age are seconds since this.
+    epoch: Instant,
+    now: f32,
     /// The blurred shapes as last drawn, logical units: x, y, width, height,
     /// radius.
     blur: Vec<[f32; 5]>,
@@ -303,6 +387,8 @@ impl Scene {
             last_step: None,
             dirty: true,
             icons: icons::Icons::default(),
+            epoch: Instant::now(),
+            now: 0.0,
             blur: Vec::new(),
         }
     }
@@ -454,7 +540,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Thread => Style { flex_shrink: 0.0, ..Style::default() },
+            Kind::Text | Kind::Icon | Kind::Thread | Kind::Emitter => Style { flex_shrink: 0.0, ..Style::default() },
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -660,12 +746,19 @@ impl Scene {
             Prop::Crisp => n.crisp = take!(flag),
             Prop::FromX => n.path[0] = take!(number),
             Prop::FromY => n.path[1] = take!(number),
-            Prop::BendX => n.path[2] = take!(number),
-            Prop::BendY => n.path[3] = take!(number),
-            Prop::ToX => n.path[4] = take!(number),
-            Prop::ToY => n.path[5] = take!(number),
+            Prop::BendX => (n.path[2], n.emit.bend) = (take!(number), true),
+            Prop::BendY => (n.path[3], n.emit.bend) = (take!(number), true),
+            Prop::ToX => (n.path[4], n.emit.target) = (take!(number), true),
+            Prop::ToY => (n.path[5], n.emit.target) = (take!(number), true),
             Prop::NodeSize => n.node_size = take!(number).max(0.0),
             Prop::Bud => n.bud = take!(number).max(0.0),
+            Prop::Rate => (n.emit.rate, mover) = (take!(number).max(0.0), true),
+            Prop::Lifetime => n.emit.lifetime = take!(number).max(0.05),
+            Prop::Speed => n.emit.speed = take!(number),
+            Prop::Spread => n.emit.spread = take!(number),
+            Prop::Heading => n.emit.heading = take!(number),
+            Prop::Gravity => n.emit.gravity = take!(number),
+            Prop::ParticleSize => n.emit.size = take!(number).max(0.5),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -705,7 +798,7 @@ impl Scene {
                 restyle = true;
             }
         }
-        let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0;
+        let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0 || n.kind == Kind::Emitter;
         if reshape {
             n.buffer = None;
             self.tree.mark_dirty(node).ok();
@@ -728,6 +821,8 @@ impl Scene {
     pub fn advance(&mut self, now: Instant, scale: f32) -> Motion {
         let dt = self.last_step.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.last_step = Some(now);
+        self.now = now.saturating_duration_since(self.epoch).as_secs_f32();
+        let clock = self.now;
 
         let animations = std::mem::take(&mut self.animations);
         let mut running = Vec::new();
@@ -823,6 +918,19 @@ impl Scene {
                 // The peak speed of a sinusoidal sway.
                 pace(std::f32::consts::PI * n.sway_range / n.sway * scale);
             }
+            if n.kind == Kind::Emitter {
+                // Alive while it emits, and after, until its last particle's
+                // life is over: then nothing runs.
+                if n.emit.step(clock, dt.min(0.25)) {
+                    let speed = if n.emit.target {
+                        let (dx, dy) = (n.path[4] - n.path[0], n.path[5] - n.path[1]);
+                        (dx * dx + dy * dy).sqrt() / n.emit.lifetime * 1.5
+                    } else {
+                        n.emit.speed.abs() + n.emit.gravity.abs() * n.emit.lifetime
+                    };
+                    pace(speed * scale);
+                }
+            }
             if n.pulse > 0.0 {
                 let interval = 60.0 / n.pulse;
                 n.beat = (n.beat + dt / interval).rem_euclid(1.0);
@@ -892,7 +1000,7 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
+        let mut out = Out { list: &mut list, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         list
@@ -934,6 +1042,8 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
 
 struct Out<'a> {
     list: &'a mut DrawList,
+    /// The particles' clock, as the last step left it.
+    now: f32,
     /// The nearest capsule above, as drawn: x, y, width, height, radius,
     /// logical units. A bud joins it.
     parent_shape: Option<[f32; 5]>,
@@ -1196,6 +1306,35 @@ fn collect(
                         bud_shape: [0.0; 4],
                     });
                 }
+            }
+        }
+        Kind::Emitter => {
+            let e = &n.emit;
+            if !e.births.is_empty() {
+                let to = if e.target { [n.path[4], n.path[5]] } else { [0.0, 0.0] };
+                out.list.emitters.push(genoma_render::Emitter {
+                    key: n.uid,
+                    generation: e.generation,
+                    births: Arc::new(e.births.clone()),
+                    params: genoma_render::EmitterParams {
+                        points: [
+                            (origin[0] + n.path[0]) * scale,
+                            (origin[1] + n.path[1]) * scale,
+                            (origin[0] + to[0]) * scale,
+                            (origin[1] + to[1]) * scale,
+                        ],
+                        motion: [out.now, e.lifetime, e.speed * scale, e.spread.to_radians()],
+                        shape: [e.heading.to_radians(), e.gravity * scale, e.size * scale, if e.target { 1.0 } else { 0.0 }],
+                        color: fade(n.fill),
+                        clip: out.clip,
+                        viewport: [0.0; 4],
+                        bend: if e.bend {
+                            [(origin[0] + n.path[2]) * scale, (origin[1] + n.path[3]) * scale, 1.0, 0.0]
+                        } else {
+                            [0.0; 4]
+                        },
+                    },
+                });
             }
         }
         Kind::Icon => {
