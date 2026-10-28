@@ -570,6 +570,26 @@ impl Scene {
         self.dirty = true;
     }
 
+    /// `node` and everything under it.
+    pub fn subtree(&self, node: NodeId) -> Vec<NodeId> {
+        let mut nodes = vec![node];
+        let mut i = 0;
+        while i < nodes.len() {
+            nodes.extend(self.tree.children(nodes[i]).unwrap_or_default());
+            i += 1;
+        }
+        nodes
+    }
+
+    /// Puts `parent`'s children in this order: a keyed list's rows after it
+    /// changed.
+    pub fn set_children(&mut self, parent: NodeId, children: &[NodeId]) {
+        if self.tree.children(parent).is_ok_and(|now| now != children) {
+            self.tree.set_children(parent, children).expect("set children");
+            self.dirty = true;
+        }
+    }
+
     /// Removes `node` and everything under it.
     pub fn remove(&mut self, node: NodeId) {
         for child in self.tree.children(node).unwrap_or_default() {

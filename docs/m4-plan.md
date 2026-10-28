@@ -146,9 +146,21 @@ with the depth work.
 
 ### 7. Carried from M3
 
-- [ ] `g.each(list, row)`: dynamic children by key, so the workspace list
+- [x] `g.each(list, row)`: dynamic children by key, so the workspace list
       has a row per workspace instead of ten static ones.
+      *Built 2026-10-28:* `g.each { items, key, row, …box props }` is a box
+      whose children are rows. A key seen again keeps its row, which gets
+      the new item and place through `item()` and `index()`; a new key
+      mounts one; a key gone takes its row, bindings and handlers. The
+      membrane's list is keyed by workspace id: naming the empty workspace
+      on HDMI-A-1 added a row and grew the panel, unnaming it removed that
+      row and moved the empty one up without mounting it again, and a click
+      after the reorder focused the right workspace. 20 reloads: PSS flat
+      after the first.
 - [ ] Output hotplug, exercised when possible.
+- [ ] Budding in every direction. *Akusen, 2026-10-28:* Bioma's cells
+      open by budding (PRD §10), and they open below a top membrane, above
+      the dock and sideways; the bud is built and checked only below.
 
 ## Done when
 

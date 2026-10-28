@@ -72,7 +72,6 @@ local flinging = g.state("workspaces.flinging", false)
 local VISIBLE = 5
 local GAP = 14 -- marginEdge 12 + tissuePadding 2
 local ROW, BUTTON, ROW_PAD, WIDTH = 44, 36, 8, 216
-local MAX_ROWS = 10
 
 local function list()
     return niri:workspaces(OUTPUT)
@@ -120,20 +119,20 @@ local function step(delta: number)
     if l[i] then niri:focus_workspace(l[i].id) end
 end
 
-local function row(i: number)
-    local function ws() return list()[i] end
+-- A row per workspace, kept by its id: a workspace that moves keeps its
+-- row, and one that appears or goes takes only its own.
+local function row(ws: () -> any, index: () -> number)
     return g.capsule {
         role = "button",
         width = WIDTH,
         height = ROW,
         radius = 14,
-        present = function() return ws() ~= nil end,
         -- The keyboard's mark: the primary at 12% (KeyMark.qml).
-        fill = function() return if keyed.value and mark.value == i then theme.primary12 else "#00000000" end,
+        fill = function() return if keyed.value and mark.value == index() then theme.primary12 else "#00000000" end,
         justify = "start",
         padding_left = ROW_PAD,
         gap = 12,
-        on_click = function() jump(i) end,
+        on_click = function() jump(index()) end,
         -- The button: filled where you are, a ring where something is, a
         -- dashed ring for the free place (Ring, DashedRing: 3 on, 3 off).
         g.capsule {
@@ -168,11 +167,6 @@ local function row(i: number)
             text = function() local w = ws(); return if w then (w.name or "empty") else "" end,
         },
     }
-end
-
-local rows: { [any]: any } = {}
-for i = 1, MAX_ROWS do
-    rows[i] = row(i)
 end
 
 local panelHeight = function(): number
@@ -275,10 +269,12 @@ local workspaces = cell {
             -- Fingers lifted while moving: carry on at their speed and slow
             -- to a stop (Glide.qml), over the timing set's fling.
             on_fling = function(_, vy) scrollTo(scroll.value + vy * 0.3, true) end,
-            g.box {
+            g.each {
                 direction = "column",
                 justify = "start",
-                table.unpack(rows),
+                items = list,
+                key = function(w) return w.id end,
+                row = row,
             },
         },
     },

@@ -222,7 +222,13 @@ pub fn luau_definitions() -> String {
         "    role: Role?,\n    name: string?,\n    id: string?,\n\
          \x20   -- Property name to a timing set entry. Never a number.\n\
          \x20   transition: { [string]: string }?,\n\
-         \x20   [number]: Node,\n}\n",
+         \x20   [number]: Node,\n}\n\n\
+         -- g.each: a box with a row per item, kept by key. `row` gets the item\n\
+         -- and its place as functions, so a row whose key stays follows them.\n\
+         export type Each<T> = Node & {\n\
+         \x20   items: () -> { T },\n\
+         \x20   key: (T) -> string | number,\n\
+         \x20   row: (item: () -> T, index: () -> number) -> Node,\n}\n",
     );
     out
 }
