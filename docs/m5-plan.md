@@ -229,7 +229,8 @@ was not caught in its six seconds.
   password, on `bioma-lock`, which has no account stack, and an empty stack
   answers PAM_PERM_DENIED (reproduced with a `pam_permit` service). The
   password alone is checked now, as Quickshell, swaylock and hyprlock do.
-- [ ] **Akusen:** the right password through `genoma pam`.
+- [x] **Akusen:** the right password through `genoma pam`: `success`
+      (2026-10-28).
 
 ### 9. Tray and polkit
 
