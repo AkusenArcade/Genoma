@@ -14,5 +14,7 @@ genoma-scene = { path = "../genoma-scene" }
 genoma-script = { path = "../genoma-script" }
 genoma-services = { path = "../genoma-services" }
 log.workspace = true
+accesskit = "0.25"
+accesskit_unix = "0.24"
 notify = "8"
 smithay-client-toolkit.workspace = true

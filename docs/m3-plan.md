@@ -131,7 +131,16 @@ cannot be exercised here without unplugging a monitor.
 
 ### 8. AccessKit (AT-SPI)
 
-- [ ] Every node's role and name (already carried since M1) published
+*Done 2026-10-28.* Each surface is an AT-SPI window through `accesskit_unix`,
+holding the nodes with a role or a text. A node's name is its `name` or the
+text it shows, and labels carry the text as their value. Read back over the
+accessibility bus, with the session's `IsEnabled` set for the check and then
+restored: "Genoma on HDMI-A-1", then Workspace → "Secondary", Vitals, Clock →
+"14:34". The cost at rest is unchanged (1.92% of a core, 27 MB). The tree is
+compared at most every 250 ms and rebuilt only when it changed. A screen
+reader's actions (pressing a button) are logged, not yet performed.
+
+- [x] Every node's role and name (already carried since M1) published
       through `accesskit_unix`, so Orca can read the cell and its list.
 
 ## Done when

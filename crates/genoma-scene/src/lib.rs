@@ -208,6 +208,17 @@ struct Animation {
     timing: Timing,
 }
 
+/// One node as assistive technology sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Accessible {
+    pub id: u64,
+    pub role: Role,
+    pub name: Option<String>,
+    /// x, y, width, height, logical units, as last drawn.
+    pub bounds: [f32; 4],
+    pub children: Vec<u64>,
+}
+
 /// What the scene needs from the clock after a step.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Motion {
@@ -271,6 +282,50 @@ impl Scene {
     pub fn set_icon_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
         self.icons.dirs = dirs;
         self.dirty = true;
+    }
+
+    /// What assistive technology sees: every node with a role or a text, by
+    /// a stable id, with its name, its bounds as last drawn (logical units)
+    /// and its nearest such descendants. The first entry is the root.
+    pub fn accessible(&self) -> Vec<Accessible> {
+        let mut out = vec![Accessible {
+            id: u64::from(self.root),
+            role: Role::Group,
+            name: None,
+            bounds: [0.0; 4],
+            children: Vec::new(),
+        }];
+        let mut children = Vec::new();
+        self.accessible_under(self.root, &mut out, &mut children);
+        out[0].children = children;
+        out
+    }
+
+    fn accessible_under(&self, node: NodeId, out: &mut Vec<Accessible>, found: &mut Vec<u64>) {
+        for child in self.tree.children(node).unwrap_or_default() {
+            let Some(n) = self.tree.get_node_context(child) else { continue };
+            if !n.present || n.opacity <= 0.0 {
+                continue;
+            }
+            let speaks = n.role != Role::None || n.kind == Kind::Text;
+            if speaks {
+                let index = out.len();
+                let name = n.name.clone().or_else(|| (n.kind == Kind::Text && !n.text.is_empty()).then(|| n.text.clone()));
+                out.push(Accessible {
+                    id: u64::from(child),
+                    role: if n.role == Role::None { Role::Label } else { n.role },
+                    name,
+                    bounds: n.bounds,
+                    children: Vec::new(),
+                });
+                found.push(u64::from(child));
+                let mut inner = Vec::new();
+                self.accessible_under(child, out, &mut inner);
+                out[index].children = inner;
+            } else {
+                self.accessible_under(child, out, found);
+            }
+        }
     }
 
     /// The node's parent, for an event that bubbles up.

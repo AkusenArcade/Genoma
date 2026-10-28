@@ -94,6 +94,11 @@ struct Surface {
     output_size: Option<(u32, u32)>,
     /// The timer that wakes the surface for the next beat, if one is set.
     wake: Option<RegistrationToken>,
+    /// The surface as assistive technology sees it, checked at most every
+    /// quarter second: motion never changes it, so it is not looked at per
+    /// frame.
+    access: crate::access::Access,
+    access_checked: Option<Instant>,
 }
 
 pub struct App {
@@ -296,6 +301,8 @@ impl App {
             tall: false,
             output_size,
             wake: None,
+            access: crate::access::Access::new(),
+            access_checked: None,
         });
     }
 
@@ -470,6 +477,15 @@ impl App {
         log::trace!("build {} us", started.elapsed().as_micros());
         s.dirty = animating;
         s.frames += 1;
+        if s.access_checked.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
+            s.access_checked = Some(Instant::now());
+            let title = match &s.output {
+                Some(o) => format!("Genoma on {o}"),
+                None => "Genoma".to_owned(),
+            };
+            let nodes = s.scene.borrow().accessible();
+            s.access.update(&title, nodes);
+        }
         log::debug!(
             "surface {} frame {} at {:.3} s: {}×{} px, scale {}{}",
             s.id,

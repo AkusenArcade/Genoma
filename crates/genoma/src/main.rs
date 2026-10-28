@@ -10,6 +10,7 @@
 //! damaged surface asks the compositor for one frame. Saving a file in the
 //! directory reloads the interface in place.
 
+mod access;
 mod wayland;
 
 use std::{
