@@ -219,43 +219,6 @@ local workspaces = cell {
             return if w == nil then "" elseif w.name then w.name else tostring(w.idx)
         end,
     },
-    -- The thread (Thread.qml): crisp(1.3), one physical pixel at scale 1,
-    -- from the cell's edge down the gap, a node of 5 at each end. The nodes
-    -- stay while the thread is there, closing included.
-    g.capsule {
-        overlay = true,
-        attach = "below-center",
-        width = 1.3,
-        height = GAP,
-        radius = 0,
-        crisp = true,
-        fill = theme.line,
-        reach = function() return if open.value then 1 else 0 end,
-        transition = { reach = function() return if open.value then "thread_open" else "thread_close" end },
-    },
-    g.capsule {
-        overlay = true,
-        attach = "below-center",
-        width = 5,
-        height = 5,
-        fill = theme.node,
-        offset_y = -2.5,
-        opacity = function() return if open.value then 1 else 0 end,
-        transition = { opacity = function() return if open.value then "instant" else "thread_hold" end },
-    },
-    g.capsule {
-        overlay = true,
-        attach = "below-center",
-        width = 5,
-        height = 5,
-        fill = theme.node,
-        offset_y = function() return if open.value then GAP - 2.5 else -2.5 end,
-        opacity = function() return if open.value then 1 else 0 end,
-        transition = {
-            offset_y = function() return if open.value then "thread_open" else "thread_close" end,
-            opacity = function() return if open.value then "instant" else "thread_hold" end,
-        },
-    },
     -- The panel, from the node outward; its content once it is grown.
     g.capsule {
         overlay = true,
@@ -317,6 +280,45 @@ local workspaces = cell {
                 justify = "start",
                 table.unpack(rows),
             },
+        },
+    },
+    -- After the panel, so its node at the tip is drawn over the panel's
+    -- edge rather than under it.
+    -- The thread (Thread.qml): crisp(1.3), one physical pixel at scale 1,
+    -- from the cell's edge down the gap, a node of 5 at each end. The nodes
+    -- stay while the thread is there, closing included.
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 1.3,
+        height = GAP,
+        radius = 0,
+        crisp = true,
+        fill = theme.line,
+        reach = function() return if open.value then 1 else 0 end,
+        transition = { reach = function() return if open.value then "thread_open" else "thread_close" end },
+    },
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 5,
+        height = 5,
+        fill = theme.node,
+        offset_y = -2.5,
+        opacity = function() return if open.value then 1 else 0 end,
+        transition = { opacity = function() return if open.value then "instant" else "thread_hold" end },
+    },
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 5,
+        height = 5,
+        fill = theme.node,
+        offset_y = function() return if open.value then GAP - 2.5 else -2.5 end,
+        opacity = function() return if open.value then 1 else 0 end,
+        transition = {
+            offset_y = function() return if open.value then "thread_open" else "thread_close" end,
+            opacity = function() return if open.value then "instant" else "thread_hold" end,
         },
     },
 }
