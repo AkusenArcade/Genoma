@@ -122,7 +122,7 @@ return {
     node = format(structural(if isDark then 0.43 else 0.62)),
     rim = format(structural(if isDark then 0.55 else 0.50)),
     trackLine = format(alpha(structural(if isDark then 0.32 else 0.72), 0.4)),
-    lineFaint = format(alpha(structural(if isDark then 0.32 else 0.72), 0.5)),
+    line70 = format(alpha(structural(if isDark then 0.32 else 0.72), 0.7)),
     primary12 = format(alpha(primary, 0.12)),
     well = format(alpha(lift(background, -0.01), 0.8)),
     text72 = format(alpha(text, 0.72)),

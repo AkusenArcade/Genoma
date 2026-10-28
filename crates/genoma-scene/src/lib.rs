@@ -109,6 +109,9 @@ pub struct Node {
     reach: f32,
     clip: bool,
     scroll_y: f32,
+    dash: [f32; 2],
+    italic: bool,
+    crisp: bool,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -166,6 +169,9 @@ impl Node {
             reach: 1.0,
             clip: false,
             scroll_y: 0.0,
+            dash: [0.0; 2],
+            italic: false,
+            crisp: false,
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -602,6 +608,10 @@ impl Scene {
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::Clip => n.clip = take!(flag),
             Prop::ScrollY => n.scroll_y = take!(number),
+            Prop::Dash => n.dash[0] = take!(number).max(0.0),
+            Prop::DashGap => n.dash[1] = take!(number).max(0.0),
+            Prop::Italic => (n.italic, reshape) = (take!(flag), true),
+            Prop::Crisp => n.crisp = take!(flag),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -811,6 +821,9 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     if let Some(font) = &n.font {
         attrs = attrs.family(ct::Family::Name(font));
     }
+    if n.italic {
+        attrs = attrs.style(ct::Style::Italic);
+    }
     if n.tabular {
         let mut features = ct::FontFeatures::new();
         features.enable(ct::FeatureTag::new(b"tnum"));
@@ -882,6 +895,10 @@ fn collect(
         origin[1] += n.offset[1];
     }
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
+    let declared_width = tree
+        .style(node)
+        .ok()
+        .and_then(|st| (st.size.width.tag() == taffy::CompactLength::LENGTH_TAG).then(|| st.size.width.value()));
     // What can be hit is what can be seen: the bounds inside the clip.
     let c = [out.clip[0] / scale, out.clip[1] / scale, out.clip[2] / scale, out.clip[3] / scale];
     let x0 = own[0].max(c[0]);
@@ -934,6 +951,16 @@ fn collect(
             if n.reach < 1.0 {
                 h *= n.reach;
             }
+            // A hairline sits on whole physical pixels, at least one wide, or
+            // antialiasing spreads it over two half-lit ones.
+            // The declared width, not taffy's: taffy rounds edges to whole
+            // units, which turns 1.3 at a fractional place into 2.
+            if n.crisp {
+                let declared = declared_width.unwrap_or(w);
+                let centre = x + w / 2.0;
+                w = (declared * scale).round().max(1.0) / scale;
+                x = ((centre - w / 2.0) * scale).round() / scale;
+            }
             let size = [w * scale, h * scale];
             let radius = n.radius.map_or(size[1] / 2.0, |r| r * scale).min(size[0].min(size[1]) / 2.0);
             let rim = rim_width(n, scale);
@@ -952,7 +979,7 @@ fn collect(
                 rim_top: fade(n.rim_top),
                 rim_bottom: fade(n.rim_bottom),
                 wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
-                arc: [0.0, n.arc, 0.0, 0.0],
+                arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
                 fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
                 clip: out.clip,
             });
@@ -1034,6 +1061,34 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crisp_hairline_is_one_whole_pixel() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let parent = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, parent);
+        for (p, v) in [(Prop::Width, 101.0), (Prop::Height, 40.0), (Prop::PaddingLeft, 13.7)] {
+            scene.set(parent, p, Value::Number(v), None).unwrap();
+        }
+        let line = scene.create(Kind::Capsule, Role::None);
+        scene.append(parent, line);
+        for (p, v) in [(Prop::Width, 1.3), (Prop::Height, 14.0), (Prop::Radius, 0.0)] {
+            scene.set(line, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(line, Prop::Overlay, Value::Bool(true), None).unwrap();
+        scene.set(line, Prop::Attach, Value::Text("below-center".into()), None).unwrap();
+        scene.set(line, Prop::Crisp, Value::Bool(true), None).unwrap();
+        scene.set(line, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        // A place with a fraction, where taffy would round the width to 2.
+        scene.set(line, Prop::OffsetX, Value::Number(0.35), None).unwrap();
+        scene.layout(None, None);
+        let list = scene.draw_list(1.0);
+        let r = list.rects.last().unwrap();
+        assert_eq!(r.size[0], 1.0, "one pixel wide");
+        assert_eq!(r.origin[0], r.origin[0].round(), "on a whole pixel: {:?}", r.origin);
+    }
 
     #[test]
     fn an_overlay_sits_at_the_parents_alignment() {

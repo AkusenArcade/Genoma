@@ -95,9 +95,10 @@ and scrolls: a row a wheel step, the fingers followed, a fling slowing to a
 stop. The active row is kept inside the five, and so is the keyboard's mark.
 New in the toolkit: `clip` (rect and image shaders discard outside it, text
 uses glyphon's bounds; hit bounds are clipped too), `scroll_y`, and
-`on_fling`. Two differences remain: the free place's ring is fainter rather
-than dashed, and "empty" is not italic, because there are no font styles
-yet.
+`on_fling`. The free place's ring is dashed, 3 on 3 off in the line at 0.7
+(DashedRing), and "empty" is italic. The thread is crisp(1.3), one
+physical pixel at scale 1, with a node of 5 at both ends that stays
+while the thread is there (Thread.qml), after Akusen's look.
 
 - [x] 216 wide, rows of 44, five rows visible and then it scrolls, the
       active row always inside. The well clips the scroll, never the panel.

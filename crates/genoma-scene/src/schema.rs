@@ -59,6 +59,10 @@ pub enum Prop {
     Reach,
     Clip,
     ScrollY,
+    Dash,
+    DashGap,
+    Italic,
+    Crisp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +140,10 @@ pub const PROPS: &[PropInfo] = &[
     p("reach", Prop::Reach, Ty::Number, true, "0 to 1: how far down a thread is drawn."),
     p("clip", Prop::Clip, Ty::Bool, false, "Children are drawn only inside this node's rectangle: a well that scrolls. Never on a cell, whose rim it would eat."),
     p("scroll_y", Prop::ScrollY, Ty::Number, true, "How far the children are scrolled up, logical units."),
+    p("dash", Prop::Dash, Ty::Number, false, "A round rim drawn in dashes this long, logical units; 0 is solid."),
+    p("dash_gap", Prop::DashGap, Ty::Number, false, "The space between dashes, logical units."),
+    p("crisp", Prop::Crisp, Ty::Bool, false, "A hairline: position and size rounded to whole physical pixels, never under one (Metrics.crisp)."),
+    p("italic", Prop::Italic, Ty::Bool, false, "Text in the font's italic."),
     p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];

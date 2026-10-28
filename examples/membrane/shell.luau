@@ -28,6 +28,9 @@ g.timing {
     -- A flick's slowing to a stop, and a scroll that follows the hand.
     fling = { duration = 0.6, curve = { 0.22, 1.0, 0.36, 1.0 } },
     instant = { duration = 0 },
+    -- Held at full until the thread has retracted (0.032 + 0.118), then gone:
+    -- Thread.qml's nodes are there while its progress is above zero.
+    thread_hold = { duration = 0.15, curve = { 1.0, 0.0, 1.0, 0.0 } },
 }
 
 local OUTPUT = "HDMI-A-1"
@@ -132,14 +135,16 @@ local function row(i: number)
         gap = 12,
         on_click = function() jump(i) end,
         -- The button: filled where you are, a ring where something is, a
-        -- fainter ring for the free place (Bioma draws that one dashed).
+        -- dashed ring for the free place (Ring, DashedRing: 3 on, 3 off).
         g.capsule {
             width = BUTTON,
             height = BUTTON,
             fill = function() local w = ws(); return if w and w.active then theme.primaryTop else "#00000000" end,
             fill_bottom = function() local w = ws(); return if w and w.active then theme.primaryBottom else "#00000000" end,
-            rim_top = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.lineFaint else theme.line end,
-            rim_bottom = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.lineFaint else theme.line end,
+            rim_top = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.line70 else theme.line end,
+            rim_bottom = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.line70 else theme.line end,
+            dash = function() local w = ws(); return if w and w.vacant and not w.active then 3 else 0 end,
+            dash_gap = 3,
             g.text {
                 font = "Orbitron",
                 size = 14,
@@ -159,6 +164,7 @@ local function row(i: number)
                 local w = ws()
                 return if w and w.name then (if w.active then theme.text else theme.text50) else theme.text28
             end,
+            italic = function() local w = ws(); return w ~= nil and w.name == nil end,
             text = function() local w = ws(); return if w then (w.name or "empty") else "" end,
         },
     }
@@ -213,18 +219,30 @@ local workspaces = cell {
             return if w == nil then "" elseif w.name then w.name else tostring(w.idx)
         end,
     },
-    -- The thread (Thread.qml): 1.3, from the cell's edge down the gap.
+    -- The thread (Thread.qml): crisp(1.3), one physical pixel at scale 1,
+    -- from the cell's edge down the gap, a node of 5 at each end. The nodes
+    -- stay while the thread is there, closing included.
     g.capsule {
         overlay = true,
         attach = "below-center",
         width = 1.3,
         height = GAP,
         radius = 0,
+        crisp = true,
         fill = theme.line,
         reach = function() return if open.value then 1 else 0 end,
         transition = { reach = function() return if open.value then "thread_open" else "thread_close" end },
     },
-    -- The node at its tip.
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 5,
+        height = 5,
+        fill = theme.node,
+        offset_y = -2.5,
+        opacity = function() return if open.value then 1 else 0 end,
+        transition = { opacity = function() return if open.value then "instant" else "thread_hold" end },
+    },
     g.capsule {
         overlay = true,
         attach = "below-center",
@@ -235,7 +253,7 @@ local workspaces = cell {
         opacity = function() return if open.value then 1 else 0 end,
         transition = {
             offset_y = function() return if open.value then "thread_open" else "thread_close" end,
-            opacity = function() return if open.value then "thread_open" else "thread_close" end,
+            opacity = function() return if open.value then "instant" else "thread_hold" end,
         },
     },
     -- The panel, from the node outward; its content once it is grown.

@@ -30,7 +30,8 @@ pub struct Rect {
     pub wave: [f32; 4],
     /// Only this part of the shape is drawn: start and sweep in turns,
     /// clockwise from twelve. A sweep of 1 or more is the whole shape; on a
-    /// disc a smaller one is a sector, on a ring an arc.
+    /// disc a smaller one is a sector, on a ring an arc. The last two are a
+    /// dash and its gap along the rim, physical pixels; 0 is a solid rim.
     pub arc: [f32; 4],
     /// The fill's colour at the bottom: with an alpha above zero the fill
     /// runs from `fill` at the top to this. Transparent is a flat fill.
@@ -172,7 +173,15 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (in.fill_to.a > 0.0) {
         fill = mix(in.fill, in.fill_to, clamp(height / max(in.half.y * 2.0, 1.0), 0.0, 1.0));
     }
-    let rim_alpha = rim_colour.a * (outer - inner) * part;
+    // Dashes along a round rim: the distance travelled round the circle.
+    var dashed = 1.0;
+    if (in.arc.z > 0.0) {
+        let period = in.arc.z + in.arc.w;
+        let along = fract(atan2(in.local.x, -in.local.y) / 6.2831853 + 1.0) * 6.2831853 * min(in.half.x, in.half.y);
+        let at = along - floor(along / period) * period;
+        dashed = clamp(min(at, in.arc.z - at) + 0.5, 0.0, 1.0);
+    }
+    let rim_alpha = rim_colour.a * (outer - inner) * part * dashed;
     let fill_alpha = fill.a * inner * surface * part;
     if (in.shape.w > 0.5) {
         return vec4<f32>(0.0, 0.0, 0.0, outer);
