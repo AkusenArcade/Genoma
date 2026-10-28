@@ -266,7 +266,10 @@ program is the fallback. Registration checked for a process of its own.
   `pam_faillock`: a wrong answer, and an answer abandoned halfway, count
   toward the lockout (3 in 15 minutes). No wrong-password test is run here
   for that reason.
-- [ ] **Akusen:** `genoma polkit-test` with his password: `authorized`.
+- [x] **Akusen:** `genoma polkit-test` with his password: "Authentication
+      is required to run a program as another user", `agent:
+      authenticated`, `pkcheck: authorized` (2026-10-28), at the first try:
+      the helper socket takes the user first, then the cookie.
 - Both have one owner per session, and Bioma owns them now. They are tested
   on a private session bus (`dbus-run-session`) where that is enough, and
   with Akusen where it is not (polkit registers on the system bus).
