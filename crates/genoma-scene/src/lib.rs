@@ -775,6 +775,9 @@ impl Scene {
                     "below" => 1,
                     "above" => 2,
                     "below-center" => 3,
+                    "above-center" => 4,
+                    "left" => 5,
+                    "right" => 6,
                     _ => 0,
                 }
             }
@@ -1190,6 +1193,9 @@ fn collect(
             1 => [parent[0], parent[1] + parent[3]],
             2 => [parent[0], parent[1] - layout.size.height],
             3 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + parent[3]],
+            4 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] - layout.size.height],
+            5 => [parent[0] - layout.size.width, parent[1] + (parent[3] - layout.size.height) / 2.0],
+            6 => [parent[0] + parent[2], parent[1] + (parent[3] - layout.size.height) / 2.0],
             _ => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0],
         }
     } else {
@@ -1253,16 +1259,36 @@ fn collect(
             let mut w = layout.size.width * swell;
             let mut h = layout.size.height * swell;
             let mut x = origin[0] - (w - layout.size.width) / 2.0;
-            let y = origin[1] - (h - layout.size.height) / 2.0;
+            let mut y = origin[1] - (h - layout.size.height) / 2.0;
             // Growth: the shape's rectangle on its way from a point (the
-            // node at its parent's bottom centre) to its own. Its content is
-            // never scaled: it enters once the shape is grown.
+            // middle of the parent's edge it leaves from) to its own, the
+            // edge nearest that point held. Its content is never scaled: it
+            // enters once the shape is grown.
             if n.growth < 1.0 {
                 let g = n.growth;
-                let node_x = parent[0] + parent[2] / 2.0;
-                x = node_x + (x - node_x) * g;
+                let (full_w, full_h) = (w, h);
                 w *= g;
                 h *= g;
+                match n.attach {
+                    // Beside the parent: across from its side's middle.
+                    5 | 6 => {
+                        let node_y = parent[1] + parent[3] / 2.0;
+                        y = node_y + (y - node_y) * g;
+                        if n.attach == 5 {
+                            x += full_w - w;
+                        }
+                    }
+                    // Over the parent: up from its top's middle.
+                    2 | 4 => {
+                        let node_x = parent[0] + parent[2] / 2.0;
+                        x = node_x + (x - node_x) * g;
+                        y += full_h - h;
+                    }
+                    _ => {
+                        let node_x = parent[0] + parent[2] / 2.0;
+                        x = node_x + (x - node_x) * g;
+                    }
+                }
             }
             // Reach: a thread drawn from its top down to this fraction.
             if n.reach < 1.0 {
@@ -1611,6 +1637,41 @@ mod tests {
         let r = list.rects.last().unwrap();
         assert_eq!(r.size[0], 1.0, "one pixel wide");
         assert_eq!(r.origin[0], r.origin[0].round(), "on a whole pixel: {:?}", r.origin);
+    }
+
+    #[test]
+    fn a_growing_shape_holds_the_edge_that_faces_its_parent() {
+        // Parent 100×40 at the origin; a 60×30 panel half grown on each side.
+        for (attach, held) in [("below-center", "top"), ("above-center", "bottom"), ("right", "left"), ("left", "right")] {
+            let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+            let mut scene = Scene::new(fonts);
+            let root = scene.root();
+            let parent = scene.create(Kind::Capsule, Role::None);
+            scene.append(root, parent);
+            for (p, v) in [(Prop::Width, 100.0), (Prop::Height, 40.0)] {
+                scene.set(parent, p, Value::Number(v), None).unwrap();
+            }
+            let panel = scene.create(Kind::Capsule, Role::None);
+            scene.append(parent, panel);
+            for (p, v) in [(Prop::Width, 60.0), (Prop::Height, 30.0), (Prop::Growth, 0.5)] {
+                scene.set(panel, p, Value::Number(v), None).unwrap();
+            }
+            scene.set(panel, Prop::Overlay, Value::Bool(true), None).unwrap();
+            scene.set(panel, Prop::Attach, Value::Text(attach.into()), None).unwrap();
+            scene.set(panel, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+            scene.layout(None, None);
+            let list = scene.draw_list(1.0);
+            let r = list.rects.last().unwrap();
+            let (x0, y0, x1, y1) = (r.origin[0], r.origin[1], r.origin[0] + r.size[0], r.origin[1] + r.size[1]);
+            assert_eq!(r.size, [30.0, 15.0], "{attach}: half grown");
+            match held {
+                // Against the parent's edge, centred across it.
+                "top" => assert_eq!((y0, (x0 + x1) / 2.0), (40.0, 50.0), "{attach}"),
+                "bottom" => assert_eq!((y1, (x0 + x1) / 2.0), (0.0, 50.0), "{attach}"),
+                "left" => assert_eq!((x0, (y0 + y1) / 2.0), (100.0, 20.0), "{attach}"),
+                _ => assert_eq!((x1, (y0 + y1) / 2.0), (0.0, 20.0), "{attach}"),
+            }
+        }
     }
 
     #[test]

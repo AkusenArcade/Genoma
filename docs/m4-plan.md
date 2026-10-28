@@ -158,9 +158,18 @@ with the depth work.
       after the reorder focused the right workspace. 20 reloads: PSS flat
       after the first.
 - [ ] Output hotplug, exercised when possible.
-- [ ] Budding in every direction. *Akusen, 2026-10-28:* Bioma's cells
+- [x] Budding in every direction. *Akusen, 2026-10-28:* Bioma's cells
       open by budding (PRD §10), and they open below a top membrane, above
       the dock and sideways; the bud is built and checked only below.
+      *Built 2026-10-28, `examples/budding`:* the union in the shader never
+      had a direction; what did was the growth. A growing shape now starts
+      from the middle of the parent's edge that faces it and holds its own
+      near edge, by its attach, and attach has `above-center`, `left` and
+      `right`. Four cells, from a top membrane, the dock and both sides:
+      the contact sheets show each panel leaving its facing edge and each
+      reabsorption closing on a joined neck. A test holds the near edge on
+      every side. In motion render median 125 µs, p99 311 µs; at rest 0
+      frames in 5 s; PSS 26 MB.
 
 ## Done when
 
