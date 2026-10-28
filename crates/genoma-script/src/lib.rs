@@ -32,6 +32,7 @@ use genoma_services::{
     niri::Niri,
     power::Power,
     toplevels::Toplevels,
+    tray::{MenuEntry, Tray},
     vitals::Vitals,
 };
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
@@ -157,6 +158,7 @@ pub struct Services {
     pub audio: Rc<Audio>,
     pub bluetooth: Rc<Bluetooth>,
     pub toplevels: Rc<Toplevels>,
+    pub tray: Rc<Tray>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -578,6 +580,89 @@ impl UserData for ToplevelsRef {
     }
 }
 
+struct TrayRef(Rc<Tray>);
+
+fn menu_table(lua: &Lua, e: &MenuEntry) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", e.id)?;
+    t.set("label", e.label.as_str())?;
+    t.set("enabled", e.enabled)?;
+    t.set("visible", e.visible)?;
+    t.set("separator", e.separator)?;
+    t.set("toggle_type", e.toggle_type.as_str())?;
+    t.set("toggle_state", e.toggle_state)?;
+    t.set("icon_name", e.icon_name.as_str())?;
+    let children = lua.create_table()?;
+    for (i, c) in e.children.iter().enumerate() {
+        children.set(i + 1, menu_table(lua, c)?)?;
+    }
+    t.set("children", children)?;
+    Ok(t)
+}
+
+impl UserData for TrayRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // tray.items → { { key, id, title, status, category, icon_name,
+        // icon_theme_path, attention_icon_name, has_pixmap, tooltip_title,
+        // tooltip_description, only_menu, has_menu }, … }
+        fields.add_field_method_get("items", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, it) in this.0.items.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("key", it.key)?;
+                t.set("id", it.id)?;
+                t.set("title", it.title)?;
+                t.set("status", it.status)?;
+                t.set("category", it.category)?;
+                t.set("icon_name", it.icon_name)?;
+                t.set("icon_theme_path", it.icon_theme_path)?;
+                t.set("attention_icon_name", it.attention_icon_name)?;
+                t.set("has_pixmap", it.has_pixmap)?;
+                t.set("tooltip_title", it.tooltip_title)?;
+                t.set("tooltip_description", it.tooltip_description)?;
+                t.set("only_menu", it.only_menu)?;
+                t.set("has_menu", !it.menu.is_empty())?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        fields.add_field_method_get("serving_watcher", |_, this| Ok(this.0.serving_watcher.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // tray:menu(key) → the opened menu's tree, { id, label, …, children },
+        // or nil before tray:open_menu(key) has read it.
+        methods.add_method("menu", |lua, this, key: String| {
+            match this.0.menus.get().get(&key) {
+                Some(tree) => Ok(LuaValue::Table(menu_table(lua, tree)?)),
+                None => Ok(LuaValue::Nil),
+            }
+        });
+        methods.add_method("open_menu", |_, this, key: String| {
+            this.0.open_menu(&key);
+            Ok(())
+        });
+        methods.add_method("close_menu", |_, this, key: String| {
+            this.0.close_menu(&key);
+            Ok(())
+        });
+        methods.add_method("menu_click", |_, this, (key, id): (String, i32)| {
+            this.0.menu_click(&key, id);
+            Ok(())
+        });
+        for (method, call) in [("activate", "Activate"), ("secondary_activate", "SecondaryActivate"), ("context_menu", "ContextMenu")] {
+            methods.add_method(method, move |_, this, (key, x, y): (String, Option<i32>, Option<i32>)| {
+                this.0.act(&key, call, x.unwrap_or(0), y.unwrap_or(0));
+                Ok(())
+            });
+        }
+        methods.add_method("scroll", |_, this, (key, delta, orientation): (String, i32, Option<String>)| {
+            this.0.scroll(&key, delta, orientation.unwrap_or_else(|| "vertical".into()));
+            Ok(())
+        });
+    }
+}
+
 struct ClockRef(Rc<Clock>);
 
 impl UserData for ClockRef {
@@ -943,7 +1028,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/tray" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -954,6 +1039,7 @@ impl Script {
                         "audio" => "audio",
                         "bluetooth" => "bluetooth",
                         "toplevels" => "toplevels",
+                        "tray" => "tray",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -971,6 +1057,7 @@ impl Script {
                         "audio" => lua.create_userdata(AudioRef(services.audio.clone()))?,
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
+                        "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

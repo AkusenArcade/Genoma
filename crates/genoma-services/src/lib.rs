@@ -18,4 +18,5 @@ pub mod niri;
 pub mod pam;
 pub mod power;
 pub mod toplevels;
+pub mod tray;
 pub mod vitals;

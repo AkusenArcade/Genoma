@@ -66,7 +66,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -81,7 +81,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth"] {
+        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -169,6 +169,19 @@ impl Sources {
                         })
                         .expect("bluetooth channel");
                     self.services.bluetooth.start(&bus, post);
+                }
+                "tray" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let tray = self.services.tray.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                tray.apply(update);
+                            }
+                        })
+                        .expect("tray channel");
+                    self.services.tray.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -406,6 +419,19 @@ fn probe() {
             println!(
                 "bluetooth   {} {:?} {:?} paired {} connected {} battery {:?} {}",
                 d.address, d.name, d.icon, d.paired, d.connected, d.battery, d.busy
+            );
+        }
+    });
+    let t = services.tray.clone();
+    Effect::new(move || {
+        let items = t.items.get();
+        println!("tray    {} items, serving the watcher {}", items.len(), t.serving_watcher.get());
+        for i in items {
+            println!(
+                "tray      {} id {:?} title {:?} {} {} icon {:?}{} tooltip {:?} menu {}{}",
+                i.key, i.id, i.title, i.status, i.category, i.icon_name,
+                if i.has_pixmap { " (pixmap)" } else { "" },
+                i.tooltip_title, !i.menu.is_empty(), if i.only_menu { " only" } else { "" }
             );
         }
     });

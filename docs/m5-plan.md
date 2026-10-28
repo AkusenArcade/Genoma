@@ -234,8 +234,24 @@ was not caught in its six seconds.
 
 ### 9. Tray and polkit
 
-- [ ] StatusNotifierItem host (and watcher when none is running) with
+- [x] StatusNotifierItem host (and watcher when none is running) with
       DBusMenu.
+
+*Tray built 2026-10-28,* to what Bioma's `services/Tray.qml` reads: items
+with id, title, status, category, icon name and theme path, whether the icon
+comes as pixels, tooltip, whether the item is only a menu; activate,
+secondary activate, context menu, scroll; menus read on opening (after
+`AboutToShow`), kept current on `LayoutUpdated` while open, and clicked.
+- On the real bus, as a second host beside Bioma's watcher: the four items
+  the watcher lists (Shelly, Cachy-Update, Telegram with a pixmap, Steam
+  registered Ayatana-style by path), and Cachy-Update's menu read whole,
+  submenu and disabled entries included, nothing clicked.
+- On a private bus with a stand-in item (scratchpad `fake-sni.py`): Genoma
+  served the watcher, the item came with its tooltip, activate and a menu
+  click reached it, the menu came with its separator and check, the new
+  title came through, and the item left when it quit.
+- Drawing a pixmap icon needs the scene to take raw pixels; carried to the
+  port.
 - [ ] Polkit agent.
 - Both have one owner per session, and Bioma owns them now. They are tested
   on a private session bus (`dbus-run-session`) where that is enough, and
