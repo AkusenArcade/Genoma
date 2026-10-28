@@ -390,6 +390,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "genoma-core"
+version = "0.0.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "genoma-render"
 version = "0.0.0"
 dependencies = [

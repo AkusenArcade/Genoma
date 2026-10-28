@@ -1,0 +1,10 @@
+[package]
+name = "genoma-core"
+description = "Genoma's reactive graph, clock and timing set"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+log.workspace = true
