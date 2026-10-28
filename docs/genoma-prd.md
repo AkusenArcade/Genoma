@@ -706,6 +706,21 @@ no frame:
 In motion the worst p99 was 311 µs (four budding panels), inside the 2 ms
 budget. PSS 26 MB throughout.
 
+**M5, closed 2026-10-28** (the record is `docs/m5-plan.md`). Every domain of
+§9.1 Bioma uses, each checked headless against its system tool:
+- power, network, media, audio, Bluetooth, toplevels, tray, polkit and
+  notifications, plus PAM and greetd;
+- the building blocks Bioma's own services are made of: `g.timer`,
+  `g.process`, `g.file`, `g.socket`, `g.dbus`.
+
+D-Bus runs on one thread, `genoma-bus`; PipeWire on its own. Both post into
+the loop, and neither woke in 30 s at rest with every service started (the
+main thread woke only for the clock and the vitals): 0.067% of a core,
+11 MB. Notifications were tested on a private bus with no other server, PAM
+and the polkit agent with Akusen's password. BlueZ is over zbus, not
+`bluer`; the colour quantizer was dropped, since Bioma's colours come from
+matugen.
+
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
   region it touched. That costs nothing at this size; it moves to M2, where a

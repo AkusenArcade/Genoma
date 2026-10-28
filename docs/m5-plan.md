@@ -1,5 +1,8 @@
 # M5 — services
 
+**Closed 2026-10-28 by Akusen.** Every step built and checked below; what
+waits for hardware is listed at the end.
+
 PRD §9 and §11: the rest of the built-in domains (§9.1) and the building
 blocks Bioma's own services are written with (§9.2). **Done when `genoma
 probe` shows every domain live, and notifications are tested with no other
