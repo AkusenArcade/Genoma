@@ -212,6 +212,24 @@ struct Animation {
     to: Value,
     start: Instant,
     timing: Timing,
+    /// A spring's position and velocity, per component of the value.
+    spring: Option<(Vec<f32>, Vec<f32>)>,
+}
+
+fn components(v: &Value) -> Vec<f32> {
+    match v {
+        Value::Number(n) => vec![*n],
+        Value::Color(c) => c.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn from_components(like: &Value, x: &[f32]) -> Value {
+    match like {
+        Value::Number(_) => Value::Number(x[0]),
+        Value::Color(_) => Value::Color([x[0].clamp(0.0, 1.0), x[1].clamp(0.0, 1.0), x[2].clamp(0.0, 1.0), x[3].clamp(0.0, 1.0)]),
+        other => other.clone(),
+    }
 }
 
 /// One node as assistive technology sees it.
@@ -472,15 +490,27 @@ impl Scene {
         if first {
             n.seen.push(prop);
         }
-        let animate = !first && prop.info().animatable && timing.is_some_and(|t| t.duration > 0.0);
+        let animate = !first && prop.info().animatable && timing.is_some_and(|t| t.moves());
         if animate {
             let from = self.current(node, prop);
             if from.as_ref() == Some(&value) {
                 return Ok(());
             }
             if let (Some(from), Some(timing)) = (from, timing) {
+                // A spring already moving keeps its velocity: redirected, it
+                // bends toward the new target instead of starting again.
+                let carried = self
+                    .animations
+                    .iter()
+                    .find(|a| a.node == node && a.prop == prop)
+                    .and_then(|a| a.spring.as_ref().map(|(_, v)| v.clone()));
                 self.animations.retain(|a| !(a.node == node && a.prop == prop));
-                self.animations.push(Animation { node, prop, from, to: value, start: Instant::now(), timing });
+                let spring = timing.spring.map(|_| {
+                    let x = components(&from);
+                    let v = carried.filter(|v| v.len() == x.len()).unwrap_or_else(|| vec![0.0; x.len()]);
+                    (x, v)
+                });
+                self.animations.push(Animation { node, prop, from, to: value, start: Instant::now(), timing, spring });
                 self.dirty = true;
                 return Ok(());
             }
@@ -677,7 +707,41 @@ impl Scene {
 
         let animations = std::mem::take(&mut self.animations);
         let mut running = Vec::new();
-        for a in animations {
+        for mut a in animations {
+            // A spring integrates; it is done when it is within a quarter
+            // physical pixel of its target and nearly still.
+            if let (Some(spring), Some((x, v))) = (a.timing.spring, a.spring.as_mut()) {
+                let waiting = now.saturating_duration_since(a.start).as_secs_f64() < a.timing.delay;
+                if !waiting {
+                    let target = components(&a.to);
+                    // After a quiet spell the last step can be seconds old; a
+                    // spring moves at most a frame's worth at a time.
+                    let sdt = dt.min(1.0 / 30.0);
+                    let steps = ((sdt / (1.0 / 480.0)).ceil() as usize).clamp(1, 64);
+                    let h = sdt / steps as f32;
+                    for _ in 0..steps {
+                        for i in 0..x.len() {
+                            let force = -(spring.stiffness as f32) * (x[i] - target[i]) - (spring.damping as f32) * v[i];
+                            v[i] += force / spring.mass as f32 * h;
+                            x[i] += v[i] * h;
+                        }
+                    }
+                    let near = match a.to {
+                        Value::Color(_) => 0.002,
+                        _ => STEP / scale.max(0.01),
+                    };
+                    let settled = x.iter().zip(&target).all(|(p, t)| (p - t).abs() < near)
+                        && v.iter().all(|s| s.abs() < near * 4.0);
+                    let value = if settled { a.to.clone() } else { from_components(&a.to, x) };
+                    let _ = self.apply(a.node, a.prop, value);
+                    if !settled {
+                        running.push(a);
+                    }
+                } else {
+                    running.push(a);
+                }
+                continue;
+            }
             // Before its delay a transition holds where it started.
             let elapsed = now.saturating_duration_since(a.start).as_secs_f64() - a.timing.delay;
             let t = (elapsed / a.timing.duration).clamp(0.0, 1.0);
@@ -1061,6 +1125,66 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spring_scene() -> (Scene, NodeId, Timing) {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let n = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, n);
+        scene.set(n, Prop::OffsetX, Value::Number(0.0), None).unwrap();
+        let timing = Timing {
+            duration: 0.0,
+            curve: genoma_core::timing::Curve::LINEAR,
+            delay: 0.0,
+            spring: Some(genoma_core::timing::Spring { stiffness: 300.0, damping: 26.0, mass: 1.0 }),
+        };
+        (scene, n, timing)
+    }
+
+    fn offset(scene: &Scene, n: NodeId) -> f32 {
+        scene.tree.get_node_context(n).unwrap().offset[0]
+    }
+
+    #[test]
+    fn a_spring_settles_and_stops_asking_for_frames() {
+        let (mut scene, n, timing) = spring_scene();
+        let t0 = Instant::now();
+        scene.advance(t0, 1.0);
+        scene.set(n, Prop::OffsetX, Value::Number(100.0), Some(timing)).unwrap();
+        let mut frames = 0;
+        let mut t = t0;
+        let mut peak = 0.0f32;
+        while scene.transitioning() && frames < 600 {
+            t += Duration::from_millis(8);
+            scene.advance(t, 1.0);
+            peak = peak.max(offset(&scene, n));
+            frames += 1;
+        }
+        assert!(!scene.transitioning(), "settled within 600 frames");
+        assert_eq!(offset(&scene, n), 100.0, "exactly on the target");
+        assert!(peak > 100.0 && peak < 110.0, "a little overshoot at this damping: {peak}");
+        assert!(frames < 150, "settles in about a second: {frames} frames");
+    }
+
+    #[test]
+    fn a_redirected_spring_keeps_its_velocity() {
+        let (mut scene, n, timing) = spring_scene();
+        let t0 = Instant::now();
+        scene.advance(t0, 1.0);
+        scene.set(n, Prop::OffsetX, Value::Number(100.0), Some(timing)).unwrap();
+        let mut t = t0;
+        for _ in 0..10 {
+            t += Duration::from_millis(8);
+            scene.advance(t, 1.0);
+        }
+        let before = offset(&scene, n);
+        // Redirected back toward 0: still moving forward for a moment.
+        scene.set(n, Prop::OffsetX, Value::Number(0.0), Some(timing)).unwrap();
+        t += Duration::from_millis(8);
+        scene.advance(t, 1.0);
+        assert!(offset(&scene, n) > before, "carried on before turning: {} after {before}", offset(&scene, n));
+    }
 
     #[test]
     fn a_crisp_hairline_is_one_whole_pixel() {

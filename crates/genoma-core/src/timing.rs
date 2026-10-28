@@ -60,6 +60,14 @@ impl Curve {
     }
 }
 
+/// A damped spring (PRD §8.5): it has no duration, it settles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    pub stiffness: f64,
+    pub damping: f64,
+    pub mass: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Timing {
     /// Seconds, before the speed setting.
@@ -67,6 +75,15 @@ pub struct Timing {
     pub curve: Curve,
     /// Seconds to wait before moving: a cascade's stagger.
     pub delay: f64,
+    /// Moves on a spring instead of the curve, when set.
+    pub spring: Option<Spring>,
+}
+
+impl Timing {
+    /// Whether this timing moves at all.
+    pub fn moves(&self) -> bool {
+        self.spring.is_some() || self.duration > 0.0
+    }
 }
 
 #[derive(Default)]
@@ -92,6 +109,12 @@ pub fn get(name: &str) -> Option<Timing> {
         let speed = set.speed.unwrap_or(1.0).max(0.01);
         timing.duration /= speed;
         timing.delay /= speed;
+        // Twice the speed is half the time: four times the stiffness, twice
+        // the damping, the same ratio between them.
+        if let Some(s) = timing.spring.as_mut() {
+            s.stiffness *= speed * speed;
+            s.damping *= speed;
+        }
         Some(timing)
     })
 }
@@ -119,7 +142,7 @@ mod tests {
 
     #[test]
     fn speed_scales_every_duration() {
-        define("open", Timing { duration: 0.25, curve: Curve::LINEAR, delay: 0.0 });
+        define("open", Timing { duration: 0.25, curve: Curve::LINEAR, delay: 0.0, spring: None });
         set_speed(2.0);
         assert_eq!(get("open").unwrap().duration, 0.125);
         assert!(get("fade").is_none(), "no entry, no duration");

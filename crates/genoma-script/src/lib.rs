@@ -391,14 +391,25 @@ impl Script {
             lua.create_function(|_, set: Table| {
                 for pair in set.pairs::<String, Table>() {
                     let (name, entry) = pair?;
-                    let duration: f64 = entry.get("duration")?;
+                    let spring = match entry.get::<Option<Table>>("spring")? {
+                        Some(t) => Some(genoma_core::timing::Spring {
+                            stiffness: t.get::<Option<f64>>("stiffness")?.unwrap_or(300.0),
+                            damping: t.get::<Option<f64>>("damping")?.unwrap_or(26.0),
+                            mass: t.get::<Option<f64>>("mass")?.unwrap_or(1.0),
+                        }),
+                        None => None,
+                    };
+                    let duration: f64 = match spring {
+                        Some(_) => entry.get::<Option<f64>>("duration")?.unwrap_or(0.0),
+                        None => entry.get("duration")?,
+                    };
                     let curve = match entry.get::<Option<Vec<f64>>>("curve")? {
                         Some(c) if c.len() == 4 => Curve { x1: c[0], y1: c[1], x2: c[2], y2: c[3] },
                         Some(_) => return Err(err(format!("timing {name}: a curve is four numbers"))),
                         None => Curve::LINEAR,
                     };
                     let delay: f64 = entry.get::<Option<f64>>("delay")?.unwrap_or(0.0);
-                    timing::define(&name, Timing { duration, curve, delay });
+                    timing::define(&name, Timing { duration, curve, delay, spring });
                 }
                 Ok(())
             })?,
