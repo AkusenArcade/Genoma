@@ -49,12 +49,22 @@ local workspaces = cell {
     padding_x = 16,
     gap = 11,
     min_width = 96,
-    g.icon {
-        icon = "workspaces",
+    -- The mark (components/WorkspaceBars.qml): bars 16 × 7.5 of a 24 grid,
+    -- radius 3, stroke 1.4 crisped, snapped to the pixel, 2 px apart; at
+    -- 16 that is 11 × 5 at y 2 and 9, inside a 16 square.
+    g.box {
         width = 16,
         height = 16,
-        gradient_top = theme.primaryTop,
-        gradient_bottom = theme.primaryBottom,
+        g.capsule {
+            overlay = true, width = 11, height = 5, radius = 2, stroke = 1,
+            rim_top = theme.primaryTop, rim_bottom = theme.primaryMid,
+            offset_x = 0.5, offset_y = -3.5,
+        },
+        g.capsule {
+            overlay = true, width = 11, height = 5, radius = 2, stroke = 1,
+            rim_top = theme.primaryMid, rim_bottom = theme.primaryBottom,
+            offset_x = 0.5, offset_y = 3.5,
+        },
     },
     g.text {
         color = theme.text,
@@ -74,6 +84,7 @@ local workspaces = cell {
 }
 
 -- ---- Window title (cells/window_title/WindowTitle.qml) --------------------
+-- The focused window on any output, as Niri.focusedWindow is.
 -- A spinner glyph at the start of a title means the window is working: it
 -- is taken out and the loader is shown instead.
 local function spins(code: number): boolean
@@ -83,7 +94,7 @@ local function spins(code: number): boolean
 end
 
 local function reading(): (boolean, string)
-    local w = niri:focused_on(OUTPUT)
+    local w = niri.focused
     local title = if w then w.title or "" else ""
     if title == "" then
         return false, ""
@@ -102,9 +113,11 @@ local LOADER = 16 / 24
 local title = cell {
     role = "label",
     name = "Window title",
-    padding_x = 5,
+    -- paddingLeading 5, paddingTrailing 16.
+    padding_left = 5,
+    padding_right = 16,
     gap = 10,
-    present = function() return niri:focused_on(OUTPUT) ~= nil end,
+    present = function() return niri.focused ~= nil end,
     g.capsule {
         width = 30,
         height = 30,
@@ -116,7 +129,7 @@ local title = cell {
             height = 30 * 0.62,
             color = theme.textMuted,
             icon = function()
-                local w = niri:focused_on(OUTPUT)
+                local w = niri.focused
                 return (w and g.app_icon(w.app_id)) or "app-fallback"
             end,
         },
@@ -156,6 +169,10 @@ local title = cell {
 
 -- ---- Vitals (components/Vital.qml): a 64-unit grid in a 26 box ------------
 local UNIT = 26 / 64
+-- Qt's curve renderer antialiases a small disc about half a pixel wider on
+-- each side than an exact distance field does: measured on the satellite,
+-- 2026-10-28. A pixel more of diameter draws Bioma's disc.
+local QT_AA = 1
 local RING_RADIUS = 24 * UNIT
 local RING_STROKE = math.max(1, 1.5 * UNIT)
 
@@ -182,16 +199,18 @@ local VESSEL = (RING_RADIUS - RING_STROKE) * 2
 local indicators = cell {
     role = "group",
     name = "Vitals",
-    padding_x = 12,
+    padding_x = 14,
     gap = 10,
     min_width = 90,
     -- The processor: a dot that beats, 45 a minute at idle, 140 at full load.
     ring(cpu, {
         g.capsule {
-            width = 16 * UNIT,
-            height = 16 * UNIT,
-            fill = function() return theme.stateFor(cpu()) end,
-            pulse = function() return 45 + cpu() * 95 end,
+            width = 16 * UNIT + QT_AA,
+            height = 16 * UNIT + QT_AA,
+            fill = function() return theme.gradTop(theme.stateFor(cpu())) end,
+            fill_bottom = function() return theme.gradBottom(theme.stateFor(cpu())) end,
+            -- The beat is the clock, not the load (cpuClockFraction).
+            pulse = function() return 45 + vitals.cpu_clock * 95 end,
         },
     }),
     -- The memory: a liquid at its level, its surface a travelling wave.
@@ -201,7 +220,9 @@ local indicators = cell {
             height = VESSEL,
             fill = function() return theme.stateFor(ram()) end,
             level = ram,
-            wave = 6 * UNIT,
+            -- Quadratic arcs with their control 6 above and below reach half of
+            -- it: the crest stands 3 off the level.
+            wave = 3 * UNIT,
             wave_period = 46 * UNIT,
             wave_time = 2.4,
             transition = { level = "reflow" },
@@ -210,9 +231,10 @@ local indicators = cell {
     -- The graphics card: a satellite on the ring, its period the clock's.
     ring(gpu, {
         g.capsule {
-            width = 12 * UNIT,
-            height = 12 * UNIT,
-            fill = function() return theme.stateFor(gpu()) end,
+            width = 12 * UNIT + QT_AA,
+            height = 12 * UNIT + QT_AA,
+            fill = function() return theme.gradTop(theme.stateFor(gpu())) end,
+            fill_bottom = function() return theme.gradBottom(theme.stateFor(gpu())) end,
             orbit = function() return 1 / (6 - vitals.gpu_clock * 4.8) end,
             orbit_radius = RING_RADIUS,
         },
@@ -229,7 +251,9 @@ end
 local time = cell {
     role = "timer",
     name = "Clock",
-    padding_x = 14,
+    -- paddingLeading 16, paddingTrailing 12.
+    padding_left = 16,
+    padding_right = 12,
     gap = 8,
     g.text {
         font = "Spectral",
@@ -293,13 +317,16 @@ local time = cell {
 
 return g.surface {
     anchor = { "top", "left", "right" },
+    -- appearance.edge 12 is to the cells; each tissue reaches 2 beyond them.
+    -- Measured against Bioma, 2026-10-28: the first cell's rim at x 12, the
+    -- last at 1907, and the rims' top at y 18 in both.
     margin = { top = 12 },
     reserve = false,
 
     g.box {
         grow = 1,
         height = 44,
-        padding_x = 12,
+        padding_x = 10,
         justify = "between",
         tissue { workspaces, title },
         tissue { indicators, time },

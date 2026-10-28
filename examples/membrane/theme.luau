@@ -109,6 +109,11 @@ return {
     primary = format(primary),
     primaryTop = format(gradientTop(primary)),
     primaryBottom = format(gradientBottom(primary)),
+    -- Halfway between the two, where one bar ends and the next begins.
+    primaryMid = (function()
+        local a, b = gradientTop(primary), gradientBottom(primary)
+        return format({ r = (a.r + b.r) / 2, g = (a.g + b.g) / 2, b = (a.b + b.b) / 2, a = 1 })
+    end)(),
     elevated = format(lift(background, 0.045)),
     cellFill = format(alpha(lift(background, 0.075), CELL_OPACITY)),
     tissueFill = format(alpha(lift(background, 0.045), TISSUE_OPACITY)),

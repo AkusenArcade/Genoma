@@ -561,7 +561,7 @@ everything it draws:**
   icon in the window title;
 - the current typography (Spectral for the clock, Orbitron for figures);
 - the vitals as `components/Vital.qml` draws them today;
-- the window title only for a window focused on the membrane's output.
+- the window title for the focused window, on any output (`Niri.focusedWindow`).
 
 Blur is niri's work, so the gate also measures **niri's CPU in both runs**,
 not only the shell's. The reference is Bioma's current QML and a capture of

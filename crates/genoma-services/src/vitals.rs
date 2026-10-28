@@ -18,6 +18,12 @@ pub struct Vitals {
     /// the satellite's rate. A card at a third of its load can sit at full
     /// clock, so the two stay apart (Bioma's PRD §9.2).
     pub gpu_clock: Signal<f64>,
+    /// The processor's clock between its lowest and highest, 0…1: the beat's
+    /// rate. Averaged over the cores (/proc/cpuinfo) and over the last five
+    /// samples, against cpu0's range, as Bioma's SystemMonitor does.
+    pub cpu_clock: Signal<f64>,
+    clock_samples: std::cell::RefCell<Vec<f64>>,
+    cpu_range: Option<(f64, f64)>,
     last_cpu: std::cell::Cell<Option<(u64, u64)>>,
     gpu_path: Option<PathBuf>,
 }
@@ -65,6 +71,15 @@ fn gpu_path() -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// cpu0's lowest and highest clock, MHz.
+fn cpu_range() -> Option<(f64, f64)> {
+    let read = |f: &str| -> Option<f64> {
+        let khz: f64 = fs::read_to_string(format!("/sys/devices/system/cpu/cpu0/cpufreq/{f}")).ok()?.trim().parse().ok()?;
+        Some(khz / 1000.0)
+    };
+    Some((read("cpuinfo_min_freq")?, read("cpuinfo_max_freq")?))
+}
+
 impl Vitals {
     pub fn new() -> Vitals {
         let v = Vitals {
@@ -72,6 +87,9 @@ impl Vitals {
             ram: Signal::new(0.0),
             gpu: Signal::new(None),
             gpu_clock: Signal::new(0.0),
+            cpu_clock: Signal::new(0.0),
+            clock_samples: Default::default(),
+            cpu_range: cpu_range(),
             last_cpu: std::cell::Cell::new(cpu_times()),
             gpu_path: gpu_path(),
         };
@@ -106,7 +124,28 @@ impl Vitals {
             let current = states.iter().find(|(_, c)| *c)?.0;
             (max > min).then(|| percent((current - min) / (max - min)))
         });
+        let cpu_clock = self.cpu_range.and_then(|(min, max)| {
+            let info = fs::read_to_string("/proc/cpuinfo").ok()?;
+            let mhz: Vec<f64> = info
+                .lines()
+                .filter(|l| l.starts_with("cpu MHz"))
+                .filter_map(|l| l.split(':').nth(1)?.trim().parse().ok())
+                .collect();
+            if mhz.is_empty() || max <= min {
+                return None;
+            }
+            let mut samples = self.clock_samples.borrow_mut();
+            samples.push(mhz.iter().sum::<f64>() / mhz.len() as f64);
+            if samples.len() > 5 {
+                samples.remove(0);
+            }
+            let average = samples.iter().sum::<f64>() / samples.len() as f64;
+            Some(percent((average - min) / (max - min)))
+        });
         batch(|| {
+            if let Some(clock) = cpu_clock {
+                self.cpu_clock.set(clock);
+            }
             if let Some(clock) = clock {
                 self.gpu_clock.set(clock);
             }

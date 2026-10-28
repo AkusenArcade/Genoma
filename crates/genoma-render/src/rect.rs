@@ -142,7 +142,8 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     var level = in.shape.z * in.half.y * 2.0;
     if (in.wave.x > 0.0) {
         let x = in.local.x + in.half.x;
-        level = level + in.wave.x * sin(6.2831853 * (x / max(in.wave.y, 1.0) + in.wave.z));
+        // The wave travels to the right, as Vital.qml's translation does.
+        level = level + in.wave.x * sin(6.2831853 * (x / max(in.wave.y, 1.0) - in.wave.z));
     }
     let surface = clamp(level - from_bottom + 0.5, 0.0, 1.0);
 

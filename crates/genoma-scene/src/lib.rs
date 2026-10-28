@@ -99,6 +99,7 @@ pub struct Node {
     blur: bool,
     fill_bottom: [f32; 4],
     arc_rate: f32,
+    offset: [f32; 2],
     /// Half the node's width as last laid out: how far the arc's end is from
     /// the centre, to pace its frames.
     arc_radius: f32,
@@ -145,6 +146,7 @@ impl Node {
             blur: false,
             fill_bottom: [0.0; 4],
             arc_rate: 0.0,
+            offset: [0.0; 2],
             arc_radius: 0.0,
             wave: 0.0,
             wave_period: 1.0,
@@ -163,11 +165,14 @@ impl Node {
         if self.pulse <= 0.0 {
             return 1.0;
         }
+        // OutQuad to the peak, InQuad back, as Vital.qml's beat.
         let b = self.beat;
         if b < BEAT_RISE {
-            1.0 + (BEAT_PEAK - 1.0) * (b / BEAT_RISE)
+            let t = b / BEAT_RISE;
+            1.0 + (BEAT_PEAK - 1.0) * (1.0 - (1.0 - t) * (1.0 - t))
         } else if b < BEAT_RISE + BEAT_FALL {
-            BEAT_PEAK - (BEAT_PEAK - 1.0) * ((b - BEAT_RISE) / BEAT_FALL)
+            let t = (b - BEAT_RISE) / BEAT_FALL;
+            BEAT_PEAK - (BEAT_PEAK - 1.0) * (t * t)
         } else {
             1.0
         }
@@ -424,6 +429,10 @@ impl Scene {
             Prop::Fill => n.fill = take!(colour),
             Prop::FillBottom => n.fill_bottom = take!(colour),
             Prop::ArcRate => (n.arc_rate, mover) = (take!(number).max(0.0), true),
+            Prop::OffsetX => n.offset[0] = take!(number),
+            Prop::OffsetY => n.offset[1] = take!(number),
+            Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
+            Prop::PaddingRight => (style.padding.right, restyle) = (LengthPercentage::length(take!(number)), true),
             Prop::RimTop => n.rim_top = take!(colour),
             Prop::RimBottom => n.rim_bottom = take!(colour),
             Prop::Color => n.color = take!(colour),
@@ -697,6 +706,8 @@ fn collect(
         origin[0] += a.sin() * n.orbit_radius;
         origin[1] -= a.cos() * n.orbit_radius;
     }
+    origin[0] += n.offset[0];
+    origin[1] += n.offset[1];
     if n.sway > 0.0 {
         origin[0] += n.sway_range * (0.5 - 0.5 * (n.sway_phase * std::f32::consts::TAU).cos());
     }

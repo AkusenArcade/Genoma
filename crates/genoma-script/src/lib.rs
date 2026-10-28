@@ -91,6 +91,14 @@ struct NiriRef(Rc<Niri>);
 impl UserData for NiriRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
+        // niri.focused → { title = …, app_id = … } or nil, on any output.
+        fields.add_field_method_get("focused", |lua, this| {
+            let Some(w) = this.0.focused_window() else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("title", w.title)?;
+            t.set("app_id", w.app_id)?;
+            Ok(LuaValue::Table(t))
+        });
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
@@ -121,6 +129,7 @@ impl UserData for VitalsRef {
         fields.add_field_method_get("ram", |_, this| Ok(this.0.ram.get()));
         fields.add_field_method_get("gpu", |_, this| Ok(this.0.gpu.get()));
         fields.add_field_method_get("gpu_clock", |_, this| Ok(this.0.gpu_clock.get()));
+        fields.add_field_method_get("cpu_clock", |_, this| Ok(this.0.cpu_clock.get()));
     }
 }
 

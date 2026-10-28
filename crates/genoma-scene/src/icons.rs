@@ -45,7 +45,10 @@ impl Icons {
         if let Some(found) = self.cache.get(&key) {
             return found.clone().map(|p| (key, p));
         }
-        let pixmap = self.find(source).and_then(|path| render(&path, colour, gradient, pixels));
+        // A name is one of the shell's own glyphs, painted in its role; a path
+        // is an application's icon, drawn in its own colours.
+        let recolour = !Path::new(source).is_absolute();
+        let pixmap = self.find(source).and_then(|path| render(&path, recolour.then_some(colour), gradient, pixels));
         let pixels = pixmap.map(|p| Arc::new(p.take()));
         self.cache.insert(key, pixels.clone());
         pixels.map(|p| (key, p))
@@ -54,7 +57,7 @@ impl Icons {
 
 fn render(
     path: &Path,
-    colour: [f32; 4],
+    colour: Option<[f32; 4]>,
     gradient: Option<([f32; 4], [f32; 4])>,
     pixels: u32,
 ) -> Option<tiny_skia::Pixmap> {
@@ -74,12 +77,12 @@ fn render(
         return Some(target);
     }
     let source = std::fs::read_to_string(path).ok()?;
-    let paint = match gradient {
-        Some(_) => "url(#genomaGradient)".to_string(),
-        None => hex(colour),
-    };
-    let mut body = source.replace("currentColor", &paint);
-    if let Some((top, bottom)) = gradient {
+    let mut body = source;
+    if let Some(colour) = colour {
+        let paint = if gradient.is_some() { "url(#genomaGradient)".to_string() } else { hex(colour) };
+        body = body.replace("currentColor", &paint);
+    }
+    if let (Some(_), Some((top, bottom))) = (colour, gradient) {
         // 165°, from the top colour to the bottom one, as Icon.qml writes it.
         let r = 165f32.to_radians();
         let (dx, dy) = (r.sin() / 2.0, -r.cos() / 2.0);
@@ -97,7 +100,7 @@ fn render(
     let s = pixels as f32 / size.width().max(size.height());
     resvg::render(&tree, tiny_skia::Transform::from_scale(s, s), &mut target.as_mut());
     // The colour's own alpha, for a muted icon.
-    if colour[3] < 1.0 && gradient.is_none() {
+    if let Some(colour) = colour.filter(|c| c[3] < 1.0 && gradient.is_none()) {
         for px in target.pixels_mut() {
             let c = px.demultiply();
             let a = (c.alpha() as f32 * colour[3]).round() as u8;

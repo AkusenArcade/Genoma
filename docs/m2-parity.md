@@ -89,7 +89,8 @@ and Genoma's theme module must derive them the same way:
       - the application icon, or `app-fallback` in `textMuted`;
       - the loader glyph while the window is waiting;
       - the title in Spectral `fontTitle`, elided;
-      - present only while a window has focus **on this output**.
+      - present while any window has focus, on any output (`Niri.focusedWindow`).
+        Corrected 2026-10-28 from "on this output", which was an assumption.
 - [ ] **Vitals** (`cells/vitals/Vitals.qml`, `components/Vital.qml`):
       - a 64-unit grid, ring radius 24, stroke max(crisp(1.5 u), 1.5 u);
       - CPU: a beating dot, interval 60000 / (45 + rate × 95) ms, swelling
