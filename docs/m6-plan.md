@@ -42,7 +42,7 @@ sources.
 
 | Gap | First needed by |
 |---|---|
-| Images from files (PNG, JPEG, WebP) and from pixels | the wallpaper; media art; tray and notification pixmaps |
+| Images from files (PNG, JPEG, WebP) and from pixels | the wallpaper (step 4.2); media art; tray and notification pixmaps |
 | A text field (keyboard, layout through xkb, a cursor, selection) | the launcher, then settings, the lock, the greeter |
 | A fragment shader node, Bioma's four `.frag` translated to WGSL | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
@@ -51,8 +51,18 @@ sources.
 
 ## Steps, in dependency order
 
+The order is Bioma's own, its PRD §10 (foundations, services, the three
+cells that validate the system, identity, replacement with notifications
+last, settings, launcher); what is ported at each step is what the current
+code has, which is more than the PRD lists (organisms, tray, clipboard,
+emoji, performance mode, privacy, the lock screen, the greeter…).
+
 ### 0. Ground
 
+- [ ] The feature list the port is measured against: taken from the current
+      code, checked against the PRD's cell catalogue (§9). What the code has
+      and the PRD does not is ported; what the PRD has and the code never
+      built is not the port's, it is Bioma's own work (`genoma/PORT.md`).
 - [ ] `Bioma/genoma/` with its `shell.luau`, a start script beside
       `scripts/bioma`, and Bioma's `CLAUDE.md` saying what the directory is.
 - [ ] Ownership by surface: a key in the configuration that both runtimes
@@ -87,17 +97,18 @@ before a cell depends on it, as Bioma's were from Prisma.
 
 1. [ ] Window title, workspaces, vitals, clock: M2's membrane, moved over and
        brought to today's QML.
-2. [ ] Media (the band's shader), theme, utility.
+2. [ ] Identity (PRD phase 3): media (the band's shader), theme and the
+       wallpaper with its overview backdrop, utility.
 3. [ ] Volume, connectivity, session, dock, tray.
 4. [ ] The rest: actions, clipboard, downloads, drives, emoji, keyboard,
        performance, polkit, privacy, system, timer.
 5. [ ] Notifications, last.
 6. [ ] Settings, then the launcher.
 
-### 5. The desktop
+### 5. The organisms
 
-- [ ] The wallpaper and its backdrop for the overview.
-- [ ] The organisms, and their arrange mode.
+- [ ] The organisms, and their arrange mode (not in the PRD; built after
+      it, on the wallpaper's layer).
 
 ### 6. Lock and greeter
 
