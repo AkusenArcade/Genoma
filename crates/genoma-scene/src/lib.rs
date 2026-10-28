@@ -122,6 +122,9 @@ pub struct Node {
     scroll_y: f32,
     dash: [f32; 2],
     italic: bool,
+    weight: Option<u16>,
+    /// Letter spacing, em.
+    tracking: f32,
     crisp: bool,
     /// A thread's start, control point and end, logical units in its box.
     path: [f32; 6],
@@ -195,6 +198,8 @@ impl Node {
             scroll_y: 0.0,
             dash: [0.0; 2],
             italic: false,
+            weight: None,
+            tracking: 0.0,
             crisp: false,
             path: [0.0; 6],
             node_size: 0.0,
@@ -784,6 +789,7 @@ impl Scene {
                     "above-center" => 4,
                     "left" => 5,
                     "right" => 6,
+                    "corner" => 7,
                     _ => 0,
                 }
             }
@@ -795,6 +801,8 @@ impl Scene {
             Prop::Dash => n.dash[0] = take!(number).max(0.0),
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
             Prop::Italic => (n.italic, reshape) = (take!(flag), true),
+            Prop::Weight => (n.weight, reshape) = (Some(take!(number).clamp(100.0, 900.0) as u16), true),
+            Prop::Tracking => (n.tracking, reshape) = (take!(number), true),
             Prop::Crisp => n.crisp = take!(flag),
             Prop::FromX => n.path[0] = take!(number),
             Prop::FromY => n.path[1] = take!(number),
@@ -1065,24 +1073,64 @@ impl Scene {
     }
 }
 
+/// How a text is set: what both drawing it and measuring it need.
+pub struct TextStyle<'a> {
+    pub font: Option<&'a str>,
+    pub italic: bool,
+    pub tabular: bool,
+    pub weight: Option<u16>,
+    /// em.
+    pub tracking: f32,
+}
+
+impl TextStyle<'_> {
+    fn attrs(&self) -> ct::Attrs<'_> {
+        let mut attrs = ct::Attrs::new();
+        if let Some(font) = self.font {
+            attrs = attrs.family(ct::Family::Name(font));
+        }
+        if self.italic {
+            attrs = attrs.style(ct::Style::Italic);
+        }
+        if let Some(w) = self.weight {
+            attrs = attrs.weight(ct::Weight(w));
+        }
+        if self.tracking != 0.0 {
+            attrs = attrs.letter_spacing(self.tracking);
+        }
+        if self.tabular {
+            let mut features = ct::FontFeatures::new();
+            features.enable(ct::FeatureTag::new(b"tnum"));
+            attrs = attrs.font_features(features);
+        }
+        attrs
+    }
+}
+
+/// How wide `text` is set in `style` at `size`, logical units: what a layout
+/// that hands out room by number (Bioma's tissues) needs before drawing.
+pub fn measure_text(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &TextStyle<'_>) -> f32 {
+    let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(size, (size * 1.2).ceil()));
+    buffer.set_wrap(ct::Wrap::None);
+    buffer.set_text(text, &style.attrs(), ct::Shaping::Advanced, None);
+    buffer.shape_until_scroll(fonts, false);
+    buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+}
+
 fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     if let Some(buffer) = &n.buffer {
         return buffer.clone();
     }
     let metrics = ct::Metrics::new(n.font_size, (n.font_size * 1.2).ceil());
     let mut buffer = ct::Buffer::new(fonts, metrics);
-    let mut attrs = ct::Attrs::new();
-    if let Some(font) = &n.font {
-        attrs = attrs.family(ct::Family::Name(font));
-    }
-    if n.italic {
-        attrs = attrs.style(ct::Style::Italic);
-    }
-    if n.tabular {
-        let mut features = ct::FontFeatures::new();
-        features.enable(ct::FeatureTag::new(b"tnum"));
-        attrs = attrs.font_features(features);
-    }
+    let style = TextStyle {
+        font: n.font.as_deref(),
+        italic: n.italic,
+        tabular: n.tabular,
+        weight: n.weight,
+        tracking: n.tracking,
+    };
+    let attrs = style.attrs();
     // A limited width ends the line in an ellipsis: never wrapped, never
     // shrunk (Bioma's window title).
     buffer.set_wrap(ct::Wrap::None);
@@ -1202,6 +1250,7 @@ fn collect(
             4 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] - layout.size.height],
             5 => [parent[0] - layout.size.width, parent[1] + (parent[3] - layout.size.height) / 2.0],
             6 => [parent[0] + parent[2], parent[1] + (parent[3] - layout.size.height) / 2.0],
+            7 => [parent[0], parent[1]],
             _ => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0],
         }
     } else {

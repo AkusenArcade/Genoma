@@ -47,6 +47,8 @@ pub trait Host {
         &self,
         deliver: Box<dyn FnMut(crate::dbus::Delivery)>,
     ) -> Option<calloop::channel::Sender<crate::dbus::Delivery>>;
+    /// How wide `text` is set in `style` at `size`, logical units.
+    fn measure(&self, text: &str, size: f32, style: &genoma_scene::TextStyle<'_>) -> f32;
 }
 
 pub type HostRef = Rc<dyn Host>;
@@ -176,6 +178,23 @@ pub fn timer(host: &HostRef, t: Table) -> mlua::Result<Timer> {
         Box::new(move || {
             call(&on_tick, "g.timer", ());
             Some(every)
+        }),
+    ));
+    Ok(Timer(stop))
+}
+
+/// `g.after(seconds, function() … end)`: once, later; `:stop()` before it
+/// fires to keep it from firing.
+pub fn after(host: &HostRef, (seconds, f): (f64, Function)) -> mlua::Result<Timer> {
+    let stop = Stop::new(host);
+    let mut f = Some(f);
+    stop.hold(host.timer(
+        Duration::from_secs_f64(seconds.max(0.0)),
+        Box::new(move || {
+            if let Some(f) = f.take() {
+                call(&f, "g.after", ());
+            }
+            None
         }),
     ));
     Ok(Timer(stop))

@@ -261,7 +261,7 @@ impl Sources {
 }
 
 /// The loop, as the script's building blocks see it (PRD §9.2).
-struct LoopHost(LoopHandle<'static, wayland::App>);
+struct LoopHost(LoopHandle<'static, wayland::App>, Arc<Mutex<FontSystem>>);
 
 impl genoma_script::io::Host for LoopHost {
     fn timer(&self, after: Duration, mut tick: Box<dyn FnMut() -> Option<Duration>>) -> Option<RegistrationToken> {
@@ -301,6 +301,11 @@ impl genoma_script::io::Host for LoopHost {
             .map_err(|e| log::error!("channel: {e}"))
             .ok()?;
         Some(sender)
+    }
+
+    fn measure(&self, text: &str, size: f32, style: &genoma_scene::TextStyle<'_>) -> f32 {
+        let mut fonts = self.1.lock().unwrap();
+        genoma_scene::measure_text(&mut fonts, text, size, style)
     }
 }
 
@@ -570,8 +575,8 @@ fn probe() {
 /// Evaluates the interface, fits the surfaces to what it asks for, and mounts
 /// a tree on each. The last trees stay if any step fails.
 fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> {
-    let spec = script.borrow_mut().evaluate()?;
-    let targets = app.apply(spec);
+    let specs = script.borrow_mut().evaluate()?;
+    let targets = app.apply(specs);
     script.borrow_mut().mount(&targets)?;
     app.refit();
     Ok(())
@@ -591,10 +596,10 @@ fn run(dir: PathBuf) {
 
     let mut event_loop: EventLoop<'static, wayland::App> = EventLoop::try_new().expect("event loop");
     let handle = event_loop.handle();
-    app.start(renderer, fonts, handle.clone());
+    app.start(renderer, fonts.clone(), handle.clone());
 
     let (services, niri_stream) = services();
-    let host: genoma_script::io::HostRef = Rc::new(LoopHost(handle.clone()));
+    let host: genoma_script::io::HostRef = Rc::new(LoopHost(handle.clone(), fonts.clone()));
     let script = Rc::new(RefCell::new(Script::new(&dir, services.clone(), host)));
     load(&script, &mut app).unwrap_or_else(|e| fail(&e));
     log::info!("loaded {}", dir.join("shell.luau").display());

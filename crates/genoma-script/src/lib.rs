@@ -89,6 +89,12 @@ pub struct SurfaceSpec {
     pub output: Option<String>,
     /// Keep windows out of the surface's strip (a membrane on its edge).
     pub reserve: bool,
+    /// The strip to keep windows out of, logical units, when the surface is
+    /// larger than its strip (a `full` membrane); otherwise its height.
+    pub reserve_strip: Option<i32>,
+    /// The size of its output, whatever its content: a membrane whose cells
+    /// open over the windows, as Bioma's are, so the surface never resizes.
+    pub full: bool,
     /// `"all"` for one surface on every output, a list of output names, or
     /// none for a single surface (on `output`, or the compositor's choice).
     pub outputs: Option<Vec<String>>,
@@ -783,7 +789,7 @@ pub struct Script {
     lua: Lua,
     /// A file evaluated and not yet mounted: its Luau state, the surface
     /// table it returned, and the scope of what its top-level code started.
-    pending: Option<(Lua, Table, Scope)>,
+    pending: Option<(Lua, Vec<Table>, Scope)>,
     dir: PathBuf,
     scope: Option<Scope>,
     /// What the mounted load's top-level code started (processes, files,
@@ -804,7 +810,9 @@ pub struct Script {
 }
 
 /// One tree to mount: the output it is for, and the scene it goes into.
-pub type Target = (Option<String>, Rc<RefCell<Scene>>);
+/// The output's logical size rides along: a surface spanning its output lays
+/// out against its length (Bioma's membranes).
+pub type Target = (usize, Option<String>, Rc<RefCell<Scene>>, Option<(u32, u32)>);
 
 fn err(message: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(message.into())
@@ -873,7 +881,7 @@ impl Script {
     /// Evaluates `shell.luau` and returns where its surfaces go. Nothing is
     /// mounted until [`Script::mount`]: the runtime first makes a surface for
     /// each output the description asks for.
-    pub fn evaluate(&mut self) -> Result<SurfaceSpec, String> {
+    pub fn evaluate(&mut self) -> Result<Vec<SurfaceSpec>, String> {
         // A fresh state for each load: modules are evaluated again and
         // nothing of the old chunks survives but the `g.state` signals.
         let lua = Lua::new();
@@ -882,21 +890,29 @@ impl Script {
         let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         // What the top-level code starts belongs to this load, and is stopped
         // if the load fails or when the next one is mounted.
-        let (scope, result) = Scope::new(|| -> Result<(Table, SurfaceSpec), String> {
-            let surface: Table =
+        // One g.surface, or a list of them: a shell has several surfaces on
+        // each output (a membrane on each edge, the floats, the wallpaper).
+        let (scope, result) = Scope::new(|| -> Result<(Vec<Table>, Vec<SurfaceSpec>), String> {
+            let returned: Table =
                 lua.load(&source).set_name(format!("@{}", path.display())).eval().map_err(|e| e.to_string())?;
-            if surface.get::<Option<bool>>("__surface").ok().flatten() != Some(true) {
-                return Err("shell.luau must return g.surface { … }".into());
+            let is_surface = |t: &Table| t.get::<Option<bool>>("__surface").ok().flatten() == Some(true);
+            let surfaces: Vec<Table> = if is_surface(&returned) {
+                vec![returned]
+            } else {
+                returned.sequence_values::<Table>().collect::<mlua::Result<_>>().map_err(|e| e.to_string())?
+            };
+            if surfaces.iter().any(|t| !is_surface(t)) {
+                return Err("shell.luau must return g.surface { … }, or a list of them".into());
             }
-            let spec = surface_spec(&surface).map_err(|e| e.to_string())?;
-            Ok((surface, spec))
+            let specs = surfaces.iter().map(surface_spec).collect::<mlua::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+            Ok((surfaces, specs))
         });
         match result {
-            Ok((surface, spec)) => {
-                if let Some((_, _, stale)) = self.pending.replace((lua, surface, scope)) {
+            Ok((surfaces, specs)) => {
+                if let Some((_, _, stale)) = self.pending.replace((lua, surfaces, scope)) {
                     stale.dispose();
                 }
-                Ok(spec)
+                Ok(specs)
             }
             Err(e) => {
                 scope.dispose();
@@ -910,24 +926,43 @@ impl Script {
     /// output; a table is one tree for one surface. On an error the last
     /// trees stay as they were, and so do the scenes.
     pub fn mount(&mut self, targets: &[Target]) -> Result<(), String> {
-        let Some((lua, surface, io_scope)) = self.pending.take() else { return Err("nothing evaluated".into()) };
-        let content: LuaValue = match surface.get(1) {
-            Ok(content) => content,
-            Err(e) => {
+        let Some((lua, surfaces, io_scope)) = self.pending.take() else { return Err("nothing evaluated".into()) };
+        let mut contents: Vec<LuaValue> = Vec::with_capacity(surfaces.len());
+        for (i, surface) in surfaces.iter().enumerate() {
+            let content: LuaValue = match surface.get(1) {
+                Ok(content) => content,
+                Err(e) => {
+                    io_scope.dispose();
+                    return Err(e.to_string());
+                }
+            };
+            if matches!(content, LuaValue::Table(_)) && targets.iter().filter(|t| t.0 == i).count() > 1 {
                 io_scope.dispose();
-                return Err(e.to_string());
+                return Err("g.surface for several outputs holds a function of the output".into());
             }
-        };
-        if matches!(content, LuaValue::Table(_)) && targets.len() > 1 {
-            io_scope.dispose();
-            return Err("g.surface for several outputs holds a function of the output".into());
+            contents.push(content);
         }
         let handlers: Handlers = Rc::default();
         let (scope, result) = Scope::new(|| -> mlua::Result<Vec<genoma_scene::NodeId>> {
             let mut holders = Vec::new();
-            for (index, (output, scene)) in targets.iter().enumerate() {
-                let tree: Table = match &content {
-                    LuaValue::Function(f) => f.call(output.clone())?,
+            for (index, (spec, output, scene, size)) in targets.iter().enumerate() {
+                let Some(content) = contents.get(*spec) else { return Err(err("a surface with no description")) };
+                let tree: Table = match content {
+                    // f(output, { width, height }), the size when the
+                    // compositor has said it.
+                    LuaValue::Function(f) => {
+                        let lua = f.weak_lua().upgrade();
+                        let info = match size {
+                            Some((w, h)) => {
+                                let t = lua.create_table()?;
+                                t.set("width", *w)?;
+                                t.set("height", *h)?;
+                                LuaValue::Table(t)
+                            }
+                            None => LuaValue::Nil,
+                        };
+                        f.call((output.clone(), info))?
+                    }
                     LuaValue::Table(t) => t.clone(),
                     _ => return Err(err("g.surface holds one node, or a function returning one")),
                 };
@@ -948,14 +983,14 @@ impl Script {
                 if let Some(old) = self.io_scope.replace(io_scope) {
                     old.dispose();
                 }
-                for ((_, scene), holder) in targets.iter().zip(holders) {
+                for ((_, _, scene, _), holder) in targets.iter().zip(holders) {
                     let mut s = scene.borrow_mut();
                     let root = s.root();
                     s.clear();
                     s.append(root, holder);
                     s.set_icon_dirs(self.icon_dirs.borrow().clone());
                 }
-                self.scenes = targets.iter().map(|(_, s)| s.clone()).collect();
+                self.scenes = targets.iter().map(|(_, _, s, _)| s.clone()).collect();
                 self.scope = Some(scope);
                 self.lua = lua;
                 // The map itself, not its contents: a keyed list adds and
@@ -1012,9 +1047,68 @@ impl Script {
                 Ok(())
             })?,
         )?;
+        // g.watch(source, handler): handler(value) now and whenever what
+        // source read changes — QML's onXChanged. Only the source is
+        // tracked; the handler runs untracked, and what it starts (a
+        // g.after) is not the watch's, so the next change does not stop it.
+        g.set(
+            "watch",
+            lua.create_function(|_, (source, handler): (Function, Function)| {
+                Effect::new(move || {
+                    let value = match source.call::<LuaValue>(()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("g.watch source: {e}");
+                            return;
+                        }
+                    };
+                    let handler = handler.clone();
+                    genoma_core::reactive::untracked(|| {
+                        detached(|| {
+                            if let Err(e) = handler.call::<()>(value) {
+                                log::error!("g.watch: {e}");
+                            }
+                        })
+                    });
+                });
+                Ok(())
+            })?,
+        )?;
+        // g.untracked(fn): its result, without what it read becoming a
+        // dependency of the binding around it.
+        g.set(
+            "untracked",
+            lua.create_function(|_, f: Function| genoma_core::reactive::untracked(|| f.call::<LuaValue>(())))?,
+        )?;
         // g.env("XDG_CONFIG_HOME") → its value or nil: the sandbox has no
         // environment of its own.
         g.set("env", lua.create_function(|_, name: String| Ok(std::env::var(name).ok()))?)?;
+        // g.signal(value): a value bindings follow, made anew by each load
+        // (g.state is the one kept across loads).
+        g.set("signal", lua.create_function(|_, initial: LuaValue| Ok(State(Signal::new(StateValue::from_lua(&initial)))))?)?;
+        let host = self.host.clone();
+        g.set("after", lua.create_function(move |_, args: (f64, Function)| io::after(&host, args))?)?;
+        // g.now(): seconds on a monotonic clock, for measuring a wait.
+        let epoch = std::time::Instant::now();
+        g.set("now", lua.create_function(move |_, ()| Ok(epoch.elapsed().as_secs_f64()))?)?;
+        // g.text_width { text, font, size, weight, italic, tabular, tracking }:
+        // logical units, as the text would be drawn.
+        let host = self.host.clone();
+        g.set(
+            "text_width",
+            lua.create_function(move |_, t: Table| {
+                let text: String = t.get("text")?;
+                let font: Option<String> = t.get("font")?;
+                let style = genoma_scene::TextStyle {
+                    font: font.as_deref(),
+                    italic: t.get::<Option<bool>>("italic")?.unwrap_or(false),
+                    tabular: t.get::<Option<bool>>("tabular")?.unwrap_or(false),
+                    weight: t.get::<Option<f64>>("weight")?.map(|w| w.clamp(100.0, 900.0) as u16),
+                    tracking: t.get::<Option<f32>>("tracking")?.unwrap_or(0.0),
+                };
+                Ok(host.measure(&text, t.get("size")?, &style))
+            })?,
+        )?;
         // g.dir: the interface's directory.
         g.set("dir", self.dir.display().to_string())?;
         // g.parse_json(text) → the value; g.to_json(value, pretty) → text.
@@ -1277,7 +1371,18 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
         margin,
         layer: t.get::<Option<String>>("layer")?.unwrap_or_else(|| "top".into()),
         output: t.get("output")?,
-        reserve: t.get::<Option<bool>>("reserve")?.unwrap_or(false),
+        reserve: match t.get::<LuaValue>("reserve")? {
+            LuaValue::Boolean(b) => b,
+            LuaValue::Integer(n) => n > 0,
+            LuaValue::Number(n) => n > 0.0,
+            _ => false,
+        },
+        reserve_strip: match t.get::<LuaValue>("reserve")? {
+            LuaValue::Integer(n) => Some(n as i32),
+            LuaValue::Number(n) => Some(n.round() as i32),
+            _ => None,
+        },
+        full: t.get::<Option<bool>>("full")?.unwrap_or(false),
         namespace: t.get::<Option<String>>("namespace")?.unwrap_or_else(|| "genoma".into()),
         all_outputs: matches!(t.get::<LuaValue>("outputs")?, LuaValue::String(ref s) if s.to_string_lossy() == "all"),
         outputs: match t.get::<LuaValue>("outputs")? {

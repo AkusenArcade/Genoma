@@ -66,6 +66,8 @@ use smithay_client_toolkit::{
 /// One layer surface and everything about it that is its own.
 struct Surface {
     id: SurfaceId,
+    /// Which of the interface's surfaces it is (its place in the list).
+    spec: usize,
     /// The output it was made for, by name; `None` for the compositor's
     /// choice.
     output: Option<String>,
@@ -122,7 +124,8 @@ pub struct App {
 
     renderer: Option<Renderer>,
     fonts: Option<Fonts>,
-    spec: Option<SurfaceSpec>,
+    /// The interface's surfaces, as it last described them.
+    specs: Vec<SurfaceSpec>,
     surfaces: Vec<Surface>,
     next_id: SurfaceId,
     handle: Option<LoopHandle<'static, App>>,
@@ -164,7 +167,7 @@ impl App {
             feedback_done: false,
             renderer: None,
             fonts: None,
-            spec: None,
+            specs: Vec::new(),
             surfaces: Vec::new(),
             next_id: 1,
             handle: None,
@@ -255,35 +258,44 @@ impl App {
     /// Makes and removes surfaces so there is one per output the description
     /// asks for, and places them all. Returns the targets to mount, in the
     /// surfaces' order.
-    pub fn apply(&mut self, spec: SurfaceSpec) -> Vec<Target> {
-        let wanted = self.wanted_outputs(&spec);
-        let renderer_ids: Vec<SurfaceId> = self
+    pub fn apply(&mut self, specs: Vec<SurfaceSpec>) -> Vec<Target> {
+        // Every (surface, output) the description asks for, in its order.
+        let wanted: Vec<(usize, Option<String>)> = specs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, spec)| self.wanted_outputs(spec).into_iter().map(move |o| (i, o)))
+            .collect();
+        // A surface whose layer or namespace changed is made again: a layer
+        // surface keeps both for its life.
+        let changed = |i: usize, old: &[SurfaceSpec]| {
+            old.get(i).is_none_or(|o| specs.get(i).is_none_or(|n| o.layer != n.layer || o.namespace != n.namespace))
+        };
+        let old = std::mem::take(&mut self.specs);
+        let gone: Vec<SurfaceId> = self
             .surfaces
             .iter()
-            .filter(|s| !wanted.contains(&s.output))
+            .filter(|s| !wanted.contains(&(s.spec, s.output.clone())) || changed(s.spec, &old))
             .map(|s| s.id)
             .collect();
         if let Some(renderer) = &self.renderer {
-            for id in &renderer_ids {
+            for id in &gone {
                 renderer.destroy_target(*id);
             }
         }
-        self.surfaces.retain(|s| wanted.contains(&s.output));
-        if let Some(old) = &self.spec {
-            if old.layer != spec.layer || old.namespace != spec.namespace {
-                log::warn!("a new layer or namespace takes effect at the next start");
+        self.surfaces.retain(|s| !gone.contains(&s.id));
+        self.specs = specs;
+        for (spec, output) in &wanted {
+            if !self.surfaces.iter().any(|s| s.spec == *spec && &s.output == output) {
+                let description = self.specs[*spec].clone();
+                self.make_surface(*spec, output.clone(), &description);
             }
         }
-        self.spec = Some(spec.clone());
-        for output in &wanted {
-            if !self.surfaces.iter().any(|s| &s.output == output) {
-                self.make_surface(output.clone(), &spec);
-            }
-        }
+        // In the description's order, which is the order trees are mounted in.
+        self.surfaces.sort_by_key(|s| wanted.iter().position(|w| w.0 == s.spec && w.1 == s.output).unwrap_or(usize::MAX));
         for i in 0..self.surfaces.len() {
             self.place(i);
         }
-        self.surfaces.iter().map(|s| (s.output.clone(), s.scene.clone())).collect()
+        self.surfaces.iter().map(|s| (s.spec, s.output.clone(), s.scene.clone(), s.output_size)).collect()
     }
 
     /// Measures and places every surface again: called once their trees are
@@ -294,7 +306,7 @@ impl App {
         }
     }
 
-    fn make_surface(&mut self, output_name: Option<String>, spec: &SurfaceSpec) {
+    fn make_surface(&mut self, spec_index: usize, output_name: Option<String>, spec: &SurfaceSpec) {
         let fonts = self.fonts.clone().expect("started");
         let qh = self.qh.clone();
         let id = self.next_id;
@@ -326,6 +338,7 @@ impl App {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         self.surfaces.push(Surface {
             id,
+            spec: spec_index,
             output: output_name,
             scene: Rc::new(RefCell::new(Scene::new(fonts))),
             layer,
@@ -355,8 +368,8 @@ impl App {
     /// A surface anchored to both left and right spans its edge, as a
     /// membrane does: the compositor gives it the width and the content lays
     /// out across it.
-    fn spans(&self) -> bool {
-        self.spec.as_ref().is_some_and(|s| {
+    fn spans(&self, i: usize) -> bool {
+        self.specs.get(self.surfaces[i].spec).is_some_and(|s| {
             s.anchor.iter().any(|a| a == "left") && s.anchor.iter().any(|a| a == "right")
         })
     }
@@ -364,7 +377,7 @@ impl App {
     /// The size to ask the compositor for: the content's, with 0 for a
     /// spanned width, which the compositor fills.
     fn measure(&mut self, i: usize) -> (u32, u32) {
-        let spans = self.spans();
+        let spans = self.spans(i);
         let s = &mut self.surfaces[i];
         let width = (spans && s.configured).then_some(s.logical.0 as f32);
         let size = s.scene.borrow_mut().layout(width, None);
@@ -373,6 +386,15 @@ impl App {
         // expansion is drawn there and a press anywhere else must reach it.
         let catching = s.scene.borrow().catcher().is_some();
         s.tall = catching || (s.tall && s.scene.borrow().transitioning());
+        // A full surface is its output's size from the start and stays so:
+        // resizing a layer surface draws its content once at each size.
+        let full = self.specs.get(self.surfaces[i].spec).is_some_and(|spec| spec.full);
+        let s = &mut self.surfaces[i];
+        if full {
+            if let Some((ow, oh)) = s.output_size {
+                return (if spans { 0 } else { ow }, oh);
+            }
+        }
         let h = match (s.tall, s.output_size) {
             (true, Some((_, oh))) => oh,
             _ => size.1.ceil().max(1.0) as u32,
@@ -382,7 +404,7 @@ impl App {
 
     fn place(&mut self, i: usize) {
         let wanted = self.measure(i);
-        let Some(spec) = self.spec.clone() else { return };
+        let Some(spec) = self.specs.get(self.surfaces[i].spec).cloned() else { return };
         let s = &mut self.surfaces[i];
         s.wanted = wanted;
         let mut anchor = Anchor::empty();
@@ -404,8 +426,10 @@ impl App {
         s.layer.set_size(wanted.0, wanted.1);
         // The reserved strip stays the membrane's, however tall the surface
         // grows while a cell is open.
-        if !s.tall {
-            s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
+        match spec.reserve_strip {
+            Some(strip) => s.layer.set_exclusive_zone(if spec.reserve { strip } else { 0 }),
+            None if !s.tall => s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
+            None => {}
         }
         s.layer.set_keyboard_interactivity(if s.scene.borrow().catcher().is_some() {
             KeyboardInteractivity::Exclusive
@@ -446,7 +470,7 @@ impl App {
     }
 
     fn draw(&mut self, i: usize) {
-        let spans = self.spans();
+        let spans = self.spans(i);
         let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
         let (Some(renderer), Some(handle)) = (&self.renderer, self.handle.clone()) else { return };
         let compositor = &self.compositor;
@@ -868,7 +892,7 @@ impl OutputHandler for App {
     }
 
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        if self.spec.as_ref().is_some_and(|s| s.all_outputs || s.outputs.is_some()) {
+        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some()) {
             self.outputs_changed = true;
         }
     }
@@ -876,7 +900,7 @@ impl OutputHandler for App {
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        if self.spec.as_ref().is_some_and(|s| s.all_outputs || s.outputs.is_some()) {
+        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some()) {
             self.outputs_changed = true;
         }
     }
