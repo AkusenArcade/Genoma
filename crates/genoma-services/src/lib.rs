@@ -7,6 +7,7 @@
 //! nothing happens. D-Bus is the exception the PRD allows (§4): its
 //! connections live on one bus thread, which posts into the loop.
 
+pub mod audio;
 pub mod bus;
 pub mod clock;
 pub mod icons;

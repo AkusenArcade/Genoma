@@ -22,6 +22,7 @@ use genoma_core::{
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
+    audio::Audio,
     clock::Clock,
     media::{Action, Media},
     network::Network,
@@ -149,6 +150,7 @@ pub struct Services {
     pub power: Rc<Power>,
     pub network: Rc<Network>,
     pub media: Rc<Media>,
+    pub audio: Rc<Audio>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -399,6 +401,71 @@ impl UserData for MediaRef {
         });
         methods.add_method("set_position", |_, this, (name, at): (String, f64)| {
             this.0.act(name, Action::SetPosition(at));
+            Ok(())
+        });
+    }
+}
+
+struct AudioRef(Rc<Audio>);
+
+impl UserData for AudioRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // audio.nodes → { { id, name, description, nickname, media_class,
+        // kind, properties = { … }, has_volume, volume, channels, muted }, … }
+        fields.add_field_method_get("nodes", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, n) in this.0.nodes.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", n.id)?;
+                t.set("name", n.name)?;
+                t.set("description", n.description)?;
+                t.set("nickname", n.nickname)?;
+                t.set("media_class", n.media_class)?;
+                t.set("kind", n.kind)?;
+                let props = lua.create_table()?;
+                for (k, v) in n.properties {
+                    props.set(k, v)?;
+                }
+                t.set("properties", props)?;
+                t.set("has_volume", n.has_volume)?;
+                t.set("volume", n.volume)?;
+                t.set("channels", n.channels)?;
+                t.set("muted", n.muted)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // audio.links → { { id, output, input, active }, … }: from the output
+        // node to the input node, which is how Privacy tells who captures.
+        fields.add_field_method_get("links", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, l) in this.0.links.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", l.id)?;
+                t.set("output", l.output)?;
+                t.set("input", l.input)?;
+                t.set("active", l.active)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // The defaults by `node.name`, as PipeWire keeps them.
+        fields.add_field_method_get("default_sink", |_, this| Ok(this.0.default_sink.get()));
+        fields.add_field_method_get("default_source", |_, this| Ok(this.0.default_source.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("set_volume", |_, this, (id, volume): (u32, f64)| {
+            this.0.set_volume(id, volume);
+            Ok(())
+        });
+        methods.add_method("set_mute", |_, this, (id, muted): (u32, bool)| {
+            this.0.set_mute(id, muted);
+            Ok(())
+        });
+        // audio:set_default(id): a sink or a source, by its kind.
+        methods.add_method("set_default", |_, this, id: u32| {
+            this.0.set_default(id);
             Ok(())
         });
     }
@@ -762,7 +829,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -770,6 +837,7 @@ impl Script {
                         "power" => "power",
                         "network" => "network",
                         "media" => "media",
+                        "audio" => "audio",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -784,6 +852,7 @@ impl Script {
                         "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
                         "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,
                         "media" => lua.create_userdata(MediaRef(services.media.clone()))?,
+                        "audio" => lua.create_userdata(AudioRef(services.audio.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

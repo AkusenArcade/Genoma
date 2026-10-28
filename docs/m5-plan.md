@@ -131,9 +131,30 @@ closed; pause held the position, play resumed it, seek +30 and set_position
 
 ### 5. Audio
 
-- [ ] PipeWire: sinks and sources, the defaults, volume and mute, setting
+- [x] PipeWire: sinks and sources, the defaults, volume and mute, setting
       them; streams by application. Its loop on its own thread. Checked
       against `wpctl`.
+
+*Built 2026-10-28,* to what Bioma's `services/Audio.qml` and `Privacy.qml`
+read: every node with its class, kind, description, nickname and all its
+properties, volume and mute; the default sink and source by `node.name`,
+from the "default" metadata; the links between nodes. Volume, mute and the
+default set back (the default through `default.configured.*`, which
+WirePlumber keeps). Volumes are on `wpctl`'s scale, the cube root of what
+PipeWire stores. The `pipewire` 0.10 crate on its own thread,
+`genoma-pipewire`, posting into the loop.
+- The probe matched `wpctl status`: HDMI 0.40, Revelator 0.60 and the
+  default, the Revelator source the default input, Bioma's sinestesia
+  capture stream and its two active links.
+- Volume 0.5 and mute set from Luau on "USB Audio Speakers", where nothing
+  plays: `wpctl` saw both, Genoma saw both come back, and both were put
+  back.
+- One bug found on the way: an `info` event about parameters alone carries
+  an empty property dictionary, which had wiped the node's class; the
+  properties are taken only when the event says they changed.
+- At rest the PipeWire thread woke 0 times in 30 s.
+- [ ] Setting the default sink live: it moves whatever plays, so it waits
+      for Akusen. Streams by application, when something plays.
 
 ### 6. Bluetooth
 

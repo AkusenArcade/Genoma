@@ -65,7 +65,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -80,7 +80,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network", "media"] {
+        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -142,6 +142,19 @@ impl Sources {
                         })
                         .expect("media channel");
                     self.services.media.start(&bus, post);
+                }
+                "audio" => {
+                    // Its own thread, PipeWire's loop: no bus needed.
+                    let audio = self.services.audio.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                audio.apply(update);
+                            }
+                        })
+                        .expect("audio channel");
+                    self.services.audio.start(post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -309,6 +322,26 @@ fn probe() {
             );
         }
     });
+    let a = services.audio.clone();
+    Effect::new(move || println!("audio   default sink {:?}, source {:?}", a.default_sink.get(), a.default_source.get()));
+    let a = services.audio.clone();
+    Effect::new(move || {
+        for n in a.nodes.get() {
+            if matches!(n.kind, "sink" | "source" | "output-stream" | "input-stream") {
+                println!(
+                    "audio   {:>4} {:<13} {:<40} vol {:.2}{} {}",
+                    n.id,
+                    n.kind,
+                    if n.description.is_empty() { &n.name } else { &n.description },
+                    n.volume,
+                    if n.muted { " muted" } else { "" },
+                    n.properties.iter().find(|(k, _)| k == "application.name").map(|(_, v)| v.as_str()).unwrap_or("")
+                );
+            }
+        }
+    });
+    let a = services.audio.clone();
+    Effect::new(move || println!("audio   {} links, {} active", a.links.get().len(), a.links.get().iter().filter(|l| l.active).count()));
     let mut sources = Sources { services, niri_stream: stream, bus: None, started: Vec::new() };
     sources.start(|_| true, &handle);
     event_loop.run(None, &mut (), |_| {}).expect("event loop");
