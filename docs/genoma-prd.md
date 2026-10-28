@@ -226,9 +226,12 @@ toolkits, so it is planned rather than discovered.
 - **Rasterisation.** `swash` into a shared atlas keyed by font, glyph,
   physical size and subpixel offset. Text is redrawn at each scale, never
   stretched.
-- **Under depth transforms** (§8.4), glyphs drawn at the transformed size come
-  from the atlas at that size. MSDF is the fallback if atlas churn shows up in
-  measurements. That choice is left open until a measurement decides it (§12).
+- **Under depth transforms** (§8.4), text in a tilted subtree is rasterised
+  once on the CPU at its flat physical size, with glyphon's own subpixel
+  placement, and drawn as an image through the subtree's matrix. Depth is a
+  transition, so a foreshortened raster is only seen in motion; at rest the
+  matrix is the identity and the text is glyphon's again, with no glyph
+  moving at the switch (§12, question 2).
 - `glyphon` 0.12 (cosmic-text on wgpu) is a candidate to start with and to
   replace when the shared instance pipeline needs to own glyphs too.
 
@@ -699,9 +702,12 @@ it long, not the renderer.
 
 1. ~~**Adapter by DRM node.**~~ *Closed in M0:* by PCI address, through
    sysfs and `wgpu`'s `device_pci_bus_id` (§5.1).
-2. **Text under depth.** Glyph atlas at transformed sizes, or MSDF. Stays
-   open until M4, where a measurement decides it: before text is drawn in
-   depth there is nothing to measure.
+2. ~~**Text under depth.**~~ *Closed in M4, 2026-10-28:* neither an atlas at
+   transformed sizes nor MSDF. The text is rasterised once at its flat size
+   and projected as an image while tilted, and is glyphon's at rest. It costs
+   one raster per thing said while tilted, no frame time to measure (render
+   p99 193 µs with it), and 0.7 MB. MSDF comes back only if text must stay
+   tilted at rest, which no Bioma surface does.
 3. ~~**Render thread.**~~ *Closed 2026-10-28:* split from M1. The main thread
    builds immutable draw lists, and the render thread owns the device and
    draws them. The split decides the draw-list API, and that API is what

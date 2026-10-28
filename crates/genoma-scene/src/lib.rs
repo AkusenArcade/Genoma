@@ -7,6 +7,7 @@
 //! when it next will (`Motion`); the surface asks the compositor for a frame
 //! only then.
 
+mod glyphs;
 mod icons;
 mod schema;
 
@@ -372,6 +373,7 @@ pub struct Scene {
     last_step: Option<Instant>,
     dirty: bool,
     icons: icons::Icons,
+    glyphs: glyphs::Glyphs,
     /// Particles' clock: their births and their age are seconds since this.
     epoch: Instant,
     now: f32,
@@ -404,6 +406,7 @@ impl Scene {
             last_step: None,
             dirty: true,
             icons: icons::Icons::default(),
+            glyphs: glyphs::Glyphs::default(),
             epoch: Instant::now(),
             now: 0.0,
             blur: Vec::new(),
@@ -1026,7 +1029,7 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
+        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, glyphs: &mut self.glyphs, blur: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         list
@@ -1080,6 +1083,7 @@ struct Out<'a> {
     /// The clip in force, physical pixels: x0, y0, x1, y1.
     clip: [f32; 4],
     icons: &'a mut icons::Icons,
+    glyphs: &'a mut glyphs::Glyphs,
     blur: Vec<Blur>,
 }
 
@@ -1458,13 +1462,22 @@ fn collect(
         }
         Kind::Text => {
             let buffer = shape(fonts, n);
-            out.list.texts.push(Text {
-                buffer,
-                origin: [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale],
-                scale,
-                color: fade(n.color),
-                clip: out.clip,
-            });
+            let at = [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale];
+            if out.transform == Rect::IDENTITY {
+                out.list.texts.push(Text { buffer, origin: at, scale, color: fade(n.color), clip: out.clip });
+            } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color) {
+                // Tilted: through the subtree's matrix as an image.
+                out.list.images.push(genoma_render::Image {
+                    key: r.key,
+                    pixels: r.pixels,
+                    width: r.width,
+                    height: r.height,
+                    origin: [at[0].floor() + r.offset[0] as f32, at[1].floor() + r.offset[1] as f32],
+                    alpha: alpha * n.color[3],
+                    clip: out.clip,
+                    transform: out.transform,
+                });
+            }
         }
         Kind::Box => {}
     }

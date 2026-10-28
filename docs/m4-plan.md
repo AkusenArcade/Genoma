@@ -124,10 +124,16 @@ with the depth work.
       in z, and a perspective. It applies to its subtree. Primitives evaluate
       their distance field in local space after the projection, so edges
       stay analytic and sharp.
-- [ ] **Text under depth** (PRD §12, question 2) is decided here by
+- [x] **Text under depth** (PRD §12, question 2) is decided here by
       measurement: glyphs rasterised at their transformed size, or MSDF.
-      Until then, text in a transformed subtree stays flat and fades with
-      it.
+      *Decided 2026-10-28:* neither. A tilted text is rasterised once on the
+      CPU at its flat physical size, with glyphon's subpixel placement, and
+      drawn as an image through the matrix; at rest it is glyphon's again.
+      The panel at 0.001° (image) against 0° (glyphon) differs in a few
+      antialiasing values and no glyph position. Render p99 193 µs with the
+      text, PSS 26 MB before and after. Image textures no surface has drawn
+      for 1024 uploads are dropped, so a text that changes while tilted does
+      not leave its rasters behind.
 
 ### 6. The half-pixel eye test (deferred from M2)
 

@@ -62,7 +62,9 @@ pub(crate) struct Pipeline {
     globals_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: HashMap<u64, wgpu::BindGroup>,
+    /// Each key's texture, and the upload that last drew it.
+    textures: HashMap<u64, (wgpu::BindGroup, u64)>,
+    uploads: u64,
     quads: wgpu::Buffer,
     capacity: usize,
     draws: Vec<u64>,
@@ -176,6 +178,7 @@ impl Pipeline {
             texture_layout,
             sampler,
             textures: HashMap::new(),
+            uploads: 0,
             quads,
             capacity,
             draws: Vec::new(),
@@ -201,6 +204,14 @@ impl Pipeline {
         images: &[crate::Image],
     ) {
         self.draws.clear();
+        // A texture no surface has drawn for a while is dropped: a text
+        // rasterised while tilted leaves one per thing it said. The pixels
+        // travel with every list, so a key seen again is uploaded again.
+        self.uploads += 1;
+        if self.uploads % 256 == 0 {
+            let now = self.uploads;
+            self.textures.retain(|_, (_, used)| now - *used < 1024);
+        }
         if images.is_empty() {
             return;
         }
@@ -242,7 +253,10 @@ impl Pipeline {
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     ],
                 });
-                self.textures.insert(image.key, group);
+                self.textures.insert(image.key, (group, 0));
+            }
+            if let Some((_, used)) = self.textures.get_mut(&image.key) {
+                *used = self.uploads;
             }
             quads.push(Quad {
                 origin: image.origin,
@@ -273,7 +287,7 @@ impl Pipeline {
         pass.set_bind_group(0, &self.globals_group, &[]);
         pass.set_vertex_buffer(0, self.quads.slice(..));
         for (i, key) in self.draws.iter().enumerate() {
-            pass.set_bind_group(1, &self.textures[key], &[]);
+            pass.set_bind_group(1, &self.textures[key].0, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }
     }

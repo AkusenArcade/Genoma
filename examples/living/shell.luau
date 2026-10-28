@@ -108,8 +108,8 @@ return g.surface {
             },
         },
         -- Depth: a panel that unfolds from its top edge, as a page turns down
-        -- toward the viewer (PRD §8.4). Its edge stays sharp at every angle;
-        -- its text stays flat for now (PRD §12, question 2).
+        -- toward the viewer (PRD §8.4). Its edge stays sharp at every angle,
+        -- and its text tilts with it as an image while it moves.
         cell {
             role = "button",
             name = "Unfold",
@@ -136,6 +136,10 @@ return g.surface {
                     rotate_x = function() return if unfolded.value then "unfold" else "fold" end,
                     opacity = function() return if unfolded.value then "instant" else "thread_hold" end,
                 },
+                direction = "column",
+                align = "center",
+                gap = 14,
+                g.text { font = "Spectral", size = 15, color = theme.text, text = "Unfolded from its edge" },
                 g.capsule {
                     width = 160, height = 6, radius = 3, fill = theme.line,
                 },
