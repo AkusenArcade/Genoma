@@ -166,7 +166,16 @@ with the depth work.
       row and moved the empty one up without mounting it again, and a click
       after the reorder focused the right workspace. 20 reloads: PSS flat
       after the first.
-- [ ] Output hotplug, exercised when possible.
+- [x] Output hotplug, exercised when possible.
+      *Done 2026-10-28* with `niri msg output HDMI-A-1 off` and `on`, which
+      the client sees as the output leaving and coming back. A capsule per
+      output (`outputs = "all"`): the DP-1 surface stayed through four
+      cycles, each return made a new HDMI-A-1 surface at its size and scale
+      showing the right workspace, the process never stopped, and PSS held
+      at 27.6 MB after the first cycle (+20 kB over the next three).
+      The same cycles froze Bioma on Quickshell (with the Vulkan RHI): its
+      main thread waits on a lock for good and HDMI-A-1 gets no surface
+      again. That is Bioma's bug, followed up there.
 - [x] Budding in every direction. *Akusen, 2026-10-28:* Bioma's cells
       open by budding (PRD §10), and they open below a top membrane, above
       the dock and sideways; the bud is built and checked only below.
