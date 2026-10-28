@@ -961,11 +961,13 @@ dependencies = [
 name = "genoma-script"
 version = "0.0.0"
 dependencies = [
+ "calloop",
  "genoma-core",
  "genoma-scene",
  "genoma-services",
  "log",
  "mlua",
+ "rustix",
  "serde_json",
 ]
 

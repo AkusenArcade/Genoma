@@ -16,7 +16,10 @@ mod wayland;
 use std::{
     cell::{Cell, RefCell},
     io::Read,
-    os::unix::net::UnixStream,
+    os::{
+        fd::{AsFd, BorrowedFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -30,7 +33,7 @@ use genoma_services::{bus::Bus, clock::Clock, niri::Niri, vitals::{self, Vitals}
 use notify::Watcher;
 use smithay_client_toolkit::reexports::{
     calloop::{
-        EventLoop, Interest, LoopHandle, Mode, PostAction,
+        EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
         channel::{Event as ChannelEvent, channel},
         generic::Generic,
         timer::{TimeoutAction, Timer},
@@ -160,6 +163,34 @@ impl Sources {
     }
 }
 
+/// The loop, as the script's building blocks see it (PRD §9.2).
+struct LoopHost(LoopHandle<'static, wayland::App>);
+
+impl genoma_script::io::Host for LoopHost {
+    fn timer(&self, after: Duration, mut tick: Box<dyn FnMut() -> Option<Duration>>) -> Option<RegistrationToken> {
+        self.0
+            .insert_source(Timer::from_duration(after), move |_, _, _| match tick() {
+                Some(next) => TimeoutAction::ToDuration(next),
+                None => TimeoutAction::Drop,
+            })
+            .map_err(|e| log::error!("timer: {e}"))
+            .ok()
+    }
+
+    fn readable(&self, fd: OwnedFd, mut ready: Box<dyn FnMut(BorrowedFd<'_>) -> bool>) -> Option<RegistrationToken> {
+        self.0
+            .insert_source(Generic::new(fd, Interest::READ, Mode::Level), move |_, fd, _| {
+                Ok(if ready(fd.as_fd()) { PostAction::Continue } else { PostAction::Remove })
+            })
+            .map_err(|e| log::error!("readable: {e}"))
+            .ok()
+    }
+
+    fn remove(&self, token: RegistrationToken) {
+        self.0.remove(token);
+    }
+}
+
 /// Every service, without a surface: what each says, as it changes.
 fn probe() {
     let (services, stream) = services();
@@ -222,7 +253,8 @@ fn run(dir: PathBuf) {
     app.start(renderer, fonts, handle.clone());
 
     let (services, niri_stream) = services();
-    let script = Rc::new(RefCell::new(Script::new(&dir, services.clone())));
+    let host: genoma_script::io::HostRef = Rc::new(LoopHost(handle.clone()));
+    let script = Rc::new(RefCell::new(Script::new(&dir, services.clone(), host)));
     load(&script, &mut app).unwrap_or_else(|e| fail(&e));
     log::info!("loaded {}", dir.join("shell.luau").display());
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");

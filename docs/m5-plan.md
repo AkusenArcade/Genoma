@@ -51,11 +51,28 @@ the loop through a `calloop` channel.
 ### 2. Building blocks (§9.2)
 
 Bioma writes about 39 services of its own; they need these, not Rust:
-- [ ] `g.process`: spawn, stdout lines as they come, exit status.
-- [ ] `g.file`: read, watch, write atomically (`FileView`'s counterpart).
-- [ ] `g.socket`: Unix sockets, line-delimited.
+- [x] `g.process`: spawn, stdout lines as they come, exit status.
+- [x] `g.file`: read, watch, write atomically (`FileView`'s counterpart).
+- [x] `g.socket`: Unix sockets, line-delimited.
 - [ ] `g.dbus`: call, get and set properties, watch signals, either bus.
-- [ ] `g.timer`: a declared interval, for what only polling can give.
+- [x] `g.timer`: a declared interval, for what only polling can give.
+
+*Built 2026-10-28, all but D-Bus.* None owns a thread: the script asks the
+loop, through a `Host` the runtime implements, for a timer or a wake when a
+descriptor is readable. A process's pipes are read once per wake and its exit
+comes from a pidfd, reported after its last line, with 128 plus the signal
+for a killed one. A file is watched through inotify on its directory, so an
+atomic replace is seen. What a load's top-level code starts belongs to that
+load: the next mounted load stops it, a failed one stops its own, and a
+child gets `PR_SET_PDEATHSIG` so it dies with Genoma too. Paths take `~/`
+and a leading `$NAME`. `print` goes to the log.
+
+Checked with an interface that used all four: stdout and stderr lines as
+written, the last one without a newline, then `exit 3`; a stream of three
+lines 0.3 s apart in order; stdin through `cat`; niri's socket answering
+`"FocusedOutput"`; the watched file following a write, an atomic replace and
+a removal on screen; `f:write` leaving no temporary file; a `sleep` killed
+by a reload and another by killing Genoma, no zombie.
 
 ### 3. Network
 

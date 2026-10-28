@@ -13,6 +13,8 @@ use std::{
     rc::Rc,
 };
 
+pub mod io;
+
 use genoma_core::{
     reactive::{Effect, Scope, Signal, detached, on_cleanup, untracked},
     timing::{self, Curve, Timing},
@@ -248,11 +250,15 @@ impl UserData for ClockRef {
 
 pub struct Script {
     lua: Lua,
-    /// A file evaluated and not yet mounted: its Luau state and the surface
-    /// table it returned.
-    pending: Option<(Lua, Table)>,
+    /// A file evaluated and not yet mounted: its Luau state, the surface
+    /// table it returned, and the scope of what its top-level code started.
+    pending: Option<(Lua, Table, Scope)>,
     dir: PathBuf,
     scope: Option<Scope>,
+    /// What the mounted load's top-level code started (processes, files,
+    /// sockets, timers): stopped when the next load is mounted.
+    io_scope: Option<Scope>,
+    host: io::HostRef,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
     services: Services,
     wanted: Rc<RefCell<Vec<&'static str>>>,
@@ -271,12 +277,14 @@ fn err(message: impl Into<String>) -> mlua::Error {
 }
 
 impl Script {
-    pub fn new(dir: &Path, services: Services) -> Script {
+    pub fn new(dir: &Path, services: Services, host: io::HostRef) -> Script {
         Script {
             lua: Lua::new(),
             pending: None,
             dir: dir.to_owned(),
             scope: None,
+            io_scope: None,
+            host,
             states: Rc::default(),
             services,
             wanted: Rc::default(),
@@ -337,17 +345,29 @@ impl Script {
         self.install(&lua).map_err(|e| e.to_string())?;
         let path = self.dir.join("shell.luau");
         let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let surface: Table = lua
-            .load(&source)
-            .set_name(format!("@{}", path.display()))
-            .eval()
-            .map_err(|e| e.to_string())?;
-        if surface.get::<Option<bool>>("__surface").ok().flatten() != Some(true) {
-            return Err("shell.luau must return g.surface { … }".into());
+        // What the top-level code starts belongs to this load, and is stopped
+        // if the load fails or when the next one is mounted.
+        let (scope, result) = Scope::new(|| -> Result<(Table, SurfaceSpec), String> {
+            let surface: Table =
+                lua.load(&source).set_name(format!("@{}", path.display())).eval().map_err(|e| e.to_string())?;
+            if surface.get::<Option<bool>>("__surface").ok().flatten() != Some(true) {
+                return Err("shell.luau must return g.surface { … }".into());
+            }
+            let spec = surface_spec(&surface).map_err(|e| e.to_string())?;
+            Ok((surface, spec))
+        });
+        match result {
+            Ok((surface, spec)) => {
+                if let Some((_, _, stale)) = self.pending.replace((lua, surface, scope)) {
+                    stale.dispose();
+                }
+                Ok(spec)
+            }
+            Err(e) => {
+                scope.dispose();
+                Err(e)
+            }
         }
-        let spec = surface_spec(&surface).map_err(|e| e.to_string())?;
-        self.pending = Some((lua, surface));
-        Ok(spec)
     }
 
     /// Mounts the evaluated file's content into each target, replacing the
@@ -355,9 +375,16 @@ impl Script {
     /// output; a table is one tree for one surface. On an error the last
     /// trees stay as they were, and so do the scenes.
     pub fn mount(&mut self, targets: &[Target]) -> Result<(), String> {
-        let Some((lua, surface)) = self.pending.take() else { return Err("nothing evaluated".into()) };
-        let content: LuaValue = surface.get(1).map_err(|e| e.to_string())?;
+        let Some((lua, surface, io_scope)) = self.pending.take() else { return Err("nothing evaluated".into()) };
+        let content: LuaValue = match surface.get(1) {
+            Ok(content) => content,
+            Err(e) => {
+                io_scope.dispose();
+                return Err(e.to_string());
+            }
+        };
         if matches!(content, LuaValue::Table(_)) && targets.len() > 1 {
+            io_scope.dispose();
             return Err("g.surface for several outputs holds a function of the output".into());
         }
         let handlers: Handlers = Rc::default();
@@ -383,6 +410,9 @@ impl Script {
                 if let Some(old) = self.scope.take() {
                     old.dispose();
                 }
+                if let Some(old) = self.io_scope.replace(io_scope) {
+                    old.dispose();
+                }
                 for ((_, scene), holder) in targets.iter().zip(holders) {
                     let mut s = scene.borrow_mut();
                     let root = s.root();
@@ -400,6 +430,7 @@ impl Script {
             }
             Err(e) => {
                 scope.dispose();
+                io_scope.dispose();
                 Err(e.to_string())
             }
         }
@@ -407,6 +438,15 @@ impl Script {
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
         let g = lua.create_table()?;
+        // The building blocks of a service written in Luau (PRD §9.2).
+        let host = self.host.clone();
+        g.set("timer", lua.create_function(move |_, t: Table| io::timer(&host, t))?)?;
+        let host = self.host.clone();
+        g.set("process", lua.create_function(move |_, t: Table| io::process(&host, t))?)?;
+        let host = self.host.clone();
+        g.set("file", lua.create_function(move |_, t: Table| io::file(&host, t))?)?;
+        let host = self.host.clone();
+        g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
         for kind in ["box", "capsule", "text", "icon", "thread", "emitter", "each"] {
             g.set(
                 kind,
@@ -558,6 +598,18 @@ impl Script {
             Ok(value)
         })?;
         lua.globals().set("require", require)?;
+        // print goes to the log, under the interface's name, rather than to
+        // a stdout nobody reads.
+        let print = lua.create_function(|lua, args: mlua::MultiValue| {
+            let tostring: Function = lua.globals().get("tostring")?;
+            let mut parts = Vec::with_capacity(args.len());
+            for v in args {
+                parts.push(tostring.call::<String>(v)?);
+            }
+            log::info!(target: "luau", "{}", parts.join("\t"));
+            Ok(())
+        })?;
+        lua.globals().set("print", print)?;
         lua.sandbox(true)?;
         Ok(())
     }
