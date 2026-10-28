@@ -19,8 +19,9 @@ pub struct Rect {
     /// How much of the height the fill covers, from the bottom: 1 is all of
     /// it, a lower value is a liquid's surface. The rim is never cut.
     pub level: f32,
-    /// 1 erases what is under the shape instead of painting it: a tissue's
-    /// band is cut out where its cells are, so glass never sits on glass.
+    /// What the shape is: 0 a rounded rectangle; 1 a cut, which erases what
+    /// is under it (a tissue's band where its cells are, so glass never
+    /// sits on glass); 2 a thread along `path`.
     pub cut: f32,
     pub fill: [f32; 4],
     pub rim_top: [f32; 4],
@@ -38,6 +39,11 @@ pub struct Rect {
     pub fill_to: [f32; 4],
     /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
     pub clip: [f32; 4],
+    /// A thread's quadratic Bézier, physical pixels from the rectangle's
+    /// centre: start x, y, control x, y; then end x, y, width, and how much
+    /// of it is drawn (0…1).
+    pub path: [f32; 4],
+    pub path_end: [f32; 4],
 }
 
 impl Rect {
@@ -82,6 +88,8 @@ struct Instance {
     @location(7) arc: vec4<f32>,
     @location(8) fill_to: vec4<f32>,
     @location(9) clip: vec4<f32>,
+    @location(10) path: vec4<f32>,
+    @location(11) path_end: vec4<f32>,
 };
 
 struct Varyings {
@@ -96,6 +104,8 @@ struct Varyings {
     @location(7) arc: vec4<f32>,
     @location(8) fill_to: vec4<f32>,
     @location(9) clip: vec4<f32>,
+    @location(10) path: vec4<f32>,
+    @location(11) path_end: vec4<f32>,
 };
 
 @vertex
@@ -118,7 +128,51 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.arc = instance.arc;
     out.fill_to = instance.fill_to;
     out.clip = instance.clip;
+    out.path = instance.path;
+    out.path_end = instance.path_end;
     return out;
+}
+
+fn dot2(v: vec2<f32>) -> f32 { return dot(v, v); }
+
+// Distance to a quadratic Bézier from a to c with control b, drawn only up to
+// parameter g (Inigo Quilez's closed form, the roots clamped to [0, g]).
+fn bezier(pos: vec2<f32>, a: vec2<f32>, b0: vec2<f32>, c: vec2<f32>, g: f32) -> f32 {
+    let aa = b0 - a;
+    let bb = a - 2.0 * b0 + c;
+    if (dot(bb, bb) < 1e-4) {
+        // Straight: the segment's own distance.
+        let ab = c - a;
+        let t = clamp(dot(pos - a, ab) / max(dot(ab, ab), 1e-6), 0.0, g);
+        return length(pos - (a + ab * t));
+    }
+    let cc = aa * 2.0;
+    let d = a - pos;
+    let kk = 1.0 / dot(bb, bb);
+    let kx = kk * dot(aa, bb);
+    let ky = kk * (2.0 * dot(aa, aa) + dot(d, bb)) / 3.0;
+    let kz = kk * dot(d, aa);
+    let p = ky - kx * kx;
+    let q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+    var h = q * q + 4.0 * p * p * p;
+    var res = 0.0;
+    if (h >= 0.0) {
+        h = sqrt(h);
+        let x = (vec2<f32>(h, -h) - q) / 2.0;
+        let uv = sign(x) * pow(abs(x), vec2<f32>(1.0 / 3.0));
+        let t = clamp(uv.x + uv.y - kx, 0.0, g);
+        res = dot2(d + (cc + bb * t) * t);
+    } else {
+        let z = sqrt(-p);
+        let v = acos(q / (p * z * 2.0)) / 3.0;
+        let m = cos(v);
+        let n = sin(v) * 1.732050808;
+        let t = clamp(vec3<f32>(m + m, -n - m, n - m) * z - kx, vec3<f32>(0.0), vec3<f32>(g));
+        res = min(dot2(d + (cc + bb * t.x) * t.x), dot2(d + (cc + bb * t.y) * t.y));
+    }
+    // The end at g is a round cap: the closest point may be the end itself.
+    let tip = a + (cc + bb * g) * g;
+    return sqrt(min(res, dot2(pos - tip)));
 }
 
 // Signed distance to a rounded box: negative inside, in pixels.
@@ -133,6 +187,14 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     let p = in.position.xy;
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
+    }
+    // A thread: a band along its Bézier, as far as it has grown.
+    if (in.shape.w > 1.5) {
+        let reach = in.path_end.w;
+        if (reach <= 0.0) { discard; }
+        let dist = bezier(in.local, in.path.xy, in.path.zw, in.path_end.xy, reach) - in.path_end.z * 0.5;
+        let cover = clamp(0.5 - dist, 0.0, 1.0) * in.fill.a;
+        return vec4<f32>(in.fill.rgb * cover, cover);
     }
     let d = rounded_box(in.local, in.half, in.shape.x);
     let rim = in.shape.y;
@@ -240,6 +302,7 @@ impl Pipeline {
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
                         3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
                         6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
+                        10 => Float32x4, 11 => Float32x4,
                     ],
                 })],
             },
@@ -334,7 +397,7 @@ impl Pipeline {
         // Consecutive rects of one kind share a draw call.
         self.runs.clear();
         for (i, r) in rects.iter().enumerate() {
-            let cut = r.cut > 0.5;
+            let cut = r.cut > 0.5 && r.cut < 1.5;
             match self.runs.last_mut() {
                 Some((c, range)) if *c == cut => range.end = i as u32 + 1,
                 _ => self.runs.push((cut, i as u32..i as u32 + 1)),

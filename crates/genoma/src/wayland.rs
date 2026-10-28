@@ -248,6 +248,14 @@ impl App {
         self.surfaces.iter().map(|s| (s.output.clone(), s.scene.clone())).collect()
     }
 
+    /// Measures and places every surface again: called once their trees are
+    /// mounted, since [`App::apply`] runs before there is anything to measure.
+    pub fn refit(&mut self) {
+        for i in 0..self.surfaces.len() {
+            self.place(i);
+        }
+    }
+
     fn make_surface(&mut self, output_name: Option<String>, spec: &SurfaceSpec) {
         let fonts = self.fonts.clone().expect("started");
         let qh = self.qh.clone();

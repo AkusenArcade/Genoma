@@ -163,7 +163,9 @@ fn probe() {
 fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> {
     let spec = script.borrow_mut().evaluate()?;
     let targets = app.apply(spec);
-    script.borrow_mut().mount(&targets)
+    script.borrow_mut().mount(&targets)?;
+    app.refit();
+    Ok(())
 }
 
 fn run(dir: PathBuf) {

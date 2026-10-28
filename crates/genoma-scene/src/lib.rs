@@ -32,6 +32,8 @@ pub enum Kind {
     Capsule,
     Text,
     Icon,
+    /// A quadratic Bézier with a width, grown along its length.
+    Thread,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -112,6 +114,9 @@ pub struct Node {
     dash: [f32; 2],
     italic: bool,
     crisp: bool,
+    /// A thread's start, control point and end, logical units in its box.
+    path: [f32; 6],
+    node_size: f32,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -172,6 +177,8 @@ impl Node {
             dash: [0.0; 2],
             italic: false,
             crisp: false,
+            path: [0.0; 6],
+            node_size: 0.0,
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -445,7 +452,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon => Style { flex_shrink: 0.0, ..Style::default() },
+            Kind::Text | Kind::Icon | Kind::Thread => Style { flex_shrink: 0.0, ..Style::default() },
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -533,6 +540,12 @@ impl Scene {
             Prop::Growth => Value::Number(n.growth),
             Prop::Reach => Value::Number(n.reach),
             Prop::ScrollY => Value::Number(n.scroll_y),
+            Prop::FromX => Value::Number(n.path[0]),
+            Prop::FromY => Value::Number(n.path[1]),
+            Prop::BendX => Value::Number(n.path[2]),
+            Prop::BendY => Value::Number(n.path[3]),
+            Prop::ToX => Value::Number(n.path[4]),
+            Prop::ToY => Value::Number(n.path[5]),
             Prop::OffsetX => Value::Number(n.offset[0]),
             Prop::OffsetY => Value::Number(n.offset[1]),
             Prop::Fill => Value::Color(n.fill),
@@ -642,6 +655,13 @@ impl Scene {
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
             Prop::Italic => (n.italic, reshape) = (take!(flag), true),
             Prop::Crisp => n.crisp = take!(flag),
+            Prop::FromX => n.path[0] = take!(number),
+            Prop::FromY => n.path[1] = take!(number),
+            Prop::BendX => n.path[2] = take!(number),
+            Prop::BendY => n.path[3] = take!(number),
+            Prop::ToX => n.path[4] = take!(number),
+            Prop::ToY => n.path[5] = take!(number),
+            Prop::NodeSize => n.node_size = take!(number).max(0.0),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -1046,6 +1066,8 @@ fn collect(
                 arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
                 fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
                 clip: out.clip,
+                path: [0.0; 4],
+                path_end: [0.0; 4],
             });
             // A band drawn only outside its cells: each child capsule's
             // shape is taken back out of it before the child is drawn.
@@ -1072,6 +1094,68 @@ fn collect(
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
                         clip: out.clip,
+                        path: [0.0; 4],
+                        path_end: [0.0; 4],
+                    });
+                }
+            }
+        }
+        Kind::Thread => {
+            // The box the curve lives in, grown by the stroke and the nodes
+            // so neither is cut by the quad.
+            let pad = n.node_size.max(n.stroke.unwrap_or(1.3)) + 2.0;
+            let bx = origin[0] - pad;
+            let by = origin[1] - pad;
+            let bw = layout.size.width + pad * 2.0;
+            let bh = layout.size.height + pad * 2.0;
+            let centre = [(bx + bw / 2.0) * scale, (by + bh / 2.0) * scale];
+            let at = |x: f32, y: f32| [(origin[0] + x) * scale - centre[0], (origin[1] + y) * scale - centre[1]];
+            let [fx, fy, cx, cy, tx, ty] = n.path;
+            let (a, b, c) = (at(fx, fy), at(cx, cy), at(tx, ty));
+            let stroke = n.stroke.unwrap_or(1.3);
+            let width = if n.crisp { (stroke * scale).round().max(1.0) } else { stroke * scale };
+            let g = n.growth.clamp(0.0, 1.0);
+            out.list.rects.push(Rect {
+                origin: [bx * scale, by * scale],
+                size: [bw * scale, bh * scale],
+                radius: 0.0,
+                rim: 0.0,
+                level: 1.0,
+                cut: 2.0,
+                fill: fade(n.fill),
+                rim_top: [0.0; 4],
+                rim_bottom: [0.0; 4],
+                wave: [0.0; 4],
+                arc: Rect::WHOLE,
+                fill_to: [0.0; 4],
+                clip: out.clip,
+                path: [a[0], a[1], b[0], b[1]],
+                path_end: [c[0], c[1], width, g],
+            });
+            // The nodes: at the start, and at the tip as it grows.
+            if n.node_size > 0.0 && g > 0.0 {
+                let point = |t: f32| {
+                    let u = 1.0 - t;
+                    [u * u * fx + 2.0 * u * t * cx + t * t * tx, u * u * fy + 2.0 * u * t * cy + t * t * ty]
+                };
+                let d = n.node_size * scale;
+                for p in [point(0.0), point(g)] {
+                    out.list.rects.push(Rect {
+                        origin: [(origin[0] + p[0]) * scale - d / 2.0, (origin[1] + p[1]) * scale - d / 2.0],
+                        size: [d, d],
+                        radius: d / 2.0,
+                        rim: 0.0,
+                        level: 1.0,
+                        cut: 0.0,
+                        fill: fade(n.color),
+                        rim_top: [0.0; 4],
+                        rim_bottom: [0.0; 4],
+                        wave: [0.0; 4],
+                        arc: Rect::WHOLE,
+                        fill_to: [0.0; 4],
+                        clip: out.clip,
+                        path: [0.0; 4],
+                        path_end: [0.0; 4],
                     });
                 }
             }

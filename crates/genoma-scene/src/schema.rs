@@ -63,6 +63,13 @@ pub enum Prop {
     DashGap,
     Italic,
     Crisp,
+    FromX,
+    FromY,
+    ToX,
+    ToY,
+    BendX,
+    BendY,
+    NodeSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +149,13 @@ pub const PROPS: &[PropInfo] = &[
     p("scroll_y", Prop::ScrollY, Ty::Number, true, "How far the children are scrolled up, logical units."),
     p("dash", Prop::Dash, Ty::Number, false, "A round rim drawn in dashes this long, logical units; 0 is solid."),
     p("dash_gap", Prop::DashGap, Ty::Number, false, "The space between dashes, logical units."),
+    p("from_x", Prop::FromX, Ty::Number, true, "A thread's start, logical units inside its box."),
+    p("from_y", Prop::FromY, Ty::Number, true, "A thread's start, logical units inside its box."),
+    p("to_x", Prop::ToX, Ty::Number, true, "A thread's end."),
+    p("to_y", Prop::ToY, Ty::Number, true, "A thread's end."),
+    p("bend_x", Prop::BendX, Ty::Number, true, "A thread's control point: where the curve is pulled toward. A spring on it makes the thread bend and settle."),
+    p("bend_y", Prop::BendY, Ty::Number, true, "A thread's control point."),
+    p("node", Prop::NodeSize, Ty::Number, false, "A thread's nodes: discs this wide at its start and at its tip, in `color`. 0 is none."),
     p("crisp", Prop::Crisp, Ty::Bool, false, "A hairline: position and size rounded to whole physical pixels, never under one (Metrics.crisp)."),
     p("italic", Prop::Italic, Ty::Bool, false, "Text in the font's italic."),
     p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),

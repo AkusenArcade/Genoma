@@ -17,23 +17,34 @@ documents, not here.
 
 ### 1. Springs as an animation source (§8.5)
 
-- [ ] A timing entry may be a spring instead of a curve:
+- [x] A timing entry may be a spring instead of a curve:
       `settle = { spring = { stiffness = 300, damping = 26, mass = 1 } }`.
       The integration is per frame, and a spring settles when it is within a
       quarter physical pixel and still. It requests no frame after that.
-- [ ] **Interruptible:** a new target keeps the current velocity, so a
+- [x] **Interruptible:** a new target keeps the current velocity, so a
       capsule redirected mid-flight bends toward the new place instead of
       starting over.
-- [ ] Works for every animatable property, numbers and colours.
+- [x] Works for every animatable property, numbers and colours.
 
 ### 2. Threads along a path (§8.1)
 
-- [ ] A `thread` primitive: a quadratic Bézier from one end to the other with
+*Built 2026-10-28, `examples/living`.*
+- A `thread` node draws a quadratic Bézier in the rect shader as a distance
+  field (Quilez's closed form, its roots clamped to the grown fraction, with
+  a round cap at the tip). It is crisp at 1.3 and has a node of 5 at each
+  end.
+- Linking two capsules grows it.
+- Moving the second on a spring takes the thread's end along on the same
+  spring and its middle on a softer one, so it bends in flight and settles.
+  The contact sheet shows the overshoot and the sag deepening and settling.
+- At rest: 0 frames in 5 s after the motion.
+
+- [x] A `thread` primitive: a quadratic Bézier from one end to the other with
       a width, drawn as a distance field (no tessellation) with antialiased
       edges and round or flat caps.
-- [ ] `growth` 0…1 draws the path from its start up to that fraction, with a
+- [x] `growth` 0…1 draws the path from its start up to that fraction, with a
       node at each end as Bioma's Thread.qml has.
-- [ ] The control point can follow a spring, so a thread that joins two
+- [x] The control point can follow a spring, so a thread that joins two
       moving things bends and settles.
 
 ### 3. Budding and reabsorption (§8.2)
