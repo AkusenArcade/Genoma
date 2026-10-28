@@ -81,9 +81,9 @@ keys are wired: an exclusive keyboard while open, with Escape, Up, Down and
 Return in the example. **Akusen tries the keys by hand**, because synthetic
 Escape or Return would reach the terminal if the grab failed.
 
-- [ ] Keys through xkbcommon (SCTK seat keyboard): an `on_key` handler with
+- [x] Keys through xkbcommon (SCTK seat keyboard): an `on_key` handler with
       the key's name, and the open cell holding the keyboard.
-- [ ] Bioma's keys in an open list: arrows move the mark, Enter
+- [x] Bioma's keys in an open list: arrows move the mark, Enter
       activates, Escape closes (`components/KeyMark.qml`, `core/Focus.qml`).
 - [x] Touchpad momentum (`components/Glide.qml`): follow the fingers, and
       on lift flick on at the speed of the last `Timing.fling` 80 ms.
@@ -143,6 +143,21 @@ reader's actions (pressing a button) are logged, not yet performed.
 
 - [x] Every node's role and name (already carried since M1) published
       through `accesskit_unix`, so Orca can read the cell and its list.
+
+## Closed 2026-10-28
+
+Akusen tried the keys by hand (arrows, Enter, Escape) and closed M3. He had
+looked at the open list beside Bioma's, which brought five corrections, all
+fixed:
+- the panel's content drawn above its edge;
+- the mark showing without a key;
+- the thread too thick;
+- its nodes, one missing and one under the panel;
+- the free ring not dashed and "empty" not italic.
+
+Two items stay open into M4: output hotplug is coded but not exercised,
+and dynamic lists (`g.each`) are not built yet; the workspace list uses ten
+static rows.
 
 ## Done when
 

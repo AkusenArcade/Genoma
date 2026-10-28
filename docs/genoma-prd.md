@@ -16,7 +16,7 @@ Implementation language: Rust. Interface language: Luau, hot-reloaded (§7).
 Language: English throughout — code, comments, identifiers, documents.
 The project name **Genoma** is the only Italian word retained.
 
-Status: M0, M1 and M2 done 2026-10-28 (§11.1); M3 under way. Open questions in §12.
+Status: M0–M3 done 2026-10-28 (§11.1); M4, the living layer, next. Open questions in §12.
 
 ---
 
@@ -653,6 +653,29 @@ there the lead shrinks to the cost of a frame, about 0.21 ms against 0.31.
   screen.
 - **Pending, not blocking M3:** the laptop measurement (device match, smoothness
   without performance mode, the same side-by-side).
+
+**M3, closed 2026-10-28** (the record is `docs/m3-plan.md`). The workspace
+cell on Genoma behaves as Bioma's:
+- a click opens the output's list with Cell.qml's cascade: thread, panel
+  grown from the node at its tip, content faded in;
+- a row jumps and closes, a press outside closes, and the wheel steps;
+- the keys (arrows, Enter, Escape), tried by Akusen by hand;
+- a touchpad scroll is followed and flings on lift;
+- the list scrolls past five rows inside its clipping well.
+
+New in the toolkit:
+- pointer input with hit testing, bubbling and input regions;
+- the catching surface with exclusive keyboard;
+- delay in the timing set and transition names chosen by function;
+- growth, reach, attach, group opacity, clip, scroll_y and crisp;
+- dashes and italic;
+- one surface per output, from a two-step evaluate and mount;
+- AccessKit, read back over AT-SPI.
+
+Cost at rest unchanged: 1.92% of a core and 27 MB for the membrane.
+
+Carried to M4: output hotplug (coded, not exercised) and dynamic lists
+(`g.each`).
 
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
