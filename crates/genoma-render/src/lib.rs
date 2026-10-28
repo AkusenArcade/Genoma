@@ -85,6 +85,8 @@ pub struct Image {
     pub alpha: f32,
     /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
     pub clip: [f32; 4],
+    /// Depth, as a rect's (see [`Rect::transform`]).
+    pub transform: [[f32; 4]; 4],
 }
 
 /// What one surface shows, in drawing order: every rect, then every image,

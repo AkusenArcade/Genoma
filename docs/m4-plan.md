@@ -100,7 +100,27 @@ with the depth work.
 
 ### 5. Depth (§5.5, §8.4)
 
-- [ ] Each node may carry a 3D transform: rotation about x and y, translation
+*Built 2026-10-28, `examples/living` ("unfold").*
+- `rotate_x`, `rotate_y`, `depth`, `perspective` (default 800) and
+  `pivot_x`/`pivot_y` (default the centre) compose into one 4×4 matrix per
+  subtree. Rects and images carry it to the GPU with w for the
+  perspective, so the local coordinates interpolate perspective-correct
+  and the distance field stays exact. Antialiasing comes from the local
+  coordinates' screen derivative, so a foreshortened edge stays one pixel
+  soft.
+- The matrices travel in a storage buffer, each distinct one once, the
+  instance carrying its index: as four more vertex attributes they took
+  the rect past the sixteen a device guarantees.
+- Blur under depth: the compositor's region is rectangles, so a tilted
+  shape sends its projected outline (corners in segments), cut in rows one
+  logical unit tall. Zoomed captures show the glass and the blur meeting
+  at the rim with no halo.
+- The panel unfolds from its top edge on a spring, overshooting past flat
+  and settling, and folds back on a stiffer one.
+- In motion: render median 114 µs, p99 178 µs, max 495 µs. At rest: 0
+  frames in 5 s.
+
+- [x] Each node may carry a 3D transform: rotation about x and y, translation
       in z, and a perspective. It applies to its subtree. Primitives evaluate
       their distance field in local space after the projection, so edges
       stay analytic and sharp.

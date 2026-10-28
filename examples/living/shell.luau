@@ -20,11 +20,17 @@ g.timing {
     -- narrowing to nothing as it goes; reabsorption runs back, faster.
     bud_open = { duration = 0.45, curve = { 0.2, 0.9, 0.3, 1.0 } },
     bud_close = { duration = 0.30, curve = { 0.5, 0.0, 0.9, 0.5 } },
+    instant = { duration = 0 },
+    thread_hold = { duration = 0.35, curve = { 1.0, 0.0, 1.0, 0.0 } },
+    -- A panel unfolding from its top edge, and folding back, on springs.
+    unfold = { spring = { stiffness = 170, damping = 16 } },
+    fold = { spring = { stiffness = 260, damping = 28 } },
 }
 
 local W, H = 640, 330
 local linked = g.state("living.linked", false)
 local budded = g.state("living.budded", false)
+local unfolded = g.state("living.unfolded", false)
 local ROW = 80 -- the link row's centre; the bud row sits below it
 local far = g.state("living.far", true)
 
@@ -98,6 +104,40 @@ return g.surface {
                     offset_y = function() return if budded.value then "bud_open" else "bud_close" end,
                     growth = function() return if budded.value then "bud_open" else "bud_close" end,
                     bud = function() return if budded.value then "bud_open" else "bud_close" end,
+                },
+            },
+        },
+        -- Depth: a panel that unfolds from its top edge, as a page turns down
+        -- toward the viewer (PRD §8.4). Its edge stays sharp at every angle;
+        -- its text stays flat for now (PRD §12, question 2).
+        cell {
+            role = "button",
+            name = "Unfold",
+            offset_x = 330 - W / 2,
+            offset_y = 190 - H / 2,
+            on_click = function() unfolded.value = not unfolded.value end,
+            g.text { font = "Spectral", size = 15, color = theme.text, text = function() return if unfolded.value then "fold" else "unfold" end },
+            g.capsule {
+                overlay = true,
+                attach = "below",
+                offset_y = 14,
+                width = 220,
+                height = 88,
+                radius = 20,
+                fill = theme.cellFill,
+                rim_top = theme.rim,
+                rim_bottom = theme.line,
+                blur = true,
+                pivot_y = 0,
+                perspective = 500,
+                rotate_x = function() return if unfolded.value then 0 else -90 end,
+                opacity = function() return if unfolded.value then 1 else 0 end,
+                transition = {
+                    rotate_x = function() return if unfolded.value then "unfold" else "fold" end,
+                    opacity = function() return if unfolded.value then "instant" else "thread_hold" end,
+                },
+                g.capsule {
+                    width = 160, height = 6, radius = 3, fill = theme.line,
                 },
             },
         },

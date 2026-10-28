@@ -50,10 +50,38 @@ pub struct Rect {
     /// smooth union of the two, without the parent's own interior.
     pub bud: [f32; 4],
     pub bud_shape: [f32; 4],
+    /// Depth (PRD §5.5): a 4×4 matrix, by rows, from the surface's physical
+    /// pixels to projected ones with w for the perspective. The identity is
+    /// a flat shape.
+    pub transform: [[f32; 4]; 4],
+}
+
+/// A `Rect` as the GPU reads it: everything but the matrix, which would take
+/// four of the sixteen vertex attributes a device guarantees. The matrices
+/// go in a storage buffer, each distinct one once, and the instance carries
+/// its index in `bud_shape.z`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuRect([f32; GpuRect::LEN]);
+
+impl GpuRect {
+    const LEN: usize = std::mem::size_of::<Rect>() / 4 - 16;
+    /// `bud_shape.z`, the last vector before the matrix.
+    const TRANSFORM: usize = Self::LEN - 2;
+
+    fn new(rect: &Rect, transform: u32) -> GpuRect {
+        let all: &[f32] = bytemuck::cast_slice(std::slice::from_ref(rect));
+        let mut body = [0.0; Self::LEN];
+        body.copy_from_slice(&all[..Self::LEN]);
+        body[Self::TRANSFORM] = transform as f32;
+        GpuRect(body)
+    }
 }
 
 impl Rect {
     pub const WHOLE: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+    pub const IDENTITY: [[f32; 4]; 4] =
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     pub const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 }
 
@@ -68,7 +96,10 @@ pub(crate) struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     cutter: wgpu::RenderPipeline,
     runs: Vec<(bool, std::ops::Range<u32>)>,
+    layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
+    transforms: wgpu::Buffer,
+    transform_capacity: usize,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -77,11 +108,18 @@ pub(crate) struct Pipeline {
     /// changed, because each one costs a staging buffer.
     last_viewport: [f32; 2],
     last_rects: Vec<u8>,
+    last_transforms: Vec<[[f32; 4]; 4]>,
+    /// Scratch, kept to reuse the allocations.
+    matrices: Vec<[[f32; 4]; 4]>,
+    gpu_rects: Vec<GpuRect>,
 }
 
 const SHADER: &str = r#"
 struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
+// By rows on the CPU, so as WGSL's columns each is the transpose: `p * m`
+// is the matrix applied to p.
+@group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
 
 struct Instance {
     @location(0) origin: vec2<f32>,
@@ -132,10 +170,16 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
         hi = max(hi, centre + instance.bud.zw);
     }
     let pixel = lo - vec2<f32>(1.0) + corner * (hi - lo + vec2<f32>(2.0));
-    let clip = pixel / globals.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    // Depth: the corner through the node's matrix. Its w carries the
+    // perspective, so the GPU interpolates the local coordinates correctly
+    // and the distance field stays exact across a tilted shape.
+    let p = vec4<f32>(pixel, 0.0, 1.0);
+    let q = p * transforms[u32(instance.bud_shape.z)];
+    let screen = q.xy / q.w;
+    let clip = screen / globals.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: Varyings;
-    out.position = vec4<f32>(clip, 0.0, 1.0);
+    out.position = vec4<f32>(clip * q.w, 0.0, q.w);
     out.half = instance.size * 0.5;
     out.local = pixel - instance.origin - out.half;
     out.shape = instance.shape;
@@ -211,6 +255,10 @@ fn rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
+    // How many local pixels one screen pixel spans: 1 when flat, more or
+    // less under depth. Taken before any branch, where derivatives are
+    // defined.
+    let aa = max(length(fwidth(in.local)) * 0.70710678, 1e-3);
     let p = in.position.xy;
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
@@ -234,11 +282,12 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     }
     let rim = in.shape.y;
 
-    // Coverage over one pixel of distance: the edge is analytic at any scale.
-    let outer = clamp(0.5 - d, 0.0, 1.0);
+    // Coverage over one screen pixel of distance: the edge is analytic at any
+    // scale and any tilt.
+    let outer = clamp(0.5 - d / aa, 0.0, 1.0);
     // Inset by the rim width: the inner edge is the same field offset, so its
     // radius is concentric by construction.
-    let inner = clamp(0.5 - (d + rim), 0.0, 1.0);
+    let inner = clamp(0.5 - (d + rim) / aa, 0.0, 1.0);
 
     // The light reaches the bottom colour at mid-height and stays there.
     let height = in.local.y + in.half.y;
@@ -296,16 +345,28 @@ impl Pipeline {
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rect globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rect globals"),
@@ -313,11 +374,9 @@ impl Pipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rect globals"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
-        });
+        let transform_capacity = 4;
+        let transforms = Self::transform_buffer(device, transform_capacity);
+        let bind_group = Self::bind_group(device, &layout, &globals, &transforms);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rect"),
             bind_group_layouts: &[Some(&layout)],
@@ -331,7 +390,7 @@ impl Pipeline {
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Rect>() as u64,
+                    array_stride: std::mem::size_of::<GpuRect>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
@@ -374,20 +433,51 @@ impl Pipeline {
             pipeline,
             cutter,
             runs: Vec::new(),
+            layout,
             globals,
+            transforms,
+            transform_capacity,
             bind_group,
             instances,
             capacity,
             count: 0,
             last_viewport: [0.0; 2],
             last_rects: Vec::new(),
+            last_transforms: Vec::new(),
+            matrices: Vec::new(),
+            gpu_rects: Vec::new(),
         }
+    }
+
+    fn transform_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rect transforms"),
+            size: (capacity * std::mem::size_of::<[[f32; 4]; 4]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        globals: &wgpu::Buffer,
+        transforms: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rect globals"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: transforms.as_entire_binding() },
+            ],
+        })
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rect instances"),
-            size: (capacity * std::mem::size_of::<Rect>()) as u64,
+            size: (capacity * std::mem::size_of::<GpuRect>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -409,12 +499,37 @@ impl Pipeline {
             queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&Globals { viewport, _pad: [0.0; 2] }));
             self.last_viewport = viewport;
         }
-        let bytes: &[u8] = bytemuck::cast_slice(rects);
+        // Each distinct matrix once, the identity first: a scene has a few,
+        // one per tilted subtree, so a linear search is the cheap one.
+        self.matrices.clear();
+        self.matrices.push(Rect::IDENTITY);
+        self.gpu_rects.clear();
+        for r in rects {
+            let index = match self.matrices.iter().position(|m| *m == r.transform) {
+                Some(i) => i,
+                None => {
+                    self.matrices.push(r.transform);
+                    self.matrices.len() - 1
+                }
+            };
+            self.gpu_rects.push(GpuRect::new(r, index as u32));
+        }
+        if self.matrices.len() > self.transform_capacity {
+            self.transform_capacity = self.matrices.len().next_power_of_two();
+            self.transforms = Self::transform_buffer(device, self.transform_capacity);
+            self.bind_group = Self::bind_group(device, &self.layout, &self.globals, &self.transforms);
+            self.last_transforms.clear();
+        }
+        if self.matrices != self.last_transforms {
+            queue.write_buffer(&self.transforms, 0, bytemuck::cast_slice(&self.matrices));
+            self.last_transforms.clone_from(&self.matrices);
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(&self.gpu_rects);
         if bytes != self.last_rects.as_slice() {
             // Only the span that differs: a moving satellite rewrites its own
             // instance, not the membrane's.
             let first = bytes.iter().zip(&self.last_rects).position(|(a, b)| a != b).unwrap_or(self.last_rects.len().min(bytes.len()));
-            let size = std::mem::size_of::<Rect>();
+            let size = std::mem::size_of::<GpuRect>();
             let start = first / size * size;
             let end = if bytes.len() == self.last_rects.len() {
                 let last = bytes.iter().zip(&self.last_rects).rposition(|(a, b)| a != b).unwrap_or(first);

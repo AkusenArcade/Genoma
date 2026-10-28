@@ -12,7 +12,7 @@ use std::{
 };
 
 use genoma_render::{Fonts, Renderer, SurfaceId};
-use genoma_scene::{NodeId, Scene};
+use genoma_scene::{Blur, NodeId, Scene};
 use genoma_script::{Input, SurfaceSpec, Target};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
@@ -79,10 +79,10 @@ struct Surface {
     dirty: bool,
     frame_pending: bool,
     frames: u64,
-    /// The blur shapes and input rectangles last sent, so each region is set
+    /// The blur and input regions last sent, as rectangles, so each is set
     /// only when it changes; the inputs `None` until the first is sent,
     /// because Wayland's default is the whole surface.
-    blurred: Vec<[i32; 5]>,
+    blurred: Vec<[i32; 4]>,
     inputs: Option<Vec<[i32; 4]>>,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
@@ -437,17 +437,20 @@ impl App {
         let animating = motion.moving;
 
         // The blur region follows the shapes, and is part of this commit.
-        let shapes: Vec<[i32; 5]> = s
-            .scene
-            .borrow()
-            .blur_shapes()
-            .iter()
-            .map(|b| [b[0].round() as i32, b[1].round() as i32, b[2].round() as i32, b[3].round() as i32, b[4].round() as i32])
-            .collect();
+        let mut shapes = Vec::new();
+        for b in s.scene.borrow().blur_shapes() {
+            match b {
+                Blur::Rounded(b) => {
+                    let [x, y, w, h, r] = b.map(|v| v.round() as i32);
+                    rounded(&mut shapes, x, y, w, h, r);
+                }
+                Blur::Outline(points) => outline(&mut shapes, points),
+            }
+        }
         if shapes != s.blurred {
             if let (Some(effect), Ok(region)) = (&s.effect, Region::new(compositor)) {
-                for &[x, y, w, h, r] in &shapes {
-                    rounded(&region, x, y, w, h, r);
+                for &[x, y, w, h] in &shapes {
+                    region.add(x, y, w, h);
                 }
                 effect.set_blur_region(Some(region.wl_region()));
             }
@@ -554,14 +557,37 @@ impl App {
 /// A rounded rectangle as a region: the middle band, and one row per logical
 /// unit in each corner, inset along the circle. As fine as the region can be
 /// in surface-local units.
-fn rounded(region: &Region, x: i32, y: i32, w: i32, h: i32, r: i32) {
+fn rounded(region: &mut Vec<[i32; 4]>, x: i32, y: i32, w: i32, h: i32, r: i32) {
     let r = r.min(w / 2).min(h / 2).max(0);
-    region.add(x, y + r, w, h - 2 * r);
+    region.push([x, y + r, w, h - 2 * r]);
     for i in 0..r {
         let d = r as f32 - i as f32 - 0.5;
         let inset = (r as f32 - (r as f32 * r as f32 - d * d).max(0.0).sqrt()).round() as i32;
-        region.add(x + inset, y + i, w - 2 * inset, 1);
-        region.add(x + inset, y + h - 1 - i, w - 2 * inset, 1);
+        region.push([x + inset, y + i, w - 2 * inset, 1]);
+        region.push([x + inset, y + h - 1 - i, w - 2 * inset, 1]);
+    }
+}
+
+/// A convex outline as rows one logical unit tall: each row spans where its
+/// middle crosses the outline's edges.
+fn outline(region: &mut Vec<[i32; 4]>, points: &[[f32; 2]]) {
+    let top = points.iter().map(|p| p[1]).fold(f32::MAX, f32::min).round() as i32;
+    let bottom = points.iter().map(|p| p[1]).fold(f32::MIN, f32::max).round() as i32;
+    for row in top..bottom {
+        let y = row as f32 + 0.5;
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for (i, a) in points.iter().enumerate() {
+            let b = points[(i + 1) % points.len()];
+            if (a[1] <= y) != (b[1] <= y) {
+                let x = a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+        let (lo, hi) = (lo.round() as i32, hi.round() as i32);
+        if hi > lo {
+            region.push([lo, row, hi - lo, 1]);
+        }
     }
 }
 

@@ -78,6 +78,12 @@ pub enum Prop {
     Heading,
     Gravity,
     ParticleSize,
+    RotateX,
+    RotateY,
+    Depth,
+    Perspective,
+    PivotX,
+    PivotY,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +177,12 @@ pub const PROPS: &[PropInfo] = &[
     p("heading", Prop::Heading, Ty::Number, false, "Degrees clockwise from up: where ballistic particles go."),
     p("gravity", Prop::Gravity, Ty::Number, false, "Logical units a second squared, downward."),
     p("particle_size", Prop::ParticleSize, Ty::Number, false, "A particle's diameter, logical units."),
+    p("rotate_x", Prop::RotateX, Ty::Number, true, "Degrees about the horizontal axis through the pivot: a panel unfolding from its top edge. Applies to the subtree; text stays flat for now."),
+    p("rotate_y", Prop::RotateY, Ty::Number, true, "Degrees about the vertical axis through the pivot."),
+    p("depth", Prop::Depth, Ty::Number, true, "Logical units toward the viewer (positive) or away (negative), through the perspective."),
+    p("perspective", Prop::Perspective, Ty::Number, false, "Distance of the eye, logical units: smaller is stronger. 800 by default."),
+    p("pivot_x", Prop::PivotX, Ty::Number, false, "Where the rotations turn, 0 to 1 across the node; 0.5 by default."),
+    p("pivot_y", Prop::PivotY, Ty::Number, false, "Where the rotations turn, 0 to 1 down the node; 0.5 by default."),
     p("node", Prop::NodeSize, Ty::Number, false, "A thread's nodes: discs this wide at its start and at its tip, in `color`. 0 is none."),
     p("crisp", Prop::Crisp, Ty::Bool, false, "A hairline: position and size rounded to whole physical pixels, never under one (Metrics.crisp)."),
     p("italic", Prop::Italic, Ty::Bool, false, "Text in the font's italic."),

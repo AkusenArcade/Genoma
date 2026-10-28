@@ -124,6 +124,11 @@ pub struct Node {
     /// shared GPU by it.
     uid: u64,
     emit: Emit,
+    /// Depth: rotations in degrees, z toward the viewer, the eye's distance
+    /// and the pivot, as given.
+    turn: [f32; 3],
+    perspective: f32,
+    pivot: [f32; 2],
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -189,6 +194,9 @@ impl Node {
             bud: 0.0,
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             emit: Emit::default(),
+            turn: [0.0; 3],
+            perspective: 800.0,
+            pivot: [0.5, 0.5],
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -367,9 +375,18 @@ pub struct Scene {
     /// Particles' clock: their births and their age are seconds since this.
     epoch: Instant,
     now: f32,
-    /// The blurred shapes as last drawn, logical units: x, y, width, height,
-    /// radius.
-    blur: Vec<[f32; 5]>,
+    /// The blurred shapes as last drawn.
+    blur: Vec<Blur>,
+}
+
+/// A shape the compositor blurs behind, logical units.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Blur {
+    /// x, y, width, height, radius.
+    Rounded([f32; 5]),
+    /// A shape under depth, as its projected outline: a convex polygon,
+    /// since a flat convex shape stays convex through a perspective.
+    Outline(Vec<[f32; 2]>),
 }
 
 impl Scene {
@@ -526,7 +543,7 @@ impl Scene {
     }
 
     /// The shapes the compositor should blur behind, as last drawn.
-    pub fn blur_shapes(&self) -> &[[f32; 5]] {
+    pub fn blur_shapes(&self) -> &[Blur] {
         &self.blur
     }
 
@@ -635,6 +652,9 @@ impl Scene {
             Prop::ToX => Value::Number(n.path[4]),
             Prop::ToY => Value::Number(n.path[5]),
             Prop::Bud => Value::Number(n.bud),
+            Prop::RotateX => Value::Number(n.turn[0]),
+            Prop::RotateY => Value::Number(n.turn[1]),
+            Prop::Depth => Value::Number(n.turn[2]),
             Prop::OffsetX => Value::Number(n.offset[0]),
             Prop::OffsetY => Value::Number(n.offset[1]),
             Prop::Fill => Value::Color(n.fill),
@@ -759,6 +779,12 @@ impl Scene {
             Prop::Heading => n.emit.heading = take!(number),
             Prop::Gravity => n.emit.gravity = take!(number),
             Prop::ParticleSize => n.emit.size = take!(number).max(0.5),
+            Prop::RotateX => n.turn[0] = take!(number),
+            Prop::RotateY => n.turn[1] = take!(number),
+            Prop::Depth => n.turn[2] = take!(number),
+            Prop::Perspective => n.perspective = take!(number).max(1.0),
+            Prop::PivotX => n.pivot[0] = take!(number),
+            Prop::PivotY => n.pivot[1] = take!(number),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -1000,7 +1026,7 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
+        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         list
@@ -1042,6 +1068,8 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
 
 struct Out<'a> {
     list: &'a mut DrawList,
+    /// The depth in force, physical pixels to projected (by rows).
+    transform: [[f32; 4]; 4],
     /// The particles' clock, as the last step left it.
     now: f32,
     /// The nearest capsule above, as drawn: x, y, width, height, radius,
@@ -1052,7 +1080,59 @@ struct Out<'a> {
     /// The clip in force, physical pixels: x0, y0, x1, y1.
     clip: [f32; 4],
     icons: &'a mut icons::Icons,
-    blur: Vec<[f32; 5]>,
+    blur: Vec<Blur>,
+}
+
+fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut m = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            m[i][j] = (0..4).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    m
+}
+
+/// A turn about (px, py): rotations about x then y in degrees, z toward the
+/// viewer, then the perspective of an eye `eye` pixels away, all by rows.
+fn turn_about(px: f32, py: f32, turn: [f32; 3], eye: f32) -> [[f32; 4]; 4] {
+    let (rx, ry) = (turn[0].to_radians(), turn[1].to_radians());
+    let to = [[1.0, 0.0, 0.0, px], [0.0, 1.0, 0.0, py], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let back = [[1.0, 0.0, 0.0, -px], [0.0, 1.0, 0.0, -py], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    // Perspective: w = 1 - z / eye, so nearer (positive z) is larger.
+    let persp = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, -1.0 / eye, 1.0]];
+    let x = [[1.0, 0.0, 0.0, 0.0], [0.0, rx.cos(), -rx.sin(), 0.0], [0.0, rx.sin(), rx.cos(), 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let y = [[ry.cos(), 0.0, ry.sin(), 0.0], [0.0, 1.0, 0.0, 0.0], [-ry.sin(), 0.0, ry.cos(), 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let z = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, turn[2]], [0.0, 0.0, 0.0, 1.0]];
+    mul(to, mul(persp, mul(z, mul(x, mul(y, back)))))
+}
+
+/// A rounded rectangle's outline, physical pixels, through a depth matrix,
+/// in logical units. Each corner is a few segments: the region it becomes is
+/// cut in whole logical rows, which hides the facets. None when part of it
+/// is at or behind the eye.
+fn projected_outline(m: [[f32; 4]; 4], [x, y, w, h]: [f32; 4], radius: f32, scale: f32) -> Option<Vec<[f32; 2]>> {
+    const STEPS: usize = 6;
+    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+    let corners = [
+        ([x + w - r, y + r], -90.0f32),
+        ([x + w - r, y + h - r], 0.0),
+        ([x + r, y + h - r], 90.0),
+        ([x + r, y + r], 180.0),
+    ];
+    let mut outline = Vec::with_capacity(4 * (STEPS + 1));
+    for ([cx, cy], start) in corners {
+        for i in 0..=STEPS {
+            let a = (start + 90.0 * i as f32 / STEPS as f32).to_radians();
+            let p = [cx + r * a.cos(), cy + r * a.sin(), 0.0, 1.0];
+            let q: [f32; 4] = std::array::from_fn(|k| (0..4).map(|j| m[k][j] * p[j]).sum());
+            if q[3] <= 1e-3 {
+                return None;
+            }
+            outline.push([q[0] / q[3] / scale, q[1] / q[3] / scale]);
+        }
+    }
+    Some(outline)
 }
 
 /// Bioma's rim: 1 logical unit, rounded to the physical pixel, never under 2
@@ -1098,6 +1178,16 @@ fn collect(
         origin[1] += n.offset[1];
     }
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
+    // Depth: this node's turn about its pivot, through its perspective,
+    // composed with what its ancestors already turned.
+    let saved_transform = out.transform;
+    if let Some(n) = tree.get_node_context(node) {
+        if n.turn != [0.0; 3] {
+            let px = (own[0] + own[2] * n.pivot[0]) * scale;
+            let py = (own[1] + own[3] * n.pivot[1]) * scale;
+            out.transform = mul(out.transform, turn_about(px, py, n.turn, n.perspective * scale));
+        }
+    }
     let declared_width = tree
         .style(node)
         .ok()
@@ -1168,7 +1258,11 @@ fn collect(
             let radius = n.radius.map_or(size[1] / 2.0, |r| r * scale).min(size[0].min(size[1]) / 2.0);
             let rim = rim_width(n, scale);
             if n.blur {
-                out.blur.push([x, y, w, h, radius / scale]);
+                if out.transform == Rect::IDENTITY {
+                    out.blur.push(Blur::Rounded([x, y, w, h, radius / scale]));
+                } else if let Some(outline) = projected_outline(out.transform, [x * scale, y * scale, size[0], size[1]], radius, scale) {
+                    out.blur.push(Blur::Outline(outline));
+                }
             }
             let hollow = n.hollow;
             // A bud is drawn as one shape with its parent capsule, without
@@ -1209,6 +1303,7 @@ fn collect(
                     path_end: [0.0; 4],
                     bud,
                     bud_shape,
+                    transform: out.transform,
                 });
             }
             // A band drawn only outside its cells: each child capsule's
@@ -1240,6 +1335,7 @@ fn collect(
                         path_end: [0.0; 4],
                         bud: [0.0; 4],
                         bud_shape: [0.0; 4],
+                        transform: out.transform,
                     });
                 }
             }
@@ -1277,6 +1373,7 @@ fn collect(
                 path_end: [c[0], c[1], width, g],
                 bud: [0.0; 4],
                 bud_shape: [0.0; 4],
+                transform: out.transform,
             });
             // The nodes: at the start, and at the tip as it grows.
             if n.node_size > 0.0 && g > 0.0 {
@@ -1304,6 +1401,7 @@ fn collect(
                         path_end: [0.0; 4],
                         bud: [0.0; 4],
                         bud_shape: [0.0; 4],
+                        transform: out.transform,
                     });
                 }
             }
@@ -1353,6 +1451,7 @@ fn collect(
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
                         alpha,
                         clip: out.clip,
+                        transform: out.transform,
                     });
                 }
             }
@@ -1386,6 +1485,7 @@ fn collect(
     }
     out.clip = saved;
     out.parent_shape = saved_parent;
+    out.transform = saved_transform;
 }
 
 #[cfg(test)]
