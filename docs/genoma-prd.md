@@ -16,7 +16,7 @@ Implementation language: Rust. Interface language: Luau, hot-reloaded (§7).
 Language: English throughout — code, comments, identifiers, documents.
 The project name **Genoma** is the only Italian word retained.
 
-Status: M0 and M1 done 2026-10-28 (§11.1). Open questions in §12.
+Status: M0, M1 and M2 done 2026-10-28 (§11.1); M3 under way. Open questions in §12.
 
 ---
 
@@ -639,6 +639,20 @@ in both. Memory is a twelfth. Frame time is 0.43 ms at p99.
 
 Still to measure: the RTX 3060 laptop, where the stutter that started all
 this is.
+
+**M2 closed, 2026-10-28, by Akusen's decision.** The memory saving alone
+justifies going on, and he expects the lead to hold on the heavier, more
+particular animations of the living layer. One caveat is on record: a fast,
+continuous animation forces a frame on every refresh in Genoma too, and
+there the lead shrinks to the cost of a frame, about 0.21 ms against 0.31.
+- **Deferred to M4:** the eye test of a half-pixel step instead of a quarter.
+  The quarter pixel was chosen for caution, not measured. Its job is to find
+  the step past which slow motion stops looking continuous. That threshold
+  then prices every slow mover of the living layer (growing threads,
+  budding, drifting particles), so it is set once, by eye, with those on
+  screen.
+- **Pending, not blocking M3:** the laptop measurement (device match, smoothness
+  without performance mode, the same side-by-side).
 
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
