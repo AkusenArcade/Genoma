@@ -69,6 +69,9 @@ documents, not here.
       own interior is taken out, so glass never sits on glass.
 - [x] The rim follows the joined outline.
 
+*Akusen, 2026-10-28:* **Bioma's cells open by budding** and close by
+reabsorption (PRD §10).
+
 ### 4. Particles with data behind them (§8.3, §5.4)
 
 *Built 2026-10-28, `examples/living` (the link's flow).* One correction to
@@ -123,7 +126,7 @@ with the depth work.
 - [x] Each node may carry a 3D transform: rotation about x and y, translation
       in z, and a perspective. It applies to its subtree. Primitives evaluate
       their distance field in local space after the projection, so edges
-      stay analytic and sharp.
+      stay analytic and sharp. *Checked by Akusen 2026-10-28.*
 - [x] **Text under depth** (PRD §12, question 2) is decided here by
       measurement: glyphs rasterised at their transformed size, or MSDF.
       *Decided 2026-10-28:* neither. A tilted text is rasterised once on the

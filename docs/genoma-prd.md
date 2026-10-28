@@ -475,6 +475,10 @@ it costs. Porting Bioma does not mean rewriting 39 services in Rust.
 - **Bioma's design tokens** (`Theme`, `Timing`, `Metrics`, `Typography`)
   become Luau modules of signals. The theme is still an animated singleton, so
   retinting the desktop stays live.
+- **Cells open by budding** (§8.2). *Akusen, 2026-10-28:* a cell's
+  expanded form buds out of its contracted one and is reabsorbed when it
+  closes. Bioma's design documents take the rule when the port starts,
+  since Bioma on Quickshell has no smooth union to draw it with.
 - **Configuration.** Bioma keeps its two JSON layers. Genoma reads and writes
   them with `g.file`.
 - **The user's configuration carries over.** Bioma's users keep the
