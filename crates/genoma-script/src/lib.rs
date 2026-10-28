@@ -18,7 +18,7 @@ use genoma_core::{
     timing::{self, Curve, Timing},
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
-use genoma_services::{clock::Clock, niri::Niri, vitals::Vitals};
+use genoma_services::{clock::Clock, niri::Niri, power::Power, vitals::Vitals};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
 /// Pointer input for a node, as the surface saw it.
@@ -136,6 +136,7 @@ pub struct Services {
     pub clock: Rc<Clock>,
     pub niri: Option<Rc<Niri>>,
     pub vitals: Rc<Vitals>,
+    pub power: Rc<Power>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -200,6 +201,38 @@ impl UserData for VitalsRef {
         fields.add_field_method_get("gpu", |_, this| Ok(this.0.gpu.get()));
         fields.add_field_method_get("gpu_clock", |_, this| Ok(this.0.gpu_clock.get()));
         fields.add_field_method_get("cpu_clock", |_, this| Ok(this.0.cpu_clock.get()));
+    }
+}
+
+struct PowerRef(Rc<Power>);
+
+impl UserData for PowerRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // power.battery → { present, laptop, level 0…1, state, time_to_empty,
+        // time_to_full }, the display device as UPower sums it.
+        fields.add_field_method_get("battery", |lua, this| {
+            let b = this.0.battery.get();
+            let t = lua.create_table()?;
+            t.set("present", b.present)?;
+            t.set("laptop", b.laptop)?;
+            t.set("level", b.level)?;
+            t.set("state", b.state)?;
+            t.set("time_to_empty", b.time_to_empty)?;
+            t.set("time_to_full", b.time_to_full)?;
+            Ok(t)
+        });
+        fields.add_field_method_get("on_battery", |_, this| Ok(this.0.on_battery.get()));
+        fields.add_field_method_get("profile", |_, this| Ok(this.0.profile.get()));
+        fields.add_field_method_get("profiles", |_, this| Ok(this.0.profiles.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // power:set_profile("balanced"): the daemon's answer comes back as
+        // power.profile.
+        methods.add_method("set_profile", |_, this, profile: String| {
+            this.0.set_profile(profile);
+            Ok(())
+        });
     }
 }
 
@@ -488,11 +521,12 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
                         "niri" => "niri",
+                        "power" => "power",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -504,6 +538,7 @@ impl Script {
                             Some(niri) => lua.create_userdata(NiriRef(niri.clone()))?,
                             None => return Err(err("niri's socket is not available")),
                         },
+                        "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

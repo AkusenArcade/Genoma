@@ -26,7 +26,7 @@ use std::{
 use genoma_core::reactive::Effect;
 use genoma_render::{Renderer, cosmic_text::FontSystem};
 use genoma_script::{Script, Services};
-use genoma_services::{clock::Clock, niri::Niri, vitals::{self, Vitals}};
+use genoma_services::{bus::Bus, clock::Clock, niri::Niri, vitals::{self, Vitals}};
 use notify::Watcher;
 use smithay_client_toolkit::reexports::{
     calloop::{
@@ -62,7 +62,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()) }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -70,12 +70,14 @@ fn services() -> (Services, Option<UnixStream>) {
 struct Sources {
     services: Services,
     niri_stream: Option<UnixStream>,
+    /// The D-Bus thread, started with the first service that needs it.
+    bus: Option<Bus>,
     started: Vec<&'static str>,
 }
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri"] {
+        for service in ["clock", "vitals", "niri", "power"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -98,6 +100,19 @@ impl Sources {
                             TimeoutAction::ToDuration(vitals::INTERVAL)
                         })
                         .expect("vitals timer");
+                }
+                "power" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let power = self.services.power.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                power.apply(update);
+                            }
+                        })
+                        .expect("power channel");
+                    self.services.power.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -133,6 +148,18 @@ impl Sources {
     }
 }
 
+impl Sources {
+    fn bus(&mut self) -> Option<Bus> {
+        if self.bus.is_none() {
+            match Bus::start() {
+                Ok(bus) => self.bus = Some(bus),
+                Err(e) => log::warn!("no bus thread: {e}"),
+            }
+        }
+        self.bus.clone()
+    }
+}
+
 /// Every service, without a surface: what each says, as it changes.
 fn probe() {
     let (services, stream) = services();
@@ -153,7 +180,17 @@ fn probe() {
             }
         });
     }
-    let mut sources = Sources { services, niri_stream: stream, started: Vec::new() };
+    let p = services.power.clone();
+    Effect::new(move || {
+        let b = p.battery.get();
+        println!(
+            "power   battery present {} laptop {} level {:.2} {} empty {} s full {} s, on battery {}",
+            b.present, b.laptop, b.level, b.state, b.time_to_empty, b.time_to_full, p.on_battery.get()
+        )
+    });
+    let p = services.power.clone();
+    Effect::new(move || println!("power   profile {:?} of {:?}", p.profile.get(), p.profiles.get()));
+    let mut sources = Sources { services, niri_stream: stream, bus: None, started: Vec::new() };
     sources.start(|_| true, &handle);
     event_loop.run(None, &mut (), |_| {}).expect("event loop");
 }
@@ -190,7 +227,7 @@ fn run(dir: PathBuf) {
     log::info!("loaded {}", dir.join("shell.luau").display());
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
-    let sources = Rc::new(RefCell::new(Sources { services, niri_stream, started: Vec::new() }));
+    let sources = Rc::new(RefCell::new(Sources { services, niri_stream, bus: None, started: Vec::new() }));
     sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
 
     // Hot reload: a save in the directory, settled for a moment because an

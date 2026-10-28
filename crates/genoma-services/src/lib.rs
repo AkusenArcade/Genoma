@@ -4,9 +4,12 @@
 //! A service never owns a thread or a timer of its own. It says what it needs
 //! (a socket to read, an interval to sample at) and the runtime's event loop
 //! drives it, so everything the shell does runs on one loop that sleeps when
-//! nothing happens.
+//! nothing happens. D-Bus is the exception the PRD allows (§4): its
+//! connections live on one bus thread, which posts into the loop.
 
+pub mod bus;
 pub mod clock;
 pub mod icons;
 pub mod niri;
+pub mod power;
 pub mod vitals;
