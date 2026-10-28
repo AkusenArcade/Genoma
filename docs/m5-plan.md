@@ -153,8 +153,12 @@ PipeWire stores. The `pipewire` 0.10 crate on its own thread,
   an empty property dictionary, which had wiped the node's class; the
   properties are taken only when the event says they changed.
 - At rest the PipeWire thread woke 0 times in 30 s.
-- [ ] Setting the default sink live: it moves whatever plays, so it waits
-      for Akusen. Streams by application, when something plays.
+- [x] Setting the default sink live (Akusen agreed): from Luau to HDMI and
+      back to the Revelator, both seen through `default.audio.sink`. A sink
+      WirePlumber thinks unavailable (USB Speakers, no jack) gets the
+      configured key and stays not the default, exactly as with `wpctl
+      set-default`.
+- [ ] Streams by application, when something plays.
 
 ### 6. Bluetooth
 
