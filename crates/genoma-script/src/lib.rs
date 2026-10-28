@@ -21,7 +21,14 @@ use genoma_core::{
     timing::{self, Curve, Timing},
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
-use genoma_services::{clock::Clock, network::Network, niri::Niri, power::Power, vitals::Vitals};
+use genoma_services::{
+    clock::Clock,
+    media::{Action, Media},
+    network::Network,
+    niri::Niri,
+    power::Power,
+    vitals::Vitals,
+};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
 /// Pointer input for a node, as the surface saw it.
@@ -141,6 +148,7 @@ pub struct Services {
     pub vitals: Rc<Vitals>,
     pub power: Rc<Power>,
     pub network: Rc<Network>,
+    pub media: Rc<Media>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -312,6 +320,85 @@ impl UserData for NetworkRef {
         });
         methods.add_method("forget", |_, this, ssid: String| {
             this.0.forget(ssid);
+            Ok(())
+        });
+    }
+}
+
+struct MediaRef(Rc<Media>);
+
+impl UserData for MediaRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // media.players → { { name, identity, desktop_entry, status, title,
+        // artist, album, album_artist, art_url, length, track_id, rate,
+        // can_play, can_pause, can_go_next, can_go_previous, can_seek,
+        // can_control, position_supported }, … }, in the order they came.
+        fields.add_field_method_get("players", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, p) in this.0.players.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("name", p.name)?;
+                t.set("identity", p.identity)?;
+                t.set("desktop_entry", p.desktop_entry)?;
+                t.set("status", p.status)?;
+                t.set("title", p.title)?;
+                t.set("artist", p.artist)?;
+                t.set("album", p.album)?;
+                t.set("album_artist", p.album_artist)?;
+                t.set("art_url", p.art_url)?;
+                t.set("length", p.length)?;
+                t.set("track_id", p.track_id)?;
+                t.set("rate", p.rate)?;
+                t.set("can_play", p.can_play)?;
+                t.set("can_pause", p.can_pause)?;
+                t.set("can_go_next", p.can_go_next)?;
+                t.set("can_go_previous", p.can_go_previous)?;
+                t.set("can_seek", p.can_seek)?;
+                t.set("can_control", p.can_control)?;
+                t.set("position_supported", p.position_supported)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // media:position(name) → seconds now: the last reading carried forward
+        // at the rate. It is not a signal: what draws progress asks it on its
+        // own beat.
+        methods.add_method("position", |_, this, name: String| {
+            let players = this.0.players.get_untracked().unwrap_or_default();
+            Ok(players.iter().find(|p| p.name == name).map(|p| p.position_now()))
+        });
+        for (method, action) in [
+            ("play_pause", 0u8),
+            ("play", 1),
+            ("pause", 2),
+            ("stop", 3),
+            ("next", 4),
+            ("previous", 5),
+        ] {
+            methods.add_method(method, move |_, this, name: String| {
+                let action = match action {
+                    0 => Action::PlayPause,
+                    1 => Action::Play,
+                    2 => Action::Pause,
+                    3 => Action::Stop,
+                    4 => Action::Next,
+                    _ => Action::Previous,
+                };
+                this.0.act(name, action);
+                Ok(())
+            });
+        }
+        // media:seek(name, seconds) forward or back; media:set_position(name,
+        // seconds) from the start.
+        methods.add_method("seek", |_, this, (name, by): (String, f64)| {
+            this.0.act(name, Action::Seek(by));
+            Ok(())
+        });
+        methods.add_method("set_position", |_, this, (name, at): (String, f64)| {
+            this.0.act(name, Action::SetPosition(at));
             Ok(())
         });
     }
@@ -675,13 +762,14 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
                         "niri" => "niri",
                         "power" => "power",
                         "network" => "network",
+                        "media" => "media",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -695,6 +783,7 @@ impl Script {
                         },
                         "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
                         "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,
+                        "media" => lua.create_userdata(MediaRef(services.media.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

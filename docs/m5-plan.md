@@ -114,9 +114,20 @@ again and posted whole.
 
 ### 4. Media
 
-- [ ] MPRIS: players as they appear and go, metadata, status, position
+- [x] MPRIS: players as they appear and go, metadata, status, position
       (from the rate and the last report, never polled), and the actions.
       Checked against `playerctl`.
+
+*Built 2026-10-28,* to what Bioma's `services/Media.qml` reads. Players from
+`ListNames`, then `NameOwnerChanged`; a player read again on its
+`PropertiesChanged`. The position is read with the rest and on `Seeked`, and
+carried forward at the rate while playing (`media:position(name)`), so a
+progress bar asks on its own beat and nothing polls. Bioma's length quirk
+for Firefox stays in Bioma's media service, where it is now. Checked with
+Bioma's `scripts/mpris-dummy.py` (`playerctl` is not installed here; `busctl`
+instead): the player appeared with its metadata and left when it was
+closed; pause held the position, play resumed it, seek +30 and set_position
+100 came back through `Seeked`, next changed the title and started at 0.
 
 ### 5. Audio
 

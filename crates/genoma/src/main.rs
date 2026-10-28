@@ -65,7 +65,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -80,7 +80,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network"] {
+        for service in ["clock", "vitals", "niri", "power", "network", "media"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -129,6 +129,19 @@ impl Sources {
                         })
                         .expect("network channel");
                     self.services.network.start(&bus, post);
+                }
+                "media" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let media = self.services.media.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                media.apply(update);
+                            }
+                        })
+                        .expect("media channel");
+                    self.services.media.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -281,6 +294,18 @@ fn probe() {
             println!(
                 "network   {:?} {:.2} secured {} connected {} {} MHz known {}",
                 w.ssid, w.strength, w.secured, w.connected, w.frequency, w.known
+            );
+        }
+    });
+    let m = services.media.clone();
+    Effect::new(move || {
+        let players = m.players.get();
+        println!("media   {} players", players.len());
+        for p in players {
+            println!(
+                "media   {} ({}) {} {:?} by {:?} on {:?}, {:.1} of {:.1} s at rate {}, art {}, can play {} pause {} next {} previous {} seek {}",
+                p.identity, p.name, p.status, p.title, p.artist, p.album, p.position_now(), p.length, p.rate,
+                !p.art_url.is_empty(), p.can_play, p.can_pause, p.can_go_next, p.can_go_previous, p.can_seek
             );
         }
     });
