@@ -65,6 +65,8 @@ pub struct Text {
     pub scale: f32,
     /// Straight sRGB-encoded RGBA, as everything else.
     pub color: [f32; 4],
+    /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
+    pub clip: [f32; 4],
 }
 
 /// A rasterised image, premultiplied RGBA at its physical size. The render
@@ -79,6 +81,8 @@ pub struct Image {
     pub origin: [f32; 2],
     /// Multiplies the image's own alpha: a subtree fading in.
     pub alpha: f32,
+    /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
+    pub clip: [f32; 4],
 }
 
 /// What one surface shows, in drawing order: every rect, then every image,

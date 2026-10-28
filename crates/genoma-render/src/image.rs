@@ -12,6 +12,7 @@ struct Quad {
     origin: [f32; 2],
     size: [f32; 2],
     alpha: [f32; 4],
+    clip: [f32; 4],
 }
 
 const SHADER: &str = r#"
@@ -24,21 +25,27 @@ struct Varyings {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) alpha: f32,
+    @location(2) clip: vec4<f32>,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @location(1) size: vec2<f32>, @location(2) alpha: vec4<f32>) -> Varyings {
+fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @location(1) size: vec2<f32>, @location(2) alpha: vec4<f32>, @location(3) clip: vec4<f32>) -> Varyings {
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u));
     let pixel = origin + corner * size;
     var out: Varyings;
     out.position = vec4<f32>(pixel / globals.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
     out.uv = corner;
     out.alpha = alpha.x;
+    out.clip = clip;
     return out;
 }
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
+    let p = in.position.xy;
+    if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
+        discard;
+    }
     // Already premultiplied, as tiny-skia rasterises.
     return textureSample(image, smp, in.uv) * in.alpha;
 }
@@ -124,7 +131,7 @@ impl Pipeline {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Quad>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -235,6 +242,7 @@ impl Pipeline {
                 origin: image.origin,
                 size: [image.width as f32, image.height as f32],
                 alpha: [image.alpha, 0.0, 0.0, 0.0],
+                clip: image.clip,
             });
             self.draws.push(image.key);
         }

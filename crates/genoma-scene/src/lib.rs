@@ -107,6 +107,8 @@ pub struct Node {
     catch: bool,
     growth: f32,
     reach: f32,
+    clip: bool,
+    scroll_y: f32,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -162,6 +164,8 @@ impl Node {
             catch: false,
             growth: 1.0,
             reach: 1.0,
+            clip: false,
+            scroll_y: 0.0,
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -437,6 +441,7 @@ impl Scene {
             Prop::Opacity => Value::Number(n.opacity),
             Prop::Growth => Value::Number(n.growth),
             Prop::Reach => Value::Number(n.reach),
+            Prop::ScrollY => Value::Number(n.scroll_y),
             Prop::OffsetX => Value::Number(n.offset[0]),
             Prop::OffsetY => Value::Number(n.offset[1]),
             Prop::Fill => Value::Color(n.fill),
@@ -540,6 +545,8 @@ impl Scene {
             Prop::Catch => n.catch = take!(flag),
             Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
+            Prop::Clip => n.clip = take!(flag),
+            Prop::ScrollY => n.scroll_y = take!(number),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -732,7 +739,7 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, icons: &mut self.icons, blur: Vec::new() };
+        let mut out = Out { list: &mut list, clip: Rect::NO_CLIP, icons: &mut self.icons, blur: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         list
@@ -771,6 +778,8 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
 
 struct Out<'a> {
     list: &'a mut DrawList,
+    /// The clip in force, physical pixels: x0, y0, x1, y1.
+    clip: [f32; 4],
     icons: &'a mut icons::Icons,
     blur: Vec<[f32; 5]>,
 }
@@ -818,9 +827,15 @@ fn collect(
         origin[1] += n.offset[1];
     }
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
+    // What can be hit is what can be seen: the bounds inside the clip.
+    let c = [out.clip[0] / scale, out.clip[1] / scale, out.clip[2] / scale, out.clip[3] / scale];
+    let x0 = own[0].max(c[0]);
+    let y0 = own[1].max(c[1]);
+    let x1 = (own[0] + own[2]).min(c[2]);
+    let y1 = (own[1] + own[3]).min(c[3]);
     if let Some(n) = tree.get_node_context_mut(node) {
         n.arc_radius = layout.size.width / 2.0;
-        n.bounds = own;
+        n.bounds = [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)];
     }
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {
@@ -884,6 +899,7 @@ fn collect(
                 wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
                 arc: [0.0, n.arc, 0.0, 0.0],
                 fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
+                clip: out.clip,
             });
             // A band drawn only outside its cells: each child capsule's
             // shape is taken back out of it before the child is drawn.
@@ -909,6 +925,7 @@ fn collect(
                         wave: [0.0; 4],
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
+                        clip: out.clip,
                     });
                 }
             }
@@ -928,6 +945,7 @@ fn collect(
                         height: pixels,
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
                         alpha,
+                        clip: out.clip,
                     });
                 }
             }
@@ -939,13 +957,23 @@ fn collect(
                 origin: [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale],
                 scale,
                 color: fade(n.color),
+                clip: out.clip,
             });
         }
         Kind::Box => {}
     }
-    for child in tree.children(node).unwrap_or_default() {
-        collect(tree, fonts, child, [own[0], own[1], own[2], own[3]], alpha, scale, out);
+    // A clipping node narrows the clip for everything inside it, and a
+    // scrolled one moves its children up.
+    let (clip, scroll) = tree.get_node_context(node).map_or((false, 0.0), |n| (n.clip, n.scroll_y));
+    let saved = out.clip;
+    if clip {
+        let c = [own[0] * scale, own[1] * scale, (own[0] + own[2]) * scale, (own[1] + own[3]) * scale];
+        out.clip = [saved[0].max(c[0]), saved[1].max(c[1]), saved[2].min(c[2]), saved[3].min(c[3])];
     }
+    for child in tree.children(node).unwrap_or_default() {
+        collect(tree, fonts, child, [own[0], own[1] - scroll, own[2], own[3]], alpha, scale, out);
+    }
+    out.clip = saved;
 }
 
 #[cfg(test)]

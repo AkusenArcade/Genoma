@@ -25,6 +25,9 @@ g.timing {
     panel_close = { duration = 0.15, curve = { 0.5, 0.0, 0.9, 0.5 } },
     content_open = { duration = 0.12, delay = 0.132 },
     content_close = { duration = 0.06 },
+    -- A flick's slowing to a stop, and a scroll that follows the hand.
+    fling = { duration = 0.6, curve = { 0.22, 1.0, 0.36, 1.0 } },
+    instant = { duration = 0 },
 }
 
 local OUTPUT = "HDMI-A-1"
@@ -60,6 +63,10 @@ local open = g.state("workspaces.open", false)
 local mark = g.state("workspaces.mark", 1)
 -- The mark is the keyboard's (KeyMark.qml): shown once a key has moved it.
 local keyed = g.state("workspaces.keyed", false)
+-- The well scrolls past five rows, the active one kept inside.
+local scroll = g.state("workspaces.scroll", 0)
+local flinging = g.state("workspaces.flinging", false)
+local VISIBLE = 5
 local GAP = 14 -- marginEdge 12 + tissuePadding 2
 local ROW, BUTTON, ROW_PAD, WIDTH = 44, 36, 8, 216
 local MAX_ROWS = 10
@@ -75,10 +82,25 @@ local function activeIndex(): number
     return 1
 end
 
+local function scrollTo(y: number, fling: boolean)
+    local most = math.max(0, #list() - VISIBLE) * 44
+    flinging.value = fling
+    scroll.value = math.clamp(y, 0, most)
+end
+
+-- Keeps row i inside the five shown.
+local function reveal(i: number)
+    local top, bottom = scroll.value, scroll.value + VISIBLE * 44
+    local y = (i - 1) * 44
+    if y < top then scrollTo(y, false) elseif y + 44 > bottom then scrollTo(y + 44 - VISIBLE * 44, false) end
+end
+
 local function setOpen(value: boolean)
     if value then
         mark.value = activeIndex()
         keyed.value = false
+        scrollTo(0, false)
+        reveal(mark.value)
     end
     open.value = value
 end
@@ -240,22 +262,43 @@ local workspaces = cell {
             elseif key == "Down" then
                 mark.value = if keyed.value then math.min(mark.value + 1, n) else mark.value
                 keyed.value = true
+                reveal(mark.value)
             elseif key == "Up" then
                 mark.value = if keyed.value then math.max(mark.value - 1, 1) else mark.value
                 keyed.value = true
+                reveal(mark.value)
             elseif key == "Return" or key == "KP_Enter" or key == "space" then
                 jump(mark.value)
             end
         end,
-        -- The well (Well.qml), rows inside it.
+        -- The well (Well.qml): it clips the scroll, never the panel.
         g.capsule {
             radius = 10,
             fill = theme.well,
-            direction = "column",
+            width = WIDTH,
+            height = function() return math.min(math.max(#list(), 1), VISIBLE) * ROW end,
+            clip = true,
+            align = "start",
             justify = "start",
+            scroll_y = function() return scroll.value end,
             opacity = function() return if open.value then 1 else 0 end,
-            transition = { opacity = function() return if open.value then "content_open" else "content_close" end },
-            table.unpack(rows),
+            transition = {
+                scroll_y = function() return if flinging.value then "fling" else "instant" end,
+                opacity = function() return if open.value then "content_open" else "content_close" end,
+            },
+            -- A wheel moves a row a step; a touchpad follows the fingers.
+            on_wheel = function(_, dy)
+                local discrete = dy == math.floor(dy) and math.abs(dy) <= 3
+                scrollTo(scroll.value + (if discrete then dy * ROW else dy), false)
+            end,
+            -- Fingers lifted while moving: carry on at their speed and slow
+            -- to a stop (Glide.qml), over the timing set's fling.
+            on_fling = function(_, vy) scrollTo(scroll.value + vy * 0.3, true) end,
+            g.box {
+                direction = "column",
+                justify = "start",
+                table.unpack(rows),
+            },
         },
     },
 }

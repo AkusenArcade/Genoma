@@ -75,6 +75,8 @@ pub struct App {
     input: Option<Box<dyn FnMut(NodeId, Input)>>,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
+    /// The touchpad's recent movement: when, and how far, for the fling.
+    strokes: Vec<(Instant, f64, f64)>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// The surface covers its output: a cell is open, or closing.
     tall: bool,
@@ -125,6 +127,7 @@ impl App {
             input: None,
             hovered: None,
             pressed: None,
+            strokes: Vec::new(),
             keyboard: None,
             tall: false,
             output_size: None,
@@ -628,8 +631,31 @@ impl PointerHandler for App {
                     }
                     self.pressed = None;
                 }
-                K::Axis { horizontal, vertical, .. } => {
+                K::Axis { horizontal, vertical, source, .. } => {
                     let Some(node) = hit else { continue };
+                    // A touchpad stroke is followed, and remembered: when the
+                    // fingers lift while moving, the content carries on at
+                    // their speed over Bioma's Timing.fling, 80 ms.
+                    let finger = source == Some(wl_pointer::AxisSource::Finger);
+                    if finger {
+                        let now = Instant::now();
+                        if horizontal.stop || vertical.stop {
+                            let window = std::time::Duration::from_millis(80);
+                            let recent: Vec<(Instant, f64, f64)> =
+                                self.strokes.iter().filter(|s| now.duration_since(s.0) <= window).copied().collect();
+                            let (dx, dy) = recent.iter().fold((0.0, 0.0), |a, s| (a.0 + s.1, a.1 + s.2));
+                            self.strokes.clear();
+                            // Fingers that stopped before lifting leave the
+                            // content where it is.
+                            if !recent.is_empty() && (dx != 0.0 || dy != 0.0) {
+                                let secs = window.as_secs_f64();
+                                self.deliver(node, Input::Fling(dx / secs, dy / secs));
+                            }
+                            continue;
+                        }
+                        self.strokes.push((now, horizontal.absolute, vertical.absolute));
+                        self.strokes.retain(|s| now.duration_since(s.0) <= std::time::Duration::from_millis(200));
+                    }
                     // A wheel speaks in steps of 120; a touchpad in logical
                     // distance, and only when it speaks at all.
                     let step = |a: &smithay_client_toolkit::seat::pointer::AxisScroll| {

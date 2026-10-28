@@ -57,6 +57,8 @@ pub enum Prop {
     Catch,
     Growth,
     Reach,
+    Clip,
+    ScrollY,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,8 @@ pub const PROPS: &[PropInfo] = &[
     p("attach", Prop::Attach, Ty::Choice(&["center", "below", "above", "below-center"]), false, "Where an overlay sits: centred in its parent, under or over it left-aligned, or under it centred."),
     p("growth", Prop::Growth, Ty::Number, true, "0 to 1: the shape grows from its parent's bottom centre to its own rectangle; content is not scaled."),
     p("reach", Prop::Reach, Ty::Number, true, "0 to 1: how far down a thread is drawn."),
+    p("clip", Prop::Clip, Ty::Bool, false, "Children are drawn only inside this node's rectangle: a well that scrolls. Never on a cell, whose rim it would eat."),
+    p("scroll_y", Prop::ScrollY, Ty::Number, true, "How far the children are scrolled up, logical units."),
     p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];

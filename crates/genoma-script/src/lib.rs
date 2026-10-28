@@ -35,6 +35,9 @@ pub enum Input {
     Click(u32),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
+    /// The fingers left the touchpad while moving: their speed over the last
+    /// moment, logical units a second, for the content to carry on.
+    Fling(f64, f64),
 }
 
 impl Input {
@@ -47,11 +50,12 @@ impl Input {
             Input::Release(_) => "on_release",
             Input::Click(_) => "on_click",
             Input::Wheel(..) => "on_wheel",
+            Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel", "on_fling", "on_outside", "on_key"];
 
 type Handlers = Rc<RefCell<HashMap<genoma_scene::NodeId, HashMap<&'static str, Function>>>>;
 
@@ -242,7 +246,7 @@ impl Script {
                     Input::Key(name) => f.call::<()>(name.as_str()),
                     Input::Hover(entered) => f.call::<()>(*entered),
                     Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(*b),
-                    Input::Wheel(dx, dy) => f.call::<()>((*dx, *dy)),
+                    Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                 };
                 if let Err(e) = result {
                     log::error!("{name}: {e}");

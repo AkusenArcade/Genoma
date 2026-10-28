@@ -74,25 +74,41 @@ From `structure/Cell.qml` (Expansion, `opening`, `closing`):
 
 ### 5. Keyboard and touchpad
 
+*Touchpad done 2026-10-28.* A synthetic two-finger touchpad gave the
+following: ten followed moves of about 28 units, then `on_fling(-2196)`
+when the fingers lifted moving, and a small fling for a short stroke. The
+keys are wired: an exclusive keyboard while open, with Escape, Up, Down and
+Return in the example. **Akusen tries the keys by hand**, because synthetic
+Escape or Return would reach the terminal if the grab failed.
+
 - [ ] Keys through xkbcommon (SCTK seat keyboard): an `on_key` handler with
       the key's name, and the open cell holding the keyboard.
 - [ ] Bioma's keys in an open list: arrows move the mark, Enter
       activates, Escape closes (`components/KeyMark.qml`, `core/Focus.qml`).
-- [ ] Touchpad momentum (`components/Glide.qml`): follow the fingers, and
+- [x] Touchpad momentum (`components/Glide.qml`): follow the fingers, and
       on lift flick on at the speed of the last `Timing.fling` 80 ms.
 
 ### 6. The workspace list (`cells/workspaces/WorkspaceList.qml`)
 
-- [ ] 216 wide, rows of 44, five rows visible and then it scrolls, the
+*Done 2026-10-28, two differences left.* With nine rows the well shows five
+and scrolls: a row a wheel step, the fingers followed, a fling slowing to a
+stop. The active row is kept inside the five, and so is the keyboard's mark.
+New in the toolkit: `clip` (rect and image shaders discard outside it, text
+uses glyphon's bounds; hit bounds are clipped too), `scroll_y`, and
+`on_fling`. Two differences remain: the free place's ring is fainter rather
+than dashed, and "empty" is not italic, because there are no font styles
+yet.
+
+- [x] 216 wide, rows of 44, five rows visible and then it scrolls, the
       active row always inside. The well clips the scroll, never the panel.
-- [ ] Each row:
+- [x] Each row:
       - a round button 36 at x 8, drawn as the Theme.line ring;
       - the number in Orbitron 14 tabular. The active one is in
         `background` on the primary; a vacant one is text at 0.3, and the
         others text at 0.72;
       - the name in Spectral 14 at x = button + 12. The active one is in
         text, the others at 0.5, and "empty" in italic at 0.28.
-- [ ] The well (`components/Well.qml`): lift(bg, −0.01) at 0.8, with a radius
+- [x] The well (`components/Well.qml`): lift(bg, −0.01) at 0.8, with a radius
       concentric with the panel's.
 - [ ] Read the remaining details from the QML when building it: the
       active button's fill, the scroll mark.

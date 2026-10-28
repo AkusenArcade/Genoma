@@ -35,10 +35,13 @@ pub struct Rect {
     /// The fill's colour at the bottom: with an alpha above zero the fill
     /// runs from `fill` at the top to this. Transparent is a flat fill.
     pub fill_to: [f32; 4],
+    /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
+    pub clip: [f32; 4],
 }
 
 impl Rect {
     pub const WHOLE: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+    pub const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 }
 
 #[repr(C)]
@@ -77,6 +80,7 @@ struct Instance {
     @location(6) wave: vec4<f32>,
     @location(7) arc: vec4<f32>,
     @location(8) fill_to: vec4<f32>,
+    @location(9) clip: vec4<f32>,
 };
 
 struct Varyings {
@@ -90,6 +94,7 @@ struct Varyings {
     @location(6) wave: vec4<f32>,
     @location(7) arc: vec4<f32>,
     @location(8) fill_to: vec4<f32>,
+    @location(9) clip: vec4<f32>,
 };
 
 @vertex
@@ -111,6 +116,7 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.wave = instance.wave;
     out.arc = instance.arc;
     out.fill_to = instance.fill_to;
+    out.clip = instance.clip;
     return out;
 }
 
@@ -123,6 +129,10 @@ fn rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
+    let p = in.position.xy;
+    if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
+        discard;
+    }
     let d = rounded_box(in.local, in.half, in.shape.x);
     let rim = in.shape.y;
 
@@ -220,7 +230,7 @@ impl Pipeline {
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
                         3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-                        6 => Float32x4, 7 => Float32x4, 8 => Float32x4,
+                        6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
                     ],
                 })],
             },

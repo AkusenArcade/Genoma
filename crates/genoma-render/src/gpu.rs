@@ -208,7 +208,12 @@ impl Gpu {
                 left: t.origin[0],
                 top: t.origin[1],
                 scale: t.scale,
-                bounds: glyphon::TextBounds::default(),
+                bounds: glyphon::TextBounds {
+                    left: t.clip[0].max(-1.0e9) as i32,
+                    top: t.clip[1].max(-1.0e9) as i32,
+                    right: t.clip[2].min(1.0e9) as i32,
+                    bottom: t.clip[3].min(1.0e9) as i32,
+                },
                 default_color: glyphon::Color::rgba(
                     (t.color[0] * 255.0).round() as u8,
                     (t.color[1] * 255.0).round() as u8,
