@@ -652,7 +652,10 @@ justifies going on, and he expects the lead to hold on the heavier, more
 particular animations of the living layer. One caveat is on record: a fast,
 continuous animation forces a frame on every refresh in Genoma too, and
 there the lead shrinks to the cost of a frame, about 0.21 ms against 0.31.
-- **Deferred to M4:** the eye test of a half-pixel step instead of a quarter.
+- ~~**Deferred to M4:**~~ *Done in M4, 2026-10-28: the quarter pixel stays.*
+  In a blind side-by-side a half-pixel step showed on the GPU satellite's
+  orbit and was told apart correctly (docs/m4-plan.md, step 6).
+  The eye test of a half-pixel step instead of a quarter.
   The quarter pixel was chosen for caution, not measured. Its job is to find
   the step past which slow motion stops looking continuous. That threshold
   then prices every slow mover of the living layer (growing threads,

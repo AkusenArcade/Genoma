@@ -140,9 +140,18 @@ with the depth work.
 
 ### 6. The half-pixel eye test (deferred from M2)
 
-- [ ] With the living layer's slow movers on screen, Akusen compares a
+- [x] With the living layer's slow movers on screen, Akusen compares a
       quarter-pixel step with a half-pixel one. The threshold becomes the
       pacing rule for every slow mover.
+      *Done 2026-10-28, blind:* two copies of the membrane stacked on
+      HDMI-A-1, the steps assigned at random and written down unseen
+      (`GENOMA_STEP`). Akusen saw a slight difference on the GPU satellite
+      only, the orbiting dot, plainer up close, and picked the smoother one
+      correctly: the quarter. The wave, the dial and the beat looked the
+      same. Cost at idle over 30 s: quarter 1.77% of a core, half 1.33%.
+      **The quarter pixel stays the rule.** A mixed rule (quarter for
+      orbits only) would save little: a surface draws at its fastest
+      mover's pace, and the orbit is that mover.
 
 ### 7. Carried from M3
 

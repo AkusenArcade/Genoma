@@ -70,7 +70,13 @@ const BEAT_PEAK: f32 = 1.45;
 /// The smallest step worth a frame: a quarter of a physical pixel. Motion
 /// slower than one step per refresh gets a frame per step, not per refresh,
 /// so a slow satellite costs in proportion to how far it actually moves.
-const STEP: f32 = 0.25;
+/// `GENOMA_STEP` sets another, for the eye test that chooses it (PRD §11.1).
+fn step() -> f32 {
+    static STEP: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *STEP.get_or_init(|| {
+        std::env::var("GENOMA_STEP").ok().and_then(|s| s.parse().ok()).filter(|s: &f32| *s > 0.0).unwrap_or(0.25)
+    })
+}
 
 /// Per-node state, kept as taffy's node context.
 pub struct Node {
@@ -899,7 +905,7 @@ impl Scene {
                     }
                     let near = match a.to {
                         Value::Color(_) => 0.002,
-                        _ => STEP / scale.max(0.01),
+                        _ => step() / scale.max(0.01),
                     };
                     let settled = x.iter().zip(&target).all(|(p, t)| (p - t).abs() < near)
                         && v.iter().all(|s| s.abs() < near * 4.0);
@@ -946,13 +952,13 @@ impl Scene {
                 // orbit instead of making the satellite jump.
                 n.angle = (n.angle + n.orbit * dt).rem_euclid(1.0);
                 let speed = n.orbit.abs() * std::f32::consts::TAU * n.orbit_radius * scale;
-                let wait = Duration::from_secs_f32(STEP / speed.max(1e-3));
+                let wait = Duration::from_secs_f32(step() / speed.max(1e-3));
                 motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
             }
             // A travelling wave and a sway: each paced by its own speed, a
             // frame a quarter pixel of movement.
             let mut pace = |speed: f32| {
-                let wait = Duration::from_secs_f32(STEP / speed.max(1e-3));
+                let wait = Duration::from_secs_f32(step() / speed.max(1e-3));
                 motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
             };
             if n.arc_rate > 0.0 && n.arc < 1.0 {
