@@ -44,6 +44,12 @@ pub struct Rect {
     /// of it is drawn (0…1).
     pub path: [f32; 4],
     pub path_end: [f32; 4],
+    /// Budding (PRD §8.2): the parent's box, its centre relative to this
+    /// one's and its half size, physical pixels; then the parent's radius,
+    /// and the smoothness of the union (0 is no bud). The shape drawn is the
+    /// smooth union of the two, without the parent's own interior.
+    pub bud: [f32; 4],
+    pub bud_shape: [f32; 4],
 }
 
 impl Rect {
@@ -90,6 +96,8 @@ struct Instance {
     @location(9) clip: vec4<f32>,
     @location(10) path: vec4<f32>,
     @location(11) path_end: vec4<f32>,
+    @location(12) bud: vec4<f32>,
+    @location(13) bud_shape: vec4<f32>,
 };
 
 struct Varyings {
@@ -106,14 +114,24 @@ struct Varyings {
     @location(9) clip: vec4<f32>,
     @location(10) path: vec4<f32>,
     @location(11) path_end: vec4<f32>,
+    @location(12) bud: vec4<f32>,
+    @location(13) bud_shape: vec4<f32>,
 };
 
 @vertex
 fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     // Two triangles over the rectangle, one pixel larger on every side so the
-    // antialiased edge is never cut by the quad.
+    // antialiased edge is never cut by the quad; a bud covers its parent's
+    // box too, where the bridge is drawn.
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u));
-    let pixel = instance.origin - vec2<f32>(1.0) + corner * (instance.size + vec2<f32>(2.0));
+    var lo = instance.origin;
+    var hi = instance.origin + instance.size;
+    if (instance.bud_shape.y > 0.0) {
+        let centre = instance.origin + instance.size * 0.5 + instance.bud.xy;
+        lo = min(lo, centre - instance.bud.zw);
+        hi = max(hi, centre + instance.bud.zw);
+    }
+    let pixel = lo - vec2<f32>(1.0) + corner * (hi - lo + vec2<f32>(2.0));
     let clip = pixel / globals.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
     var out: Varyings;
@@ -130,6 +148,8 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.clip = instance.clip;
     out.path = instance.path;
     out.path_end = instance.path_end;
+    out.bud = instance.bud;
+    out.bud_shape = instance.bud_shape;
     return out;
 }
 
@@ -175,6 +195,13 @@ fn bezier(pos: vec2<f32>, a: vec2<f32>, b0: vec2<f32>, c: vec2<f32>, g: f32) -> 
     return sqrt(min(res, dot2(pos - tip)));
 }
 
+// Polynomial smooth minimum: the two fields joined, with a bridge as wide as
+// k where they come close.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
 // Signed distance to a rounded box: negative inside, in pixels.
 fn rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
     let r = min(radius, min(half.x, half.y));
@@ -196,7 +223,15 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         let cover = clamp(0.5 - dist, 0.0, 1.0) * in.fill.a;
         return vec4<f32>(in.fill.rgb * cover, cover);
     }
-    let d = rounded_box(in.local, in.half, in.shape.x);
+    var d = rounded_box(in.local, in.half, in.shape.x);
+    // A bud: joined to its parent by a smooth union, drawn only outside the
+    // parent, so the parent's glass is never covered twice.
+    var outside_parent = 1.0;
+    if (in.bud_shape.y > 0.0) {
+        let parent = rounded_box(in.local - in.bud.xy, in.bud.zw, in.bud_shape.x);
+        d = smin(d, parent, in.bud_shape.y);
+        outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+    }
     let rim = in.shape.y;
 
     // Coverage over one pixel of distance: the edge is analytic at any scale.
@@ -243,8 +278,8 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         let at = along - floor(along / period) * period;
         dashed = clamp(min(at, in.arc.z - at) + 0.5, 0.0, 1.0);
     }
-    let rim_alpha = rim_colour.a * (outer - inner) * part * dashed;
-    let fill_alpha = fill.a * inner * surface * part;
+    let rim_alpha = rim_colour.a * (outer - inner) * part * dashed * outside_parent;
+    let fill_alpha = fill.a * inner * surface * part * outside_parent;
     if (in.shape.w > 0.5) {
         return vec4<f32>(0.0, 0.0, 0.0, outer);
     }
@@ -302,7 +337,7 @@ impl Pipeline {
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
                         3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
                         6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                        10 => Float32x4, 11 => Float32x4,
+                        10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
                     ],
                 })],
             },

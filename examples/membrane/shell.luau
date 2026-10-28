@@ -557,6 +557,9 @@ local time = cell {
 
 return g.surface {
     anchor = { "top", "left", "right" },
+    -- Bioma's own name for a top membrane: niri's rule for it (bioma.kdl)
+    -- turns blur xray off, so the cells blur the windows under them.
+    namespace = "bioma-membrane-top",
     -- appearance.edge 12 is to the cells; each tissue reaches 2 beyond them.
     -- Measured against Bioma, 2026-10-28: the first cell's rim at x 12, the
     -- last at 1907, and the rims' top at y 18 in both.

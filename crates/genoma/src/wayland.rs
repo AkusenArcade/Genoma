@@ -232,8 +232,8 @@ impl App {
         }
         self.surfaces.retain(|s| wanted.contains(&s.output));
         if let Some(old) = &self.spec {
-            if old.layer != spec.layer {
-                log::warn!("a new layer takes effect at the next start");
+            if old.layer != spec.layer || old.namespace != spec.namespace {
+                log::warn!("a new layer or namespace takes effect at the next start");
             }
         }
         self.spec = Some(spec.clone());
@@ -284,7 +284,7 @@ impl App {
             "overlay" => Layer::Overlay,
             _ => Layer::Top,
         };
-        let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some("genoma"), output.as_ref());
+        let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some(spec.namespace.clone()), output.as_ref());
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         self.surfaces.push(Surface {
             id,

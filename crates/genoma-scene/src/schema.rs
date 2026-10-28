@@ -70,6 +70,7 @@ pub enum Prop {
     BendX,
     BendY,
     NodeSize,
+    Bud,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +156,7 @@ pub const PROPS: &[PropInfo] = &[
     p("to_y", Prop::ToY, Ty::Number, true, "A thread's end."),
     p("bend_x", Prop::BendX, Ty::Number, true, "A thread's control point: where the curve is pulled toward. A spring on it makes the thread bend and settle."),
     p("bend_y", Prop::BendY, Ty::Number, true, "A thread's control point."),
+    p("bud", Prop::Bud, Ty::Number, true, "Joined to the nearest capsule above by a smooth union this soft, logical units: a neck that narrows as it falls to 0 and parts (budding, and reabsorption back)."),
     p("node", Prop::NodeSize, Ty::Number, false, "A thread's nodes: discs this wide at its start and at its tip, in `color`. 0 is none."),
     p("crisp", Prop::Crisp, Ty::Bool, false, "A hairline: position and size rounded to whole physical pixels, never under one (Metrics.crisp)."),
     p("italic", Prop::Italic, Ty::Bool, false, "Text in the font's italic."),

@@ -74,6 +74,10 @@ pub struct SurfaceSpec {
     /// none for a single surface (on `output`, or the compositor's choice).
     pub outputs: Option<Vec<String>>,
     pub all_outputs: bool,
+    /// The layer surface's namespace: what the compositor's rules match.
+    /// niri decides blur xray by it (Bioma's `bioma.kdl`), so a surface keeps
+    /// its compositor behaviour by keeping its name.
+    pub namespace: String,
 }
 
 /// A `g.state` value: what a signal can hold across reloads.
@@ -541,6 +545,7 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
         layer: t.get::<Option<String>>("layer")?.unwrap_or_else(|| "top".into()),
         output: t.get("output")?,
         reserve: t.get::<Option<bool>>("reserve")?.unwrap_or(false),
+        namespace: t.get::<Option<String>>("namespace")?.unwrap_or_else(|| "genoma".into()),
         all_outputs: matches!(t.get::<LuaValue>("outputs")?, LuaValue::String(ref s) if s.to_string_lossy() == "all"),
         outputs: match t.get::<LuaValue>("outputs")? {
             LuaValue::Table(list) => Some(list.sequence_values::<String>().collect::<mlua::Result<_>>()?),

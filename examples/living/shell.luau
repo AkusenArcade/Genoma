@@ -38,6 +38,8 @@ end
 return g.surface {
     anchor = "top",
     margin = { top = 300 },
+    -- A floating surface as Bioma names one: niri's rule turns xray off.
+    namespace = "bioma-float",
 
     g.box {
         width = W,
