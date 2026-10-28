@@ -1,4 +1,4 @@
-//! PAM (PRD §9.1, §12 question 4): a direct binding to libpam, the five
+//! PAM (PRD §9.1, §12 question 4): a direct binding to libpam, the four
 //! functions and the conversation callback a lock screen needs, rather than a
 //! crate unreleased since 2022.
 //!
@@ -43,7 +43,6 @@ unsafe extern "C" {
         handle: *mut *mut c_void,
     ) -> c_int;
     fn pam_authenticate(handle: *mut c_void, flags: c_int) -> c_int;
-    fn pam_acct_mgmt(handle: *mut c_void, flags: c_int) -> c_int;
     fn pam_end(handle: *mut c_void, status: c_int) -> c_int;
     fn pam_strerror(handle: *mut c_void, code: c_int) -> *const c_char;
 }
@@ -192,11 +191,11 @@ fn run(
     if started != PAM_SUCCESS || handle.is_null() {
         return Outcome::Error(format!("pam_start: {started}"));
     }
-    let mut code = unsafe { pam_authenticate(handle, 0) };
-    if code == PAM_SUCCESS {
-        // An expired account must not unlock either.
-        code = unsafe { pam_acct_mgmt(handle, 0) };
-    }
+    // The password only, as Quickshell's PamContext, swaylock and hyprlock
+    // check it: the account is already in its session. Bioma's
+    // `bioma-lock` has no account stack, and `pam_acct_mgmt` on an empty
+    // one answers PAM_PERM_DENIED.
+    let code = unsafe { pam_authenticate(handle, 0) };
     let outcome = match code {
         PAM_SUCCESS => Outcome::Success,
         PAM_AUTH_ERR | PAM_USER_UNKNOWN => Outcome::Failure,

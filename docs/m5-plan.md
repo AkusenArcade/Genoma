@@ -210,8 +210,8 @@ was not caught in its six seconds.
       password.
 
 *Built 2026-10-28,* to what Bioma's `greeter.qml` and `lock.qml` use.
-- **PAM:** `pam_start_confdir`, `pam_authenticate`, `pam_acct_mgmt`,
-  `pam_end`, `pam_strerror` and the conversation, so Bioma's own
+- **PAM:** `pam_start_confdir`, `pam_authenticate`, `pam_end`,
+  `pam_strerror` and the conversation, so Bioma's own
   `assets/pam/bioma-lock` is read from its directory. It blocks, so it runs
   on a thread; prompts wait for `auth:respond`, as Quickshell's
   `PamContext.respond`. `g.pam.start { service, directory, user, on_prompt,
@@ -225,6 +225,10 @@ was not caught in its six seconds.
   (scratchpad `fake-greetd.py`): a wrong password, `failure`, cancel, a new
   session, the right one, `ready`, `start_session`, `launched`, and the six
   requests it received were the ones meant.
+- His first run said "Permission denied": `pam_acct_mgmt` after a right
+  password, on `bioma-lock`, which has no account stack, and an empty stack
+  answers PAM_PERM_DENIED (reproduced with a `pam_permit` service). The
+  password alone is checked now, as Quickshell, swaylock and hyprlock do.
 - [ ] **Akusen:** the right password through `genoma pam`.
 
 ### 9. Tray and polkit
