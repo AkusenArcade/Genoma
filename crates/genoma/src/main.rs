@@ -42,12 +42,13 @@ use smithay_client_toolkit::reexports::{
 };
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or("GENOMA_LOG", "info")).init();
+    env_logger::Builder::from_env(env_logger::Env::new().filter_or("GENOMA_LOG", "info,zbus=warn,tracing=warn")).init();
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("types") => print!("{}", genoma_scene::luau_definitions()),
         Some("probe") => probe(),
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
+        Some("polkit-test") => polkit_test(),
         other => run(PathBuf::from(other.unwrap_or("examples/clock"))),
     }
 }
@@ -66,7 +67,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default(), polkit: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -81,7 +82,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray"] {
+        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray", "polkit"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -182,6 +183,21 @@ impl Sources {
                         })
                         .expect("tray channel");
                     self.services.tray.start(&bus, post);
+                }
+                "polkit" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let polkit = self.services.polkit.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                polkit.apply(update);
+                            }
+                        })
+                        .expect("polkit channel");
+                    // The session's agent: one per session, so it fails
+                    // while another (Bioma's) holds it, and says so.
+                    self.services.polkit.start(&bus, post, genoma_services::polkit::Subject::Session);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -305,6 +321,102 @@ fn pam_check(service: Option<String>, directory: Option<String>) {
         Event::Done(outcome) => println!("pam {service} for {user}: {} in {:.1} s", outcome.name(), started.elapsed().as_secs_f64()),
     };
     authenticate(&service, directory.as_deref(), &user, &mut events, &receiver);
+}
+
+/// A line from the terminal, without echo unless `echo`.
+fn ask(prompt: &str, echo: bool) -> Option<String> {
+    eprint!("{prompt}");
+    let stdin = rustix::stdio::stdin();
+    let saved = rustix::termios::tcgetattr(stdin).ok();
+    if let (Some(t), false) = (&saved, echo) {
+        let mut quiet = t.clone();
+        quiet.local_modes.remove(rustix::termios::LocalModes::ECHO);
+        let _ = rustix::termios::tcsetattr(stdin, rustix::termios::OptionalActions::Now, &quiet);
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    if let (Some(t), false) = (&saved, echo) {
+        let _ = rustix::termios::tcsetattr(stdin, rustix::termios::OptionalActions::Now, t);
+        eprintln!();
+    }
+    // At the end of the input, nothing: an empty answer would count as a
+    // wrong one.
+    match read {
+        Ok(n) if n > 0 => Some(line.trim_end_matches(['\n', '\r']).to_owned()),
+        _ => None,
+    }
+}
+
+/// `genoma polkit-test`: the agent, registered for one process of its own
+/// (a `sleep`), answers polkit's request for that process, the password read
+/// from the terminal. The session's agent (Bioma's) is not touched.
+fn polkit_test() {
+    use genoma_services::polkit::{Polkit, Subject, Update};
+    let mut subject = std::process::Command::new("sleep").arg("120").spawn().expect("sleep");
+    let pid = subject.id();
+    let bus = Bus::shared().expect("bus thread");
+    let polkit = Rc::new(Polkit::default());
+    let mut event_loop: EventLoop<()> = EventLoop::try_new().expect("event loop");
+    let handle = event_loop.handle();
+    let signal = event_loop.get_signal();
+    let (post, updates) = channel();
+    let (checked, check_results) = channel::<Option<i32>>();
+    let p = polkit.clone();
+    let stop_now = signal.clone();
+    handle
+        .insert_source(updates, move |event, _, _| {
+            let ChannelEvent::Msg(update) = event else { return };
+            match &update {
+                Update::Registered(Ok(())) if std::env::var_os("GENOMA_POLKIT_REGISTER_ONLY").is_some() => {
+                    println!("agent registered for process {pid}");
+                    stop_now.stop();
+                }
+                Update::Registered(Ok(())) => {
+                    eprintln!("agent registered for process {pid}; asking polkit for org.freedesktop.policykit.exec");
+                    let checked = checked.clone();
+                    std::thread::spawn(move || {
+                        let status = std::process::Command::new("pkcheck")
+                            .args(["--action-id", "org.freedesktop.policykit.exec", "--process", &pid.to_string(), "--allow-user-interaction"])
+                            .status();
+                        let _ = checked.send(status.ok().and_then(|s| s.code()));
+                    });
+                }
+                Update::Registered(Err(e)) => eprintln!("could not register: {e}"),
+                Update::Request(r) => {
+                    eprintln!("{}{}", r.message, if r.failed { "\n(wrong, again)" } else { "" });
+                    if !r.info.is_empty() {
+                        eprintln!("{}", r.info);
+                    }
+                    match ask(&format!("{} for {}: ", r.prompt.trim_end_matches([' ', ':']), r.user), r.echo) {
+                        Some(answer) => p.respond(&r.cookie, answer),
+                        None => p.cancel(&r.cookie),
+                    }
+                }
+                Update::Done { success, .. } => eprintln!("agent: {}", if *success { "authenticated" } else { "cancelled" }),
+            }
+            p.apply(update);
+        })
+        .expect("polkit channel");
+    let stop = signal.clone();
+    handle
+        .insert_source(check_results, move |event, _, _| {
+            if let ChannelEvent::Msg(code) = event {
+                println!(
+                    "pkcheck: {}",
+                    match code {
+                        Some(0) => "authorized".to_string(),
+                        Some(c) => format!("not authorized (exit {c})"),
+                        None => "did not run".to_string(),
+                    }
+                );
+                stop.stop();
+            }
+        })
+        .expect("check channel");
+    polkit.start(&bus, post, Subject::Process(pid));
+    event_loop.run(None, &mut (), |_| {}).expect("event loop");
+    let _ = subject.kill();
+    let _ = subject.wait();
 }
 
 /// Every service, without a surface: what each says, as it changes.

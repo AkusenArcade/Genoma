@@ -16,6 +16,7 @@ pub mod media;
 pub mod network;
 pub mod niri;
 pub mod pam;
+pub mod polkit;
 pub mod power;
 pub mod toplevels;
 pub mod tray;

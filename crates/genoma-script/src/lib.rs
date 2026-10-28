@@ -30,6 +30,7 @@ use genoma_services::{
     media::{Action, Media},
     network::Network,
     niri::Niri,
+    polkit::Polkit,
     power::Power,
     toplevels::Toplevels,
     tray::{MenuEntry, Tray},
@@ -159,6 +160,7 @@ pub struct Services {
     pub bluetooth: Rc<Bluetooth>,
     pub toplevels: Rc<Toplevels>,
     pub tray: Rc<Tray>,
+    pub polkit: Rc<Polkit>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -663,6 +665,44 @@ impl UserData for TrayRef {
     }
 }
 
+struct PolkitRef(Rc<Polkit>);
+
+impl UserData for PolkitRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("registered", |_, this| Ok(this.0.registered.get()));
+        // Why it is not registered: another agent holds the session.
+        fields.add_field_method_get("error", |_, this| Ok(this.0.error.get()));
+        // polkit.request → { cookie, action_id, message, icon_name, user,
+        // prompt, echo, failed, info }, or nil when nothing is asked.
+        fields.add_field_method_get("request", |lua, this| {
+            let Some(r) = this.0.request.get() else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("cookie", r.cookie)?;
+            t.set("action_id", r.action_id)?;
+            t.set("message", r.message)?;
+            t.set("icon_name", r.icon_name)?;
+            t.set("user", r.user)?;
+            t.set("prompt", r.prompt)?;
+            t.set("echo", r.echo)?;
+            t.set("failed", r.failed)?;
+            t.set("info", r.info)?;
+            Ok(LuaValue::Table(t))
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // polkit:respond(cookie, password); polkit:cancel(cookie).
+        methods.add_method("respond", |_, this, (cookie, answer): (String, String)| {
+            this.0.respond(&cookie, answer);
+            Ok(())
+        });
+        methods.add_method("cancel", |_, this, cookie: String| {
+            this.0.cancel(&cookie);
+            Ok(())
+        });
+    }
+}
+
 struct ClockRef(Rc<Clock>);
 
 impl UserData for ClockRef {
@@ -1028,7 +1068,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/tray" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/tray" | "@genoma/polkit" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -1040,6 +1080,7 @@ impl Script {
                         "bluetooth" => "bluetooth",
                         "toplevels" => "toplevels",
                         "tray" => "tray",
+                        "polkit" => "polkit",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -1058,6 +1099,7 @@ impl Script {
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
+                        "polkit" => lua.create_userdata(PolkitRef(services.polkit.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

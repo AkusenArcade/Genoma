@@ -252,7 +252,21 @@ secondary activate, context menu, scroll; menus read on opening (after
   title came through, and the item left when it quit.
 - Drawing a pixmap icon needs the scene to take raw pixels; carried to the
   port.
-- [ ] Polkit agent.
+- [x] Polkit agent.
+
+*Polkit built 2026-10-28,* to what Bioma's `services/Polkit.qml` uses: the
+`AuthenticationAgent` interface served on the system bus, registered for the
+session (`@genoma/polkit`) or for one process (`genoma polkit-test`, as
+`pkttyagent --process`), the request with polkit's message and the helper's
+prompt, respond and cancel, and a wrong answer asked again. polkit 128 runs
+its helper behind `/run/polkit/agent-helper.socket` (the program is no
+longer setuid): through it the user goes first, then the cookie; the setuid
+program is the fallback. Registration checked for a process of its own.
+- The helper authenticates through PAM's `polkit-1`, which includes
+  `pam_faillock`: a wrong answer, and an answer abandoned halfway, count
+  toward the lockout (3 in 15 minutes). No wrong-password test is run here
+  for that reason.
+- [ ] **Akusen:** `genoma polkit-test` with his password: `authorized`.
 - Both have one owner per session, and Bioma owns them now. They are tested
   on a private session bus (`dbus-run-session`) where that is enough, and
   with Akusen where it is not (polkit registers on the system bus).
