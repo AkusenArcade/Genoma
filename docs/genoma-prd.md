@@ -13,7 +13,7 @@ Implementation language: Rust. Interface language: Luau, hot-reloaded (§7).
 Language: English throughout — code, comments, identifiers, documents.
 The project name **Genoma** is the only Italian word retained.
 
-Status: design draft, 2026-10-28. Nothing built. Open questions in §12.
+Status: M0 done 2026-10-28 (§11.1). Open questions in §12.
 
 ---
 
@@ -181,9 +181,12 @@ window.)
 different GPU from the compositor copies every frame between GPUs. That was
 measured on the RTX 3060 laptop: niri on the NVIDIA card, Qt on the Vega. So
 Genoma reads the main device from `linux-dmabuf` feedback and picks the adapter
-whose DRM node matches. Through Vulkan that is `VK_EXT_physical_device_drm`;
-whether `wgpu` exposes it or `ash` is needed is a milestone-0 question (§12).
-An override exists (`GENOMA_ADAPTER`).
+whose DRM node matches. *Decided in M0:* the feedback's `dev_t` leads,
+through `/sys/dev/char/<major>:<minor>/device`, to the GPU's PCI address
+(`0000:03:00.0`). `wgpu` 30 reports the same address for each adapter
+(`AdapterInfo::device_pci_bus_id`, from `VK_EXT_pci_bus_info`), so the match
+needs no `ash`. Without a match Genoma takes the first hardware adapter and
+logs a warning. An override is planned (`GENOMA_ADAPTER`).
 
 ### 5.2 Primitives
 
@@ -467,6 +470,9 @@ it costs. Porting Bioma does not mean rewriting 39 services in Rust.
   retinting the desktop stays live.
 - **Configuration.** Bioma keeps its two JSON layers. Genoma reads and writes
   them with `g.file`.
+- **The user's configuration carries over.** Bioma's users keep the
+  `override.json` they built in Settings. The port reads it unchanged, or
+  migrates it once and keeps the original beside it.
 - **The port is incremental,** surface by surface: for a while Bioma's
   Quickshell process and a Genoma process run side by side, each owning
   different surfaces. Notifications move last, for the same reason as before:
@@ -490,6 +496,24 @@ course before more is built on it.
 | M5 | **Services.** The rest of §9.1, each verified headless. | `genoma probe` shows every domain live; notifications tested with no other server running. |
 | M6 | **Bioma.** The port (§10). | Bioma's feature list on Genoma, then the lock screen and the greeter. |
 
+### 11.1 Results
+
+**M0, 2026-10-28**, desktop (RX 9070 XT + Raphael iGPU, niri 26.04, radv):
+- **GPU.** niri announced `0000:03:00.0` and Genoma opened the RX 9070 at
+  that address, the integrated GPU being the other adapter on offer.
+- **At rest, 60 s:** 0 CPU ticks, 0 context switches across all 11 threads,
+  and 1 frame drawn in total. The threads were the main thread plus Mesa's
+  shader-cache threads.
+- **Memory:** 22 MB PSS, 56 MB RSS.
+- **Hover:** a synthetic pointer gave exactly 2 frames, one on enter and one
+  on leave, and none between or after.
+- **Fractional scale:** at 1.25 the buffer was 210×60 px for the 168×48
+  logical surface, one frame per scale change, and the rim stayed 2 physical
+  px with the colours #8ba86e at the top and #4f6340 at the bottom.
+
+Still to do on the laptop: the device match with niri on the NVIDIA card and
+on the Vega.
+
 M0 to M2 are the experiment, and the numbers at M2 decide whether there is a
 project. At part-time pace that is a few months. Parity with Quickshell (M5)
 is the long part, likely a year or more. Text, input methods, keyboard
@@ -498,9 +522,8 @@ it long, not the renderer.
 
 ## 12. Open questions
 
-1. **Adapter by DRM node.** Can `wgpu` 30 select an adapter by DRM major/minor,
-   or does Genoma need `ash` with `VK_EXT_physical_device_drm` beside it? To
-   be decided in M0.
+1. ~~**Adapter by DRM node.**~~ *Closed in M0:* by PCI address, through
+   sysfs and `wgpu`'s `device_pci_bus_id` (§5.1).
 2. **Text under depth.** Glyph atlas at transformed sizes, or MSDF. To be
    decided by measurement in M4.
 3. **Render thread from the start,** or a single thread first and the split
@@ -511,8 +534,8 @@ it long, not the renderer.
    path. Scope it in M3 or defer it past M6?
 6. **Luau type definitions.** Generated from Rust (one schema, two outputs),
    or hand-written? Leaning to generated.
-7. **Licence.** Bioma is GPL-3.0. Genoma as a toolkit could be GPL-3.0 too,
-   or LGPL/MPL to let other shells build on it. Your decision.
+7. ~~**Licence.**~~ *Closed 2026-10-28:* GPL-3.0-or-later, the same as
+   Bioma.
 8. **Scope beyond niri.** Genoma needs only standard protocols except for
    niri's IPC service. Should other compositors' IPC (Hyprland, Sway) be
    in scope as optional services?

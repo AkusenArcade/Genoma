@@ -1,0 +1,14 @@
+[package]
+name = "genoma"
+description = "The Genoma shell runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+env_logger.workspace = true
+genoma-render = { path = "../genoma-render" }
+log.workspace = true
+raw-window-handle.workspace = true
+smithay-client-toolkit.workspace = true
