@@ -15,6 +15,7 @@ log = "0.4"
 pollster = "0.4"
 raw-window-handle = "0.6"
 smithay-client-toolkit = { version = "0.21.1", features = ["system"] }
+glyphon = "0.12"
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 
 [profile.release]

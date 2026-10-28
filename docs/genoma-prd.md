@@ -14,7 +14,7 @@ Implementation language: Rust. Interface language: Luau, hot-reloaded (§7).
 Language: English throughout — code, comments, identifiers, documents.
 The project name **Genoma** is the only Italian word retained.
 
-Status: M0 done 2026-10-28 (§11.1). Open questions in §12.
+Status: M0 and M1 done 2026-10-28 (§11.1). Open questions in §12.
 
 ---
 
@@ -515,6 +515,33 @@ course before more is built on it.
 
 Still to do on the laptop: the device match with niri on the NVIDIA card and
 on the Vega.
+
+**M1, 2026-10-28**, same desktop, `examples/clock` (a 40-unit capsule with
+the time in Orbitron, its text bound to the clock service):
+- **Ticking clock, 60 s:** 0.017% of a core (1 CPU tick in 60 s, on the main
+  thread; none on the render thread), 60 frames, 24 MB PSS, 7 threads.
+- **Transition** (the rim's colour on the timing set's `theme`, 250 ms):
+  frames every 8.3 ms, the 120 Hz of the output, only while the transition
+  runs, then 744 ms with none until the next second.
+- **Hot reload:** a saved change shows without a restart. A `g.state` value
+  survives the reload (a load counter went 1 → 2 rather than back to 1). A
+  syntax error leaves the last interface running and logs the file and line.
+  A literal duration in `transition` is refused at load with "durations come
+  from the timing set; name an entry".
+- **Leaks:** after 30 reloads in a row, PSS stayed at 25 MB and the frame
+  rate stayed the same.
+
+Not in M1, carried forward:
+- Damage is per surface: a change redraws the whole surface, not only the
+  region it touched. That costs nothing at this size; it moves to M2, where a
+  membrane makes it matter.
+- The Luau type definitions (§12 question 6) are not generated yet. Node
+  properties are still described in two places (`Prop` and the converter);
+  one schema for both, and the `.d.luau` from it, comes at the start of M2.
+- A load that fails after running its top-level code keeps the state changes
+  that code made.
+- The clock ticks once an interface has required it, even if no binding
+  reads it any more.
 
 M0 to M2 are the experiment, and the numbers at M2 decide whether there is a
 project. At part-time pace that is a few months. Parity with Quickshell (M5)

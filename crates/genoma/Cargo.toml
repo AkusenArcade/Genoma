@@ -8,7 +8,11 @@ publish.workspace = true
 
 [dependencies]
 env_logger.workspace = true
+genoma-core = { path = "../genoma-core" }
 genoma-render = { path = "../genoma-render" }
+genoma-scene = { path = "../genoma-scene" }
+genoma-script = { path = "../genoma-script" }
+genoma-services = { path = "../genoma-services" }
 log.workspace = true
-raw-window-handle.workspace = true
+notify = "8"
 smithay-client-toolkit.workspace = true

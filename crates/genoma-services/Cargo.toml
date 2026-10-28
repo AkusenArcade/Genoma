@@ -1,0 +1,11 @@
+[package]
+name = "genoma-services"
+description = "Genoma's service objects: one per system domain, each a set of signals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+genoma-core = { path = "../genoma-core" }
+jiff = "0.2"

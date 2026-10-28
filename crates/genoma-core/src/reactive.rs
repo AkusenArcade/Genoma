@@ -471,6 +471,15 @@ pub fn batch<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Runs `f` with no owner: what it creates outlives every scope, until
+/// disposed by hand. State that must survive a reload is made this way.
+pub fn detached<R>(f: impl FnOnce() -> R) -> R {
+    let previous = with(|rt| rt.owner.take());
+    let result = f();
+    with(|rt| rt.owner = previous);
+    result
+}
+
 /// Runs `f` without recording what it reads.
 pub fn untracked<R>(f: impl FnOnce() -> R) -> R {
     let previous = with(|rt| rt.observer.take());

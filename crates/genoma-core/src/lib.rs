@@ -1,3 +1,4 @@
-//! Genoma's core: the reactive graph, the clock and the timing set.
+//! Genoma's core: the reactive graph and the timing set.
 
 pub mod reactive;
+pub mod timing;

@@ -1,0 +1,12 @@
+[package]
+name = "genoma-scene"
+description = "Genoma's node tree: layout, text measure, transitions, draw lists"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+genoma-core = { path = "../genoma-core" }
+genoma-render = { path = "../genoma-render" }
+taffy = { version = "0.15", default-features = false, features = ["std", "flexbox", "taffy_tree", "content_size"] }
