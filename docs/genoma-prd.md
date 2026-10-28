@@ -568,6 +568,47 @@ not only the shell's. The reference is Bioma's current QML and a capture of
 the live membrane, never the early mockups. Icons and images move from M3
 into M2 for this reason.
 
+**M2, the side-by-side with parity, 2026-10-28.** The membrane in
+`examples/membrane` was rebuilt from Bioma's current QML (docs/m2-parity.md).
+It has the live palette with Theme.qml's derivations, the tissue band cut
+out under the cells, compositor blur on the cells' rounded shapes, and the
+SVG icons. Workspaces, the title rules, Vital.qml's three indicators and
+Clock.qml's Dial are as Bioma draws them now, including the continuous
+second hand. An isolated Bioma (its own HOME, the live palette locked
+read-only) ran with `membranes: []` and then with the same membrane, on
+HDMI-A-1 at 120 Hz. Each run was 60 s, and niri was measured alongside:
+
+| | shell CPU | niri CPU | PSS | frames/s |
+|---|---|---|---|---|
+| niri alone | — | 10.58% | — | — |
+| Genoma, the whole process | **1.78%** | 11.32% (+0.74) | **27 MB** | 83 |
+| Bioma without the membrane | 0.20% | 11.30% | 327 MB | — |
+| Bioma with it | 3.95% | 12.68% | 342 MB | ~120 |
+| the membrane's cost in Bioma | **+3.75%** | +1.38% | +15 MB | |
+
+- **CPU: 0.47 of Bioma's**, shell alone or with niri. **The ⅓ gate is not
+  met.**
+- **Memory:** Genoma's whole process at 27 MB against Bioma's 342 MB. The
+  membrane alone adds 15 MB to Bioma; Genoma's runtime and membrane together
+  stay under 30.
+- **Frame time:** p99 0.43 ms, inside the 2 ms gate.
+- **niri's own work** for the two membranes is the same within the noise of
+  a desktop in use, as expected: same shapes, same blur.
+
+Where the CPU goes. A Genoma frame costs about 0.21 ms of CPU, and a Bioma
+frame about 0.31 ms. The rest of Genoma's frame is wgpu's own bookkeeping
+(texture init tracking, staging writes, about 30% between them) and the
+driver; Genoma's code is under 1%. Its advantage is in drawing fewer frames
+(83 a second against 120, paced at a quarter pixel of movement) more than
+in drawing them faster. The ways past ⅓ are:
+- a coarser step, half a pixel, measured for whether it is still smooth;
+- a renderer on Vulkan directly (ash) instead of wgpu, which is a large
+  piece of work;
+- or a different gate.
+
+That choice is Akusen's. The laptop, where the stutter is, has not been
+measured yet.
+
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
   region it touched. That costs nothing at this size; it moves to M2, where a

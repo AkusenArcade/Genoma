@@ -14,6 +14,10 @@ pub struct Vitals {
     pub cpu: Signal<f64>,
     pub ram: Signal<f64>,
     pub gpu: Signal<Option<f64>>,
+    /// Where the card's clock sits between its lowest and highest state, 0…1:
+    /// the satellite's rate. A card at a third of its load can sit at full
+    /// clock, so the two stay apart (Bioma's PRD §9.2).
+    pub gpu_clock: Signal<f64>,
     last_cpu: std::cell::Cell<Option<(u64, u64)>>,
     gpu_path: Option<PathBuf>,
 }
@@ -67,6 +71,7 @@ impl Vitals {
             cpu: Signal::new(0.0),
             ram: Signal::new(0.0),
             gpu: Signal::new(None),
+            gpu_clock: Signal::new(0.0),
             last_cpu: std::cell::Cell::new(cpu_times()),
             gpu_path: gpu_path(),
         };
@@ -88,7 +93,23 @@ impl Vitals {
             .and_then(|p| fs::read_to_string(p).ok())
             .and_then(|s| s.trim().parse::<f64>().ok())
             .map(|p| percent(p / 100.0));
+        // pp_dpm_sclk: one state a line, "1: 1545Mhz *", the current one starred.
+        let clock = self.gpu_path.as_ref().and_then(|p| fs::read_to_string(p.with_file_name("pp_dpm_sclk")).ok()).and_then(|t| {
+            let states: Vec<(f64, bool)> = t
+                .lines()
+                .filter_map(|l| {
+                    let mhz = l.split_whitespace().nth(1)?.trim_end_matches("Mhz").parse().ok()?;
+                    Some((mhz, l.contains('*')))
+                })
+                .collect();
+            let (min, max) = states.iter().fold((f64::MAX, 0.0f64), |(a, b), (m, _)| (a.min(*m), b.max(*m)));
+            let current = states.iter().find(|(_, c)| *c)?.0;
+            (max > min).then(|| percent((current - min) / (max - min)))
+        });
         batch(|| {
+            if let Some(clock) = clock {
+                self.gpu_clock.set(clock);
+            }
             if let Some(cpu) = cpu {
                 self.cpu.set(percent(cpu));
             }

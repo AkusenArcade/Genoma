@@ -9,4 +9,5 @@ publish.workspace = true
 [dependencies]
 genoma-core = { path = "../genoma-core" }
 genoma-render = { path = "../genoma-render" }
+resvg = "0.49"
 taffy = { version = "0.15", default-features = false, features = ["std", "flexbox", "taffy_tree", "content_size"] }

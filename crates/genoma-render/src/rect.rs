@@ -25,6 +25,20 @@ pub struct Rect {
     pub fill: [f32; 4],
     pub rim_top: [f32; 4],
     pub rim_bottom: [f32; 4],
+    /// The fill's surface as a wave: amplitude and wavelength in pixels, and
+    /// the phase (0…1) it has travelled. Zero amplitude is a flat level.
+    pub wave: [f32; 4],
+    /// Only this part of the shape is drawn: start and sweep in turns,
+    /// clockwise from twelve. A sweep of 1 or more is the whole shape; on a
+    /// disc a smaller one is a sector, on a ring an arc.
+    pub arc: [f32; 4],
+    /// The fill's colour at the bottom: with an alpha above zero the fill
+    /// runs from `fill` at the top to this. Transparent is a flat fill.
+    pub fill_to: [f32; 4],
+}
+
+impl Rect {
+    pub const WHOLE: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
 }
 
 #[repr(C)]
@@ -43,6 +57,10 @@ pub(crate) struct Pipeline {
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
+    /// What the buffers hold now: a write is made only for bytes that
+    /// changed, because each one costs a staging buffer.
+    last_viewport: [f32; 2],
+    last_rects: Vec<u8>,
 }
 
 const SHADER: &str = r#"
@@ -56,6 +74,9 @@ struct Instance {
     @location(3) fill: vec4<f32>,
     @location(4) rim_top: vec4<f32>,
     @location(5) rim_bottom: vec4<f32>,
+    @location(6) wave: vec4<f32>,
+    @location(7) arc: vec4<f32>,
+    @location(8) fill_to: vec4<f32>,
 };
 
 struct Varyings {
@@ -66,6 +87,9 @@ struct Varyings {
     @location(3) fill: vec4<f32>,
     @location(4) rim_top: vec4<f32>,
     @location(5) rim_bottom: vec4<f32>,
+    @location(6) wave: vec4<f32>,
+    @location(7) arc: vec4<f32>,
+    @location(8) fill_to: vec4<f32>,
 };
 
 @vertex
@@ -84,6 +108,9 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.fill = instance.fill;
     out.rim_top = instance.rim_top;
     out.rim_bottom = instance.rim_bottom;
+    out.wave = instance.wave;
+    out.arc = instance.arc;
+    out.fill_to = instance.fill_to;
     return out;
 }
 
@@ -112,15 +139,35 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
 
     // The liquid's surface, antialiased like every other edge.
     let from_bottom = in.half.y - in.local.y;
-    let surface = clamp(in.shape.z * in.half.y * 2.0 - from_bottom + 0.5, 0.0, 1.0);
+    var level = in.shape.z * in.half.y * 2.0;
+    if (in.wave.x > 0.0) {
+        let x = in.local.x + in.half.x;
+        level = level + in.wave.x * sin(6.2831853 * (x / max(in.wave.y, 1.0) + in.wave.z));
+    }
+    let surface = clamp(level - from_bottom + 0.5, 0.0, 1.0);
 
-    let rim_alpha = rim_colour.a * (outer - inner);
-    let fill_alpha = in.fill.a * inner * surface;
+    // The part of the shape that is drawn: an angle clockwise from twelve,
+    // antialiased across one pixel at both of its edges.
+    var part = 1.0;
+    if (in.arc.y < 1.0) {
+        let turn = fract(atan2(in.local.x, -in.local.y) / 6.2831853 - in.arc.x + 1.0);
+        let radius = max(length(in.local), 1.0);
+        let into = min(turn, in.arc.y - turn) * 6.2831853 * radius;
+        part = clamp(into + 0.5, 0.0, 1.0);
+        if (in.arc.y <= 0.0) { part = 0.0; }
+    }
+
+    var fill = in.fill;
+    if (in.fill_to.a > 0.0) {
+        fill = mix(in.fill, in.fill_to, clamp(height / max(in.half.y * 2.0, 1.0), 0.0, 1.0));
+    }
+    let rim_alpha = rim_colour.a * (outer - inner) * part;
+    let fill_alpha = fill.a * inner * surface * part;
     if (in.shape.w > 0.5) {
         return vec4<f32>(0.0, 0.0, 0.0, outer);
     }
     // Premultiplied out: the surface is composited as premultiplied alpha.
-    return vec4<f32>(rim_colour.rgb * rim_alpha + in.fill.rgb * fill_alpha, rim_alpha + fill_alpha);
+    return vec4<f32>(rim_colour.rgb * rim_alpha + fill.rgb * fill_alpha, rim_alpha + fill_alpha);
 }
 "#;
 
@@ -172,6 +219,7 @@ impl Pipeline {
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
                         3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
+                        6 => Float32x4, 7 => Float32x4, 8 => Float32x4,
                     ],
                 })],
             },
@@ -204,7 +252,18 @@ impl Pipeline {
         let cutter = make(wgpu::BlendState { color: erase, alpha: erase });
         let capacity = 16;
         let instances = Self::instance_buffer(device, capacity);
-        Pipeline { pipeline, cutter, runs: Vec::new(), globals, bind_group, instances, capacity, count: 0 }
+        Pipeline {
+            pipeline,
+            cutter,
+            runs: Vec::new(),
+            globals,
+            bind_group,
+            instances,
+            capacity,
+            count: 0,
+            last_viewport: [0.0; 2],
+            last_rects: Vec::new(),
+        }
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -226,9 +285,31 @@ impl Pipeline {
         if rects.len() > self.capacity {
             self.capacity = rects.len().next_power_of_two();
             self.instances = Self::instance_buffer(device, self.capacity);
+            self.last_rects.clear();
         }
-        queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&Globals { viewport, _pad: [0.0; 2] }));
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(rects));
+        if viewport != self.last_viewport {
+            queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&Globals { viewport, _pad: [0.0; 2] }));
+            self.last_viewport = viewport;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(rects);
+        if bytes != self.last_rects.as_slice() {
+            // Only the span that differs: a moving satellite rewrites its own
+            // instance, not the membrane's.
+            let first = bytes.iter().zip(&self.last_rects).position(|(a, b)| a != b).unwrap_or(self.last_rects.len().min(bytes.len()));
+            let size = std::mem::size_of::<Rect>();
+            let start = first / size * size;
+            let end = if bytes.len() == self.last_rects.len() {
+                let last = bytes.iter().zip(&self.last_rects).rposition(|(a, b)| a != b).unwrap_or(first);
+                (last / size + 1) * size
+            } else {
+                bytes.len()
+            };
+            if end > start {
+                queue.write_buffer(&self.instances, start as u64, &bytes[start..end]);
+            }
+            self.last_rects.clear();
+            self.last_rects.extend_from_slice(bytes);
+        }
         self.count = rects.len() as u32;
         // Consecutive rects of one kind share a draw call.
         self.runs.clear();

@@ -22,6 +22,7 @@ use raw_window_handle::{
 };
 
 mod gpu;
+mod image;
 mod rect;
 
 pub use rect::Rect;
@@ -66,10 +67,24 @@ pub struct Text {
     pub color: [f32; 4],
 }
 
-/// What one surface shows, in drawing order: every rect, then every text.
+/// A rasterised image, premultiplied RGBA at its physical size. The render
+/// thread keeps one texture per `key`; the pixels travel with every list but
+/// are uploaded only the first time a key is seen.
+pub struct Image {
+    pub key: u64,
+    pub pixels: Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    /// Top-left corner, physical pixels, on whole pixels.
+    pub origin: [f32; 2],
+}
+
+/// What one surface shows, in drawing order: every rect, then every image,
+/// then every text.
 #[derive(Default)]
 pub struct DrawList {
     pub rects: Vec<Rect>,
+    pub images: Vec<Image>,
     pub texts: Vec<Text>,
 }
 

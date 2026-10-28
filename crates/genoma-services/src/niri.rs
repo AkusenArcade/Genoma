@@ -82,6 +82,15 @@ impl Niri {
         self.workspaces.get().into_iter().find(|w| w.is_active && w.output.as_deref() == Some(output))
     }
 
+    /// The focused window, only if it is on `output`: a membrane's title
+    /// speaks only of its own screen.
+    pub fn focused_on(&self, output: &str) -> Option<Window> {
+        let id = self.focused.get()?;
+        let window = self.windows.get().into_iter().find(|w| w.id == id)?;
+        let ws = self.workspaces.get().into_iter().find(|w| Some(w.id) == window.workspace_id)?;
+        (ws.output.as_deref() == Some(output)).then_some(window)
+    }
+
     /// One line of the event stream.
     pub fn line(&self, line: &str) {
         let Ok(event) = serde_json::from_str::<Value>(line) else { return };

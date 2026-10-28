@@ -7,6 +7,7 @@
 //! when it next will (`Motion`); the surface asks the compositor for a frame
 //! only then.
 
+mod icons;
 mod schema;
 
 use std::{
@@ -30,6 +31,7 @@ pub enum Kind {
     Box,
     Capsule,
     Text,
+    Icon,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -90,6 +92,24 @@ pub struct Node {
     orbit: f32,
     angle: f32,
     orbit_radius: f32,
+    icon: Option<String>,
+    gradient: (Option<[f32; 4]>, Option<[f32; 4]>),
+    stroke: Option<f32>,
+    hollow: bool,
+    blur: bool,
+    fill_bottom: [f32; 4],
+    arc_rate: f32,
+    /// Half the node's width as last laid out: how far the arc's end is from
+    /// the centre, to pace its frames.
+    arc_radius: f32,
+    wave: f32,
+    wave_period: f32,
+    wave_time: f32,
+    wave_phase: f32,
+    arc: f32,
+    sway: f32,
+    sway_range: f32,
+    sway_phase: f32,
     /// Props set at least once: the first value is placed, never animated.
     seen: Vec<Prop>,
 }
@@ -118,6 +138,22 @@ impl Node {
             orbit: 0.0,
             angle: 0.0,
             orbit_radius: 0.0,
+            icon: None,
+            gradient: (None, None),
+            stroke: None,
+            hollow: false,
+            blur: false,
+            fill_bottom: [0.0; 4],
+            arc_rate: 0.0,
+            arc_radius: 0.0,
+            wave: 0.0,
+            wave_period: 1.0,
+            wave_time: 0.0,
+            wave_phase: 0.0,
+            arc: 1.0,
+            sway: 0.0,
+            sway_range: 0.0,
+            sway_phase: 0.0,
             seen: Vec::new(),
         }
     }
@@ -177,6 +213,10 @@ pub struct Scene {
     movers: Vec<NodeId>,
     last_step: Option<Instant>,
     dirty: bool,
+    icons: icons::Icons,
+    /// The blurred shapes as last drawn, logical units: x, y, width, height,
+    /// radius.
+    blur: Vec<[f32; 5]>,
 }
 
 impl Scene {
@@ -185,11 +225,32 @@ impl Scene {
         let root = tree
             .new_leaf_with_context(Style::default(), Node::new(Kind::Box, Role::Group))
             .expect("root");
-        Scene { tree, root, fonts, animations: Vec::new(), movers: Vec::new(), last_step: None, dirty: true }
+        Scene {
+            tree,
+            root,
+            fonts,
+            animations: Vec::new(),
+            movers: Vec::new(),
+            last_step: None,
+            dirty: true,
+            icons: icons::Icons::default(),
+            blur: Vec::new(),
+        }
     }
 
     pub fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// Where icon names are looked up, first match wins.
+    pub fn set_icon_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.icons.dirs = dirs;
+        self.dirty = true;
+    }
+
+    /// The shapes the compositor should blur behind, as last drawn.
+    pub fn blur_shapes(&self) -> &[[f32; 5]] {
+        &self.blur
     }
 
     pub fn create(&mut self, kind: Kind, role: Role) -> NodeId {
@@ -202,7 +263,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text => Style::default(),
+            Kind::Text | Kind::Icon => Style { flex_shrink: 0.0, ..Style::default() },
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -273,7 +334,9 @@ impl Scene {
             Prop::Height => Value::Number(length(style.size.height)?),
             Prop::Radius => Value::Number(n.radius?),
             Prop::Level => Value::Number(n.level),
+            Prop::Arc => Value::Number(n.arc),
             Prop::Fill => Value::Color(n.fill),
+            Prop::FillBottom => Value::Color(n.fill_bottom),
             Prop::RimTop => Value::Color(n.rim_top),
             Prop::RimBottom => Value::Color(n.rim_bottom),
             Prop::Color => Value::Color(n.color),
@@ -359,6 +422,8 @@ impl Scene {
             Prop::Radius => n.radius = Some(take!(number)),
             Prop::Level => n.level = take!(number).clamp(0.0, 1.0),
             Prop::Fill => n.fill = take!(colour),
+            Prop::FillBottom => n.fill_bottom = take!(colour),
+            Prop::ArcRate => (n.arc_rate, mover) = (take!(number).max(0.0), true),
             Prop::RimTop => n.rim_top = take!(colour),
             Prop::RimBottom => n.rim_bottom = take!(colour),
             Prop::Color => n.color = take!(colour),
@@ -376,8 +441,25 @@ impl Scene {
             Prop::Pulse => (n.pulse, mover) = (take!(number).max(0.0), true),
             Prop::Orbit => (n.orbit, mover) = (take!(number), true),
             Prop::OrbitRadius => n.orbit_radius = take!(number),
+            Prop::Icon => n.icon = Some(take!(text)),
+            Prop::GradientTop => n.gradient.0 = Some(take!(colour)),
+            Prop::GradientBottom => n.gradient.1 = Some(take!(colour)),
+            Prop::Stroke => n.stroke = Some(take!(number)),
+            Prop::Hollow => n.hollow = take!(flag),
+            Prop::Blur => n.blur = take!(flag),
+            Prop::Wave => n.wave = take!(number),
+            Prop::WavePeriod => n.wave_period = take!(number).max(1.0),
+            Prop::WaveTime => (n.wave_time, mover) = (take!(number).max(0.0), true),
+            Prop::Arc => n.arc = take!(number),
+            Prop::Angle => n.angle = take!(number).rem_euclid(1.0),
+            Prop::Sway => (n.sway, mover) = (take!(number).max(0.0), true),
+            Prop::SwayRange => n.sway_range = take!(number),
+            Prop::Overlay => {
+                style.position = if take!(flag) { taffy::Position::Absolute } else { taffy::Position::Relative };
+                restyle = true;
+            }
         }
-        let moves = n.pulse > 0.0 || n.orbit != 0.0;
+        let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0;
         if reshape {
             n.buffer = None;
             self.tree.mark_dirty(node).ok();
@@ -437,6 +519,27 @@ impl Scene {
                 let speed = n.orbit.abs() * std::f32::consts::TAU * n.orbit_radius * scale;
                 let wait = Duration::from_secs_f32(STEP / speed.max(1e-3));
                 motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
+            }
+            // A travelling wave and a sway: each paced by its own speed, a
+            // frame a quarter pixel of movement.
+            let mut pace = |speed: f32| {
+                let wait = Duration::from_secs_f32(STEP / speed.max(1e-3));
+                motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
+            };
+            if n.arc_rate > 0.0 && n.arc < 1.0 {
+                n.arc = (n.arc + n.arc_rate * dt).min(1.0);
+                // The arc's end moves along a circle as wide as the node.
+                let radius = n.arc_radius;
+                pace(n.arc_rate * std::f32::consts::TAU * radius * scale);
+            }
+            if n.wave_time > 0.0 {
+                n.wave_phase = (n.wave_phase + dt / n.wave_time).rem_euclid(1.0);
+                pace(n.wave_period / n.wave_time * scale);
+            }
+            if n.sway > 0.0 {
+                n.sway_phase = (n.sway_phase + dt / n.sway).rem_euclid(1.0);
+                // The peak speed of a sinusoidal sway.
+                pace(std::f32::consts::PI * n.sway_range / n.sway * scale);
             }
             if n.pulse > 0.0 {
                 let interval = 60.0 / n.pulse;
@@ -507,7 +610,9 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        collect(&mut self.tree, &mut fonts, self.root, [0.0, 0.0], scale, &mut list);
+        let mut out = Out { list: &mut list, icons: &mut self.icons, blur: Vec::new() };
+        collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], scale, &mut out);
+        self.blur = out.blur;
         list
     }
 }
@@ -542,16 +647,45 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     buffer
 }
 
+struct Out<'a> {
+    list: &'a mut DrawList,
+    icons: &'a mut icons::Icons,
+    blur: Vec<[f32; 5]>,
+}
+
+/// Bioma's rim: 1 logical unit, rounded to the physical pixel, never under 2
+/// physical pixels; or a given stroke, crisped to whole pixels.
+fn rim_width(n: &Node, scale: f32) -> f32 {
+    if n.rim_top[3] <= 0.0 && n.rim_bottom[3] <= 0.0 {
+        return 0.0;
+    }
+    match n.stroke {
+        Some(s) => (s * scale).round().max(1.0),
+        None => scale.round().max(2.0),
+    }
+}
+
 fn collect(
     tree: &mut TaffyTree<Node>,
     fonts: &mut ct::FontSystem,
     node: NodeId,
-    parent: [f32; 2],
+    parent: [f32; 4],
     scale: f32,
-    list: &mut DrawList,
+    out: &mut Out,
 ) {
     let layout = *tree.layout(node).expect("laid out");
-    let mut origin = [parent[0] + layout.location.x, parent[1] + layout.location.y];
+    // An overlay is centred in its parent, whatever taffy reports for an
+    // out-of-flow box.
+    let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
+    let mut origin = if overlay {
+        [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0]
+    } else {
+        [parent[0] + layout.location.x, parent[1] + layout.location.y]
+    };
+    let own = [origin[0], origin[1], layout.size.width, layout.size.height];
+    if let Some(n) = tree.get_node_context_mut(node) {
+        n.arc_radius = layout.size.width / 2.0;
+    }
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {
         return;
@@ -563,6 +697,9 @@ fn collect(
         origin[0] += a.sin() * n.orbit_radius;
         origin[1] -= a.cos() * n.orbit_radius;
     }
+    if n.sway > 0.0 {
+        origin[0] += n.sway_range * (0.5 - 0.5 * (n.sway_phase * std::f32::consts::TAU).cos());
+    }
     match n.kind {
         Kind::Capsule => {
             let swell = n.swell();
@@ -572,10 +709,12 @@ fn collect(
             let y = origin[1] - (h - layout.size.height) / 2.0;
             let size = [w * scale, h * scale];
             let radius = n.radius.map_or(size[1] / 2.0, |r| r * scale).min(size[0].min(size[1]) / 2.0);
-            // Bioma's rim: 1 logical unit, rounded to the physical pixel,
-            // never under 2 physical pixels.
-            let rim = if n.rim_top[3] > 0.0 || n.rim_bottom[3] > 0.0 { scale.round().max(2.0) } else { 0.0 };
-            list.rects.push(Rect {
+            let rim = rim_width(n, scale);
+            if n.blur {
+                out.blur.push([x, y, w, h, radius / scale]);
+            }
+            let hollow = n.hollow;
+            out.list.rects.push(Rect {
                 origin: [x * scale, y * scale],
                 size,
                 radius,
@@ -585,11 +724,59 @@ fn collect(
                 fill: n.fill,
                 rim_top: n.rim_top,
                 rim_bottom: n.rim_bottom,
+                wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
+                arc: [0.0, n.arc, 0.0, 0.0],
+                fill_to: n.fill_bottom,
             });
+            // A band drawn only outside its cells: each child capsule's
+            // shape is taken back out of it before the child is drawn.
+            if hollow {
+                for child in tree.children(node).unwrap_or_default() {
+                    let Ok(l) = tree.layout(child) else { continue };
+                    let l = *l;
+                    let Some(c) = tree.get_node_context(child) else { continue };
+                    if c.kind != Kind::Capsule || !c.present {
+                        continue;
+                    }
+                    let cs = [l.size.width * scale, l.size.height * scale];
+                    out.list.rects.push(Rect {
+                        origin: [(origin[0] + l.location.x) * scale, (origin[1] + l.location.y) * scale],
+                        size: cs,
+                        radius: c.radius.map_or(cs[1] / 2.0, |r| r * scale).min(cs[0].min(cs[1]) / 2.0),
+                        rim: 0.0,
+                        level: 1.0,
+                        cut: 1.0,
+                        fill: [0.0, 0.0, 0.0, 1.0],
+                        rim_top: [0.0; 4],
+                        rim_bottom: [0.0; 4],
+                        wave: [0.0; 4],
+                        arc: Rect::WHOLE,
+                        fill_to: [0.0; 4],
+                    });
+                }
+            }
+        }
+        Kind::Icon => {
+            let pixels = (layout.size.width.min(layout.size.height) * scale).round() as u32;
+            if let (Some(source), true) = (n.icon.clone(), pixels > 0) {
+                let gradient = match n.gradient {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                };
+                if let Some((key, data)) = out.icons.raster(&source, n.color, gradient, pixels) {
+                    out.list.images.push(genoma_render::Image {
+                        key,
+                        pixels: data,
+                        width: pixels,
+                        height: pixels,
+                        origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                    });
+                }
+            }
         }
         Kind::Text => {
             let buffer = shape(fonts, n);
-            list.texts.push(Text {
+            out.list.texts.push(Text {
                 buffer,
                 origin: [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale],
                 scale,
@@ -599,6 +786,37 @@ fn collect(
         Kind::Box => {}
     }
     for child in tree.children(node).unwrap_or_default() {
-        collect(tree, fonts, child, origin, scale, list);
+        collect(tree, fonts, child, [own[0], own[1], own[2], own[3]], scale, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overlay_sits_at_the_parents_alignment() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let parent = scene.create(Kind::Box, Role::None);
+        scene.append(root, parent);
+        for (p, v) in [(Prop::Width, 26.0), (Prop::Height, 26.0)] {
+            scene.set(parent, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(parent, Prop::Justify, Value::Text("center".into()), None).unwrap();
+        let child = scene.create(Kind::Capsule, Role::None);
+        scene.append(parent, child);
+        for (p, v) in [(Prop::Width, 10.0), (Prop::Height, 10.0)] {
+            scene.set(child, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(child, Prop::Overlay, Value::Bool(true), None).unwrap();
+        scene.set(child, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        scene.layout(None, None);
+        let l = scene.tree.layout(child).unwrap();
+        assert_eq!((l.size.width, l.size.height), (10.0, 10.0));
+        assert_eq!((l.location.x, l.location.y), (8.0, 8.0), "centred in 26");
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.rects.len(), 1);
     }
 }

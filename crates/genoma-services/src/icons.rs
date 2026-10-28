@@ -1,0 +1,138 @@
+//! An application's icon, from its app id: the desktop entry's `Icon=`, then
+//! the icon theme and the themes it inherits, then hicolor and pixmaps, as
+//! the freedesktop icon theme specification orders them. The theme is
+//! `QS_ICON_THEME` when set (Bioma passes the desktop's to Quickshell that
+//! way), else the desktop's own.
+
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+fn data_dirs() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut dirs = vec![
+        std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(&home).join(".local/share")),
+    ];
+    let system = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    dirs.extend(system.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    dirs
+}
+
+fn theme() -> Option<String> {
+    if let Ok(t) = std::env::var("QS_ICON_THEME") {
+        return Some(t);
+    }
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_owned())
+}
+
+/// The `Icon=` of the desktop entry whose name or StartupWMClass is `app_id`.
+fn desktop_icon(app_id: &str) -> Option<String> {
+    let lower = app_id.to_lowercase();
+    let mut fallback = None;
+    for dir in data_dirs() {
+        let Ok(entries) = fs::read_dir(dir.join("applications")) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_lowercase();
+            let Ok(text) = fs::read_to_string(&path) else { continue };
+            let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)).map(str::trim);
+            let icon = field("Icon=");
+            if stem == lower || stem.ends_with(&format!(".{lower}")) {
+                if let Some(icon) = icon {
+                    return Some(icon.to_owned());
+                }
+            }
+            if fallback.is_none() && field("StartupWMClass=").is_some_and(|c| c.to_lowercase() == lower) {
+                fallback = icon.map(str::to_owned);
+            }
+        }
+    }
+    fallback
+}
+
+fn theme_dirs(name: &str) -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut bases = vec![PathBuf::from(&home).join(".icons")];
+    bases.extend(data_dirs().into_iter().map(|d| d.join("icons")));
+    bases.into_iter().map(|b| b.join(name)).filter(|p| p.is_dir()).collect()
+}
+
+/// The theme and everything it inherits, in order, ending with hicolor.
+fn chain(start: &str) -> Vec<PathBuf> {
+    let mut seen = Vec::new();
+    let mut queue = vec![start.to_owned()];
+    let mut dirs = Vec::new();
+    while let Some(name) = queue.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
+        for dir in theme_dirs(&name) {
+            if let Ok(index) = fs::read_to_string(dir.join("index.theme")) {
+                if let Some(inherits) = index.lines().find_map(|l| l.strip_prefix("Inherits=")) {
+                    for parent in inherits.split(',').rev() {
+                        queue.push(parent.trim().to_owned());
+                    }
+                }
+            }
+            dirs.push(dir);
+        }
+    }
+    if !seen.iter().any(|s| s == "hicolor") {
+        dirs.extend(theme_dirs("hicolor"));
+    }
+    dirs
+}
+
+const SIZES: &[&str] = &[
+    "scalable/apps", "apps/scalable", "256x256/apps", "128x128/apps", "96x96/apps", "64x64/apps",
+    "48x48/apps", "apps/64", "apps/48", "32x32/apps",
+];
+
+fn in_theme(dirs: &[PathBuf], icon: &str) -> Option<PathBuf> {
+    for dir in dirs {
+        for size in SIZES {
+            for ext in ["svg", "png"] {
+                let p = dir.join(size).join(format!("{icon}.{ext}"));
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    for ext in ["svg", "png"] {
+        let p = Path::new("/usr/share/pixmaps").join(format!("{icon}.{ext}"));
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+static CACHE: Mutex<Option<HashMap<String, Option<PathBuf>>>> = Mutex::new(None);
+
+/// The icon file for an app id, or nothing: the cell then draws its own
+/// fallback glyph, never another application's logo.
+pub fn app_icon(app_id: &str) -> Option<PathBuf> {
+    let mut cache = CACHE.lock().unwrap();
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(found) = cache.get(app_id) {
+        return found.clone();
+    }
+    let icon = desktop_icon(app_id).unwrap_or_else(|| app_id.to_owned());
+    let found = if Path::new(&icon).is_absolute() {
+        Path::new(&icon).exists().then(|| PathBuf::from(&icon))
+    } else {
+        let dirs = chain(&theme().unwrap_or_else(|| "hicolor".into()));
+        in_theme(&dirs, &icon).or_else(|| in_theme(&dirs, &app_id.to_lowercase()))
+    };
+    cache.insert(app_id.to_owned(), found.clone());
+    found
+}

@@ -102,6 +102,14 @@ impl UserData for NiriRef {
             t.set("name", w.name)?;
             Ok(LuaValue::Table(t))
         });
+        // niri:focused_on("DP-1") → { title = …, app_id = … } or nil
+        methods.add_method("focused_on", |lua, this, output: String| {
+            let Some(w) = this.0.focused_on(&output) else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("title", w.title)?;
+            t.set("app_id", w.app_id)?;
+            Ok(LuaValue::Table(t))
+        });
     }
 }
 
@@ -112,6 +120,7 @@ impl UserData for VitalsRef {
         fields.add_field_method_get("cpu", |_, this| Ok(this.0.cpu.get()));
         fields.add_field_method_get("ram", |_, this| Ok(this.0.ram.get()));
         fields.add_field_method_get("gpu", |_, this| Ok(this.0.gpu.get()));
+        fields.add_field_method_get("gpu_clock", |_, this| Ok(this.0.gpu_clock.get()));
     }
 }
 
@@ -217,7 +226,7 @@ impl Script {
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
         let g = lua.create_table()?;
-        for kind in ["box", "capsule", "text"] {
+        for kind in ["box", "capsule", "text", "icon"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -249,6 +258,51 @@ impl Script {
                     timing::define(&name, Timing { duration, curve });
                 }
                 Ok(())
+            })?,
+        )?;
+        // g.icon_dir("~/…/assets/icons"): where icon names are looked up.
+        let scene = self.scene.clone();
+        g.set(
+            "icon_dir",
+            lua.create_function(move |_, dirs: mlua::Variadic<String>| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let dirs = dirs
+                    .iter()
+                    .map(|d| PathBuf::from(d.strip_prefix("~/").map_or(d.clone(), |r| format!("{home}/{r}"))))
+                    .collect();
+                scene.borrow_mut().set_icon_dirs(dirs);
+                Ok(())
+            })?,
+        )?;
+        // g.app_icon("firefox") → the icon file's path, or nil.
+        g.set(
+            "app_icon",
+            lua.create_function(|_, app_id: Option<String>| {
+                Ok(app_id
+                    .and_then(|id| genoma_services::icons::app_icon(&id))
+                    .map(|p| p.to_string_lossy().into_owned()))
+            })?,
+        )?;
+        // g.json("~/.config/bioma/generated/palette.json"): a data file read at
+        // load, only from the user's configuration directory.
+        g.set(
+            "json",
+            lua.create_function(|lua, path: String| {
+                use mlua::LuaSerdeExt;
+                let home = std::env::var("HOME").map_err(|_| err("no HOME"))?;
+                let config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config"));
+                let path = match path.strip_prefix("~/") {
+                    Some(rest) => format!("{home}/{rest}"),
+                    None => path,
+                };
+                let resolved = std::fs::canonicalize(&path).map_err(|e| err(format!("{path}: {e}")))?;
+                if !resolved.starts_with(&config) {
+                    return Err(err(format!("{path}: g.json reads only inside {config}")));
+                }
+                let text = std::fs::read_to_string(&resolved).map_err(|e| err(format!("{path}: {e}")))?;
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| err(format!("{path}: {e}")))?;
+                lua.to_value(&value)
             })?,
         )?;
         // g.state("key", initial): a signal kept across reloads by its key.
@@ -341,6 +395,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "box" => Kind::Box,
         "capsule" => Kind::Capsule,
         "text" => Kind::Text,
+        "icon" => Kind::Icon,
         other => return Err(err(format!("unknown node {other}"))),
     })
 }

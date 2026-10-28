@@ -3,13 +3,15 @@
 
 use std::{cell::RefCell, ffi::c_void, path::PathBuf, ptr::NonNull, rc::Rc, time::Instant};
 
+use smithay_client_toolkit::reexports::protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
 use smithay_client_toolkit::reexports::calloop::{LoopHandle, RegistrationToken, timer::{TimeoutAction, Timer}};
 
 use genoma_render::{Renderer, SurfaceId};
 use genoma_scene::Scene;
 use genoma_script::SurfaceSpec;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+    background_effect::{BackgroundEffectHandler, BackgroundEffectState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_registry,
     dispatch2::Dispatch2,
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
@@ -60,6 +62,10 @@ pub struct App {
     fractional: Option<WpFractionalScaleManagerV1>,
     main_device: Option<u64>,
     feedback_done: bool,
+    effects: BackgroundEffectState,
+    effect: Option<ExtBackgroundEffectSurfaceV1>,
+    /// The blur shapes last sent, so the region is set only when they move.
+    blurred: Vec<[i32; 5]>,
 
     renderer: Option<Renderer>,
     scene: Option<Rc<RefCell<Scene>>>,
@@ -98,6 +104,9 @@ impl App {
             outputs: OutputState::new(&globals, &qh),
             seats: SeatState::new(&globals, &qh),
             dmabuf: DmabufState::new(&globals, &qh),
+            effects: BackgroundEffectState::new(&globals, &qh),
+            effect: None,
+            blurred: Vec::new(),
             compositor,
             layer_shell,
             viewporter,
@@ -169,6 +178,10 @@ impl App {
             fractional.get_fractional_scale(&surface, qh, ScaleData);
         }
         self.viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, Ignore));
+        self.effect = self.effects.get_background_effect(&surface, qh).ok();
+        if self.effect.is_none() {
+            log::warn!("the compositor offers no ext-background-effect: no blur");
+        }
 
         // GENOMA_OUTPUT overrides the interface's output, for testing.
         let output_name = std::env::var("GENOMA_OUTPUT").ok().or(spec.output.clone());
@@ -297,6 +310,22 @@ impl App {
         scene.borrow_mut().layout(span, None);
         let list = scene.borrow_mut().draw_list(self.scale as f32);
         let animating = motion.moving;
+        // The blur region follows the shapes, and is part of this commit.
+        let shapes: Vec<[i32; 5]> = scene
+            .borrow()
+            .blur_shapes()
+            .iter()
+            .map(|s| [s[0].round() as i32, s[1].round() as i32, s[2].round() as i32, s[3].round() as i32, s[4].round() as i32])
+            .collect();
+        if shapes != self.blurred {
+            if let (Some(effect), Ok(region)) = (&self.effect, Region::new(&self.compositor)) {
+                for &[x, y, w, h, r] in &shapes {
+                    rounded(&region, x, y, w, h, r);
+                }
+                effect.set_blur_region(Some(region.wl_region()));
+            }
+            self.blurred = shapes;
+        }
         // The scene's own record of this change is consumed by this frame.
         scene.borrow_mut().take_dirty();
 
@@ -333,6 +362,20 @@ impl App {
             self.scale,
             if animating { ", animating" } else { "" }
         );
+    }
+}
+
+/// A rounded rectangle as a region: the middle band, and one row per logical
+/// unit in each corner, inset along the circle. As fine as the region can be
+/// in surface-local units.
+fn rounded(region: &Region, x: i32, y: i32, w: i32, h: i32, r: i32) {
+    let r = r.min(w / 2).min(h / 2).max(0);
+    region.add(x, y + r, w, h - 2 * r);
+    for i in 0..r {
+        let d = r as f32 - i as f32 - 0.5;
+        let inset = (r as f32 - (r as f32 * r as f32 - d * d).max(0.0).sqrt()).round() as i32;
+        region.add(x + inset, y + i, w - 2 * inset, 1);
+        region.add(x + inset, y + h - 1 - i, w - 2 * inset, 1);
     }
 }
 
@@ -476,6 +519,14 @@ impl DmabufHandler for App {
     fn failed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1) {}
 
     fn released(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_buffer::WlBuffer) {}
+}
+
+impl BackgroundEffectHandler for App {
+    fn background_effect_state(&mut self) -> &mut BackgroundEffectState {
+        &mut self.effects
+    }
+
+    fn update_capabilities(&mut self) {}
 }
 
 impl ProvidesRegistryState for App {

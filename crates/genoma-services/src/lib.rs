@@ -7,5 +7,6 @@
 //! nothing happens.
 
 pub mod clock;
+pub mod icons;
 pub mod niri;
 pub mod vitals;
