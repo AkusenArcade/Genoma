@@ -8,7 +8,8 @@ reloads them while they run. Bioma is its first consumer and the reason it
 exists, but Genoma knows nothing of membranes, tissues or cells. Those stay
 Bioma's, written on top of it.
 
-Target compositor: niri (any compositor with the protocols in §6.1 works).
+Target compositor: niri. The core uses only standard protocols (§6.1), so it
+runs on others; only niri's IPC is a built-in service.
 Implementation language: Rust. Interface language: Luau, hot-reloaded (§7).
 Language: English throughout — code, comments, identifiers, documents.
 The project name **Genoma** is the only Italian word retained.
@@ -152,7 +153,8 @@ govern what Bioma draws. These govern how Genoma lets it be drawn.
 - **Main thread:** the `calloop` event loop. It runs Wayland events, service
   events, the script and the reactive graph. One thread owns all state, so no
   state is locked.
-- **Render thread:** owns the GPU device and receives immutable draw lists.
+- **Render thread** (from M1): owns the GPU device and receives immutable
+  draw lists.
 - **Service threads,** where a library demands one (PipeWire's loop, for
   example). They post into the main loop and never touch state.
 
@@ -433,7 +435,7 @@ These replace the Quickshell modules Bioma imports today:
 | Notifications server | `Quickshell.Services.Notifications` | `zbus` (`org.freedesktop.Notifications`) |
 | Tray | `Quickshell.Services.SystemTray` | `zbus` (StatusNotifierItem + DBusMenu) |
 | Polkit agent | `Quickshell.Services.Polkit` | `zbus` (polkit agent interface) |
-| PAM | `Quickshell.Services.Pam` | `pam-client` 0.5 (or a direct libpam binding — §12) |
+| PAM | `Quickshell.Services.Pam` | a direct libpam binding (§12) |
 | Greeter | `Quickshell.Services.Greetd` | `greetd_ipc` 0.10 |
 | Windows, workspaces | `ToplevelManager`, `WindowManager` | `ext-foreign-toplevel-list` + niri IPC |
 | Colours from an image | `ColorQuantizer` | in Rust, off the main thread |
@@ -524,21 +526,29 @@ it long, not the renderer.
 
 1. ~~**Adapter by DRM node.**~~ *Closed in M0:* by PCI address, through
    sysfs and `wgpu`'s `device_pci_bus_id` (§5.1).
-2. **Text under depth.** Glyph atlas at transformed sizes, or MSDF. To be
-   decided by measurement in M4.
-3. **Render thread from the start,** or a single thread first and the split
-   later? Leaning to a split from M0, because it shapes the draw-list API.
-4. **PAM binding.** `pam-client` was last released in 2022. Use it, fork it,
-   or bind libpam directly (it is small)?
-5. **Accessibility.** AccessKit (`accesskit_unix`, AT-SPI) is the obvious
-   path. Scope it in M3 or defer it past M6?
-6. **Luau type definitions.** Generated from Rust (one schema, two outputs),
-   or hand-written? Leaning to generated.
+2. **Text under depth.** Glyph atlas at transformed sizes, or MSDF. Stays
+   open until M4, where a measurement decides it: before text is drawn in
+   depth there is nothing to measure.
+3. ~~**Render thread.**~~ *Closed 2026-10-28:* split from M1. The main thread
+   builds immutable draw lists, and the render thread owns the device and
+   draws them. The split decides the draw-list API, and that API is what
+   every primitive is written against.
+4. ~~**PAM binding.**~~ *Closed 2026-10-28:* a direct binding to libpam. It
+   is five functions and a conversation callback, and the lock screen should
+   not depend on a crate unreleased since 2022. Needed in M5.
+5. ~~**Accessibility.**~~ *Closed 2026-10-28:* every node carries a semantic
+   role (button, slider, label, …) and a name from M1, which costs almost
+   nothing. The AT-SPI adapter (AccessKit, `accesskit_unix`) comes in M3,
+   with input.
+6. ~~**Luau type definitions.**~~ *Closed 2026-10-28:* generated from Rust.
+   One schema per node type and service produces both the Luau bindings and
+   the `.d.luau` definitions `luau-lsp` reads, so they cannot drift.
 7. ~~**Licence.**~~ *Closed 2026-10-28:* GPL-3.0-or-later, the same as
    Bioma.
-8. **Scope beyond niri.** Genoma needs only standard protocols except for
-   niri's IPC service. Should other compositors' IPC (Hyprland, Sway) be
-   in scope as optional services?
+8. ~~**Scope beyond niri.**~~ *Closed 2026-10-28:* niri only, on a neutral
+   core. Everything but the niri service uses standard protocols, so the
+   toolkit already runs on other compositors. Their IPC (Hyprland, Sway) may
+   come later as optional services, and nothing has to change to add them.
 
 ## 13. Sources
 
