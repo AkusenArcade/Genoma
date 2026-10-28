@@ -83,6 +83,11 @@ nothing else.
   2.05% of a core, 30 MB, render p99 177 µs.
 - After unlinking, once the last life is over: 0 frames in 5 s.
 
+*Akusen, 2026-10-28:* kept in the toolkit. **How Bioma uses particles is
+decided case by case,** only where they actually carry information, and
+none is adopted until such a case is defined. **3D particles** come later,
+with the depth work.
+
 - [x] An `emitter` node with properties that bind like any other: rate,
       lifetime, speed, spread, size, colour, and gravity or attraction to a
       point.
