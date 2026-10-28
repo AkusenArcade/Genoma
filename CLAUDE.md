@@ -3,7 +3,13 @@
 A Wayland shell toolkit in **Rust**, with interfaces in **Luau** (through
 `mlua`), hot-reloaded. It is the planned successor to Quickshell under
 **Bioma** (`~/Documents/Development/Bioma`), its first and only consumer for
-now.
+now. The shell is and stays **Bioma**; Genoma is only the toolkit's name.
+Bioma rebuilt on Genoma is still Bioma.
+
+When a cell of Bioma is reproduced here (an example, a measurement, the
+port), the reference is Bioma's **current** QML and a capture of the live
+desktop, never `docs/design/CELLS.md` or the mockups alone: those show early
+versions, and the cells have moved on.
 
 The specification is `docs/genoma-prd.md`. It is the source of truth: read the
 relevant section before implementing, and do not re-decide what it has closed.

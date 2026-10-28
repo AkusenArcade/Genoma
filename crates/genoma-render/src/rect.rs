@@ -16,7 +16,12 @@ pub struct Rect {
     pub size: [f32; 2],
     pub radius: f32,
     pub rim: f32,
-    pub _pad: [f32; 2],
+    /// How much of the height the fill covers, from the bottom: 1 is all of
+    /// it, a lower value is a liquid's surface. The rim is never cut.
+    pub level: f32,
+    /// 1 erases what is under the shape instead of painting it: a tissue's
+    /// band is cut out where its cells are, so glass never sits on glass.
+    pub cut: f32,
     pub fill: [f32; 4],
     pub rim_top: [f32; 4],
     pub rim_bottom: [f32; 4],
@@ -31,6 +36,8 @@ struct Globals {
 
 pub(crate) struct Pipeline {
     pipeline: wgpu::RenderPipeline,
+    cutter: wgpu::RenderPipeline,
+    runs: Vec<(bool, std::ops::Range<u32>)>,
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
@@ -45,7 +52,7 @@ struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 struct Instance {
     @location(0) origin: vec2<f32>,
     @location(1) size: vec2<f32>,
-    @location(2) shape: vec4<f32>,      // radius, rim, -, -
+    @location(2) shape: vec4<f32>,      // radius, rim, level, cut
     @location(3) fill: vec4<f32>,
     @location(4) rim_top: vec4<f32>,
     @location(5) rim_bottom: vec4<f32>,
@@ -103,8 +110,15 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     let t = clamp(height / max(in.half.y, 1.0), 0.0, 1.0);
     let rim_colour = mix(in.rim_top, in.rim_bottom, t);
 
+    // The liquid's surface, antialiased like every other edge.
+    let from_bottom = in.half.y - in.local.y;
+    let surface = clamp(in.shape.z * in.half.y * 2.0 - from_bottom + 0.5, 0.0, 1.0);
+
     let rim_alpha = rim_colour.a * (outer - inner);
-    let fill_alpha = in.fill.a * inner;
+    let fill_alpha = in.fill.a * inner * surface;
+    if (in.shape.w > 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, outer);
+    }
     // Premultiplied out: the surface is composited as premultiplied alpha.
     return vec4<f32>(rim_colour.rgb * rim_alpha + in.fill.rgb * fill_alpha, rim_alpha + fill_alpha);
 }
@@ -145,7 +159,7 @@ impl Pipeline {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let make = |blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("rect"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -167,7 +181,7 @@ impl Pipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -180,9 +194,17 @@ impl Pipeline {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = make(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        // Destination-out: what is drawn is the shape's coverage taken away.
+        let erase = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let cutter = make(wgpu::BlendState { color: erase, alpha: erase });
         let capacity = 16;
         let instances = Self::instance_buffer(device, capacity);
-        Pipeline { pipeline, globals, bind_group, instances, capacity, count: 0 }
+        Pipeline { pipeline, cutter, runs: Vec::new(), globals, bind_group, instances, capacity, count: 0 }
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -208,15 +230,26 @@ impl Pipeline {
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&Globals { viewport, _pad: [0.0; 2] }));
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(rects));
         self.count = rects.len() as u32;
+        // Consecutive rects of one kind share a draw call.
+        self.runs.clear();
+        for (i, r) in rects.iter().enumerate() {
+            let cut = r.cut > 0.5;
+            match self.runs.last_mut() {
+                Some((c, range)) if *c == cut => range.end = i as u32 + 1,
+                _ => self.runs.push((cut, i as u32..i as u32 + 1)),
+            }
+        }
     }
 
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.count == 0 {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
+        for (cut, range) in &self.runs {
+            pass.set_pipeline(if *cut { &self.cutter } else { &self.pipeline });
+            pass.draw(0..4, range.clone());
+        }
     }
 }

@@ -2,7 +2,9 @@
 
 A Wayland shell toolkit in Rust: the code an organism is built from.
 
-Genoma is to Bioma what Quickshell is to Bioma today. It is the layer that
+Genoma is to Bioma what Quickshell is to Bioma today. **The shell is and stays
+Bioma; Genoma is only the toolkit's name.** Bioma rebuilt on Genoma is still
+called Bioma, as it is called Bioma on Quickshell now. It is the layer that
 opens surfaces on the compositor, draws them, feeds them the system's state and
 reloads them while they run. Bioma is its first consumer and the reason it
 exists, but Genoma knows nothing of membranes, tissues or cells. Those stay
@@ -530,6 +532,41 @@ the time in Orbitron, its text bound to the clock service):
   from the timing set; name an entry".
 - **Leaks:** after 30 reloads in a row, PSS stayed at 25 MB and the frame
   rate stayed the same.
+
+**M2, partial, 2026-10-28.** Built so far:
+- the property schema with generated Luau definitions (`genoma types`);
+- the niri service (event stream) and the vitals service (CPU, RAM, GPU at
+  Bioma's 2 s), verified headless with `genoma probe`;
+- layout across a spanned membrane;
+- motion bound to data: the beat, the orbit, the liquid level;
+- the cut-out pipeline for a tissue's band.
+
+*Frames in proportion to motion:* a slow satellite is redrawn when it has
+moved a quarter of a physical pixel, not on every refresh. On
+`examples/membrane` that took the frame rate from 120 to 78 a second and the
+CPU from 1.85% to 1.58% of a core, with the same motion on screen. Frame
+time over 3,124 frames: building the list took 7 µs at the median and 14 µs
+at p99; rendering took 124 µs at the median and 412 µs at p99, well inside
+the 2 ms gate.
+
+*Not yet the gate.* The first side-by-side compared the content without the
+look. The isolated Bioma instance, run with and without the same membrane,
+put the membrane's cost in Bioma at 5.03% of a core and 19 MB, against
+Genoma's whole process at 1.58% and 25 MB. As Akusen pointed out, that is not
+one to one. **The gate is measured against Bioma as it is now, with
+everything it draws:**
+- the tissue band in transparency, cut out under the cells;
+- the compositor blur behind the cells;
+- the cells' current icons (SVG, in the live palette) and the application
+  icon in the window title;
+- the current typography (Spectral for the clock, Orbitron for figures);
+- the vitals as `components/Vital.qml` draws them today;
+- the window title only for a window focused on the membrane's output.
+
+Blur is niri's work, so the gate also measures **niri's CPU in both runs**,
+not only the shell's. The reference is Bioma's current QML and a capture of
+the live membrane, never the early mockups. Icons and images move from M3
+into M2 for this reason.
 
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the

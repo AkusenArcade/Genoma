@@ -7,7 +7,7 @@
 //! load disposes it: a reload never leaves an old binding running.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
@@ -17,8 +17,8 @@ use genoma_core::{
     reactive::{Effect, Scope, Signal, detached},
     timing::{self, Curve, Timing},
 };
-use genoma_scene::{Kind, Prop, Role, Scene, Value};
-use genoma_services::clock::Clock;
+use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
+use genoma_services::{clock::Clock, niri::Niri, vitals::Vitals};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
 /// Where and how the shell's surface sits on the output.
@@ -29,6 +29,8 @@ pub struct SurfaceSpec {
     pub margin: [i32; 4],
     pub layer: String,
     pub output: Option<String>,
+    /// Keep windows out of the surface's strip (a membrane on its edge).
+    pub reserve: bool,
 }
 
 /// A `g.state` value: what a signal can hold across reloads.
@@ -75,6 +77,44 @@ impl UserData for State {
     }
 }
 
+/// The services an interface may require. The runtime makes them; a load
+/// records which ones it asked for, and only those get their sources.
+#[derive(Clone)]
+pub struct Services {
+    pub clock: Rc<Clock>,
+    pub niri: Option<Rc<Niri>>,
+    pub vitals: Rc<Vitals>,
+}
+
+struct NiriRef(Rc<Niri>);
+
+impl UserData for NiriRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // niri:active("DP-1") → { idx = 2, name = "web" } or nil
+        methods.add_method("active", |lua, this, output: String| {
+            let Some(w) = this.0.active(&output) else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("idx", w.idx)?;
+            t.set("name", w.name)?;
+            Ok(LuaValue::Table(t))
+        });
+    }
+}
+
+struct VitalsRef(Rc<Vitals>);
+
+impl UserData for VitalsRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("cpu", |_, this| Ok(this.0.cpu.get()));
+        fields.add_field_method_get("ram", |_, this| Ok(this.0.ram.get()));
+        fields.add_field_method_get("gpu", |_, this| Ok(this.0.gpu.get()));
+    }
+}
+
 struct ClockRef(Rc<Clock>);
 
 impl UserData for ClockRef {
@@ -91,8 +131,8 @@ pub struct Script {
     scene: Rc<RefCell<Scene>>,
     scope: Option<Scope>,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
-    clock: Rc<Clock>,
-    clock_wanted: Rc<Cell<bool>>,
+    services: Services,
+    wanted: Rc<RefCell<Vec<&'static str>>>,
 }
 
 fn err(message: impl Into<String>) -> mlua::Error {
@@ -100,15 +140,15 @@ fn err(message: impl Into<String>) -> mlua::Error {
 }
 
 impl Script {
-    pub fn new(dir: &Path, scene: Rc<RefCell<Scene>>, clock: Rc<Clock>) -> Script {
+    pub fn new(dir: &Path, scene: Rc<RefCell<Scene>>, services: Services) -> Script {
         Script {
             lua: Lua::new(),
             dir: dir.to_owned(),
             scene,
             scope: None,
             states: Rc::default(),
-            clock,
-            clock_wanted: Rc::default(),
+            services,
+            wanted: Rc::default(),
         }
     }
 
@@ -116,9 +156,10 @@ impl Script {
         &self.dir
     }
 
-    /// Whether the interface reads the clock: if not, nothing ticks it.
-    pub fn clock_wanted(&self) -> bool {
-        self.clock_wanted.get()
+    /// Whether an interface has required the service (`"clock"`, `"niri"`,
+    /// `"vitals"`): a service nobody required has no source running.
+    pub fn wants(&self, service: &str) -> bool {
+        self.wanted.borrow().contains(&service)
     }
 
     /// Evaluates `shell.luau` and mounts its tree, replacing the last one.
@@ -149,6 +190,9 @@ impl Script {
         let root = scene.borrow().root();
         let (scope, result) = Scope::new(|| {
             let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
+            // The holder takes the surface's whole span, so content that grows
+            // (a membrane's row) can reach the far edge.
+            let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
             mount(&scene, &content, holder).map(|_| holder)
         });
         match result {
@@ -221,8 +265,8 @@ impl Script {
         )?;
 
         let dir = self.dir.clone();
-        let clock = self.clock.clone();
-        let wanted = self.clock_wanted.clone();
+        let services = self.services.clone();
+        let wanted = self.wanted.clone();
         let cache: Table = lua.create_table()?;
         let require = lua.create_function(move |lua, name: String| -> mlua::Result<LuaValue> {
             if let Some(v) = cache.get::<Option<LuaValue>>(name.as_str())? {
@@ -230,9 +274,25 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" => {
-                    wanted.set(true);
-                    LuaValue::UserData(lua.create_userdata(ClockRef(clock.clone()))?)
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" => {
+                    let service = &name["@genoma/".len()..];
+                    let key: &'static str = match service {
+                        "clock" => "clock",
+                        "niri" => "niri",
+                        _ => "vitals",
+                    };
+                    if !wanted.borrow().contains(&key) {
+                        wanted.borrow_mut().push(key);
+                    }
+                    let data = match key {
+                        "clock" => lua.create_userdata(ClockRef(services.clock.clone()))?,
+                        "niri" => match &services.niri {
+                            Some(niri) => lua.create_userdata(NiriRef(niri.clone()))?,
+                            None => return Err(err("niri's socket is not available")),
+                        },
+                        _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
+                    };
+                    LuaValue::UserData(data)
                 }
                 other if other.starts_with('@') => return Err(err(format!("no module {other}"))),
                 relative => {
@@ -272,6 +332,7 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
         margin,
         layer: t.get::<Option<String>>("layer")?.unwrap_or_else(|| "top".into()),
         output: t.get("output")?,
+        reserve: t.get::<Option<bool>>("reserve")?.unwrap_or(false),
     })
 }
 
@@ -307,36 +368,39 @@ fn color(text: &str) -> Option<[f32; 4]> {
     }
 }
 
-/// A Luau value as the property wants it.
+/// A Luau value as the property wants it, by the type the schema gives it.
 fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
-    let number = || match v {
-        LuaValue::Integer(i) => Ok(*i as f32),
-        LuaValue::Number(n) => Ok(*n as f32),
-        _ => Err(format!("{prop:?} wants a number")),
-    };
-    match prop {
-        Prop::Width | Prop::Height | Prop::MinWidth | Prop::Padding | Prop::PaddingX
-        | Prop::PaddingY | Prop::Gap | Prop::Radius | Prop::FontSize => number().map(Value::Number),
-        Prop::Fill | Prop::RimTop | Prop::RimBottom | Prop::Color => match v {
+    let info = prop.info();
+    let wrong = |what: &str| format!("{} wants {what}", info.name);
+    match info.ty {
+        Ty::Number => match v {
+            LuaValue::Integer(i) => Ok(Value::Number(*i as f32)),
+            LuaValue::Number(n) => Ok(Value::Number(*n as f32)),
+            _ => Err(wrong("a number")),
+        },
+        Ty::Color => match v {
             LuaValue::String(s) => color(&s.to_string_lossy())
                 .map(Value::Color)
-                .ok_or_else(|| format!("{prop:?}: colours are \"#rrggbb\" or \"#rrggbbaa\"")),
-            _ => Err(format!("{prop:?} wants a colour string")),
+                .ok_or_else(|| wrong("a colour, \"#rrggbb\" or \"#rrggbbaa\"")),
+            _ => Err(wrong("a colour string")),
         },
-        Prop::Present | Prop::Tabular => match v {
+        Ty::Bool => match v {
             LuaValue::Boolean(b) => Ok(Value::Bool(*b)),
             LuaValue::Nil => Ok(Value::Bool(false)),
-            _ => Err(format!("{prop:?} wants a boolean")),
+            _ => Err(wrong("a boolean")),
         },
-        Prop::Text => match v {
+        Ty::Text => match v {
             LuaValue::String(s) => Ok(Value::Text(s.to_string_lossy())),
             LuaValue::Integer(i) => Ok(Value::Text(i.to_string())),
             LuaValue::Number(n) => Ok(Value::Text(n.to_string())),
-            _ => Err("text wants a string".into()),
+            LuaValue::Nil => Ok(Value::Text(String::new())),
+            _ => Err(wrong("a string")),
         },
-        Prop::Direction | Prop::Align | Prop::Justify | Prop::Font => match v {
-            LuaValue::String(s) => Ok(Value::Text(s.to_string_lossy())),
-            _ => Err(format!("{prop:?} wants a string")),
+        Ty::Choice(options) => match v {
+            LuaValue::String(s) if options.contains(&s.to_string_lossy().as_str()) => {
+                Ok(Value::Text(s.to_string_lossy()))
+            }
+            _ => Err(wrong(&format!("one of {}", options.join(", ")))),
         },
     }
 }

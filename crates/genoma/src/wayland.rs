@@ -3,6 +3,8 @@
 
 use std::{cell::RefCell, ffi::c_void, path::PathBuf, ptr::NonNull, rc::Rc, time::Instant};
 
+use smithay_client_toolkit::reexports::calloop::{LoopHandle, RegistrationToken, timer::{TimeoutAction, Timer}};
+
 use genoma_render::{Renderer, SurfaceId};
 use genoma_scene::Scene;
 use genoma_script::SurfaceSpec;
@@ -66,6 +68,9 @@ pub struct App {
     target_made: bool,
     pointer: Option<wl_pointer::WlPointer>,
     spec: Option<SurfaceSpec>,
+    handle: Option<LoopHandle<'static, App>>,
+    /// The timer that wakes the surface for the next beat, if one is set.
+    wake: Option<RegistrationToken>,
 
     /// The surface's size in logical units, as last configured.
     logical: (u32, u32),
@@ -109,6 +114,8 @@ impl App {
             target_made: false,
             pointer: None,
             spec: None,
+            handle: None,
+            wake: None,
             logical: (1, 1),
             wanted: (1, 1),
             scale: 1.0,
@@ -143,9 +150,17 @@ impl App {
         self.main_device.and_then(pci_bus_id)
     }
 
-    pub fn open(&mut self, renderer: Renderer, scene: Rc<RefCell<Scene>>, spec: SurfaceSpec, qh: &QueueHandle<App>) {
-        let size = scene.borrow_mut().layout();
-        self.wanted = (size.0.ceil().max(1.0) as u32, size.1.ceil().max(1.0) as u32);
+    pub fn open(
+        &mut self,
+        renderer: Renderer,
+        scene: Rc<RefCell<Scene>>,
+        spec: SurfaceSpec,
+        qh: &QueueHandle<App>,
+        handle: LoopHandle<'static, App>,
+    ) {
+        self.handle = Some(handle);
+        self.spec = Some(spec.clone());
+        self.wanted = self.measure(&scene);
         self.renderer = Some(renderer);
         self.scene = Some(scene);
 
@@ -173,7 +188,25 @@ impl App {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         self.layer = Some(layer);
         self.place(&spec);
-        self.spec = Some(spec);
+    }
+
+    /// A surface anchored to both left and right spans its edge, as a
+    /// membrane does: the compositor gives it the width and the content lays
+    /// out across it.
+    fn spans(&self) -> bool {
+        self.spec.as_ref().is_some_and(|s| {
+            s.anchor.iter().any(|a| a == "left") && s.anchor.iter().any(|a| a == "right")
+        })
+    }
+
+    /// The size to ask the compositor for: the content's, with 0 for a
+    /// spanned width, which the compositor fills.
+    fn measure(&self, scene: &Rc<RefCell<Scene>>) -> (u32, u32) {
+        let spans = self.spans();
+        let width = (spans && self.configured).then_some(self.logical.0 as f32);
+        let size = scene.borrow_mut().layout(width, None);
+        let w = if spans { 0 } else { size.0.ceil().max(1.0) as u32 };
+        (w, size.1.ceil().max(1.0) as u32)
     }
 
     fn place(&mut self, spec: &SurfaceSpec) {
@@ -195,6 +228,7 @@ impl App {
         let [top, right, bottom, left] = spec.margin;
         layer.set_margin(top, right, bottom, left);
         layer.set_size(self.wanted.0, self.wanted.1);
+        layer.set_exclusive_zone(if spec.reserve { self.wanted.1 as i32 } else { 0 });
         layer.commit();
     }
 
@@ -206,8 +240,8 @@ impl App {
                 log::warn!("a new output or layer takes effect at the next start");
             }
         }
+        self.spec = Some(spec.clone());
         self.place(&spec);
-        self.spec = Some(spec);
         self.dirty = true;
     }
 
@@ -215,18 +249,18 @@ impl App {
     /// for a frame. This is the only place a frame is asked for, apart from a
     /// transition in flight.
     pub fn after_events(&mut self) {
-        let Some(scene) = &self.scene else { return };
+        let Some(scene) = self.scene.clone() else { return };
         let changed = scene.borrow_mut().take_dirty();
         if !(changed || self.dirty) || !self.configured {
             return;
         }
-        let size = scene.borrow_mut().layout();
-        let wanted = (size.0.ceil().max(1.0) as u32, size.1.ceil().max(1.0) as u32);
+        let wanted = self.measure(&scene);
         if wanted != self.wanted {
             // A new size waits for the compositor's configure, which draws.
             self.wanted = wanted;
-            if let Some(layer) = &self.layer {
+            if let (Some(layer), Some(spec)) = (&self.layer, &self.spec) {
                 layer.set_size(wanted.0, wanted.1);
+                layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
                 layer.commit();
             }
             return;
@@ -241,6 +275,7 @@ impl App {
         let (Some(layer), Some(renderer), Some(scene)) = (&self.layer, &self.renderer, &self.scene) else {
             return;
         };
+        let started = Instant::now();
         let surface = layer.wl_surface();
         if !self.target_made {
             let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
@@ -257,9 +292,11 @@ impl App {
             Some(viewport) => viewport.set_destination(self.logical.0 as i32, self.logical.1 as i32),
             None => surface.set_buffer_scale(self.scale.ceil() as i32),
         }
-        let animating = scene.borrow_mut().advance(Instant::now());
-        scene.borrow_mut().layout();
+        let motion = scene.borrow_mut().advance(Instant::now(), self.scale as f32);
+        let span = self.spans().then_some(self.logical.0 as f32);
+        scene.borrow_mut().layout(span, None);
         let list = scene.borrow_mut().draw_list(self.scale as f32);
+        let animating = motion.moving;
         // The scene's own record of this change is consumed by this frame.
         scene.borrow_mut().take_dirty();
 
@@ -268,8 +305,25 @@ impl App {
         surface.frame(&self.qh, FrameCallbackData(surface.clone()));
         self.frame_pending = true;
         renderer.draw(SURFACE, width, height, list);
+        log::trace!("build {} us", started.elapsed().as_micros());
         self.dirty = animating;
         self.frames += 1;
+        // Between beats nothing moves: no frames, only a timer for the next.
+        if let (false, Some(wait), Some(handle)) = (animating, motion.wake, self.handle.clone()) {
+            if let Some(old) = self.wake.take() {
+                handle.remove(old);
+            }
+            self.wake = handle
+                .insert_source(Timer::from_duration(wait), |_, _, app| {
+                    app.wake = None;
+                    app.dirty = true;
+                    if !app.frame_pending {
+                        app.draw();
+                    }
+                    TimeoutAction::Drop
+                })
+                .ok();
+        }
         log::debug!(
             "frame {} at {:.3} s: {}×{} px, scale {}{}",
             self.frames,

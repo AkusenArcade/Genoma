@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 genoma-core = { path = "../genoma-core" }
 jiff = "0.2"
+serde_json = "1"

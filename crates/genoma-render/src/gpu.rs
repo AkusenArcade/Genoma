@@ -132,6 +132,12 @@ impl Gpu {
     }
 
     pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
+        let started = std::time::Instant::now();
+        self.draw_inner(id, width, height, list);
+        log::trace!("render {} us", started.elapsed().as_micros());
+    }
+
+    fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
         let Some(target) = self.targets.get_mut(&id) else {
             log::warn!("draw for unknown surface {id}");
             return;
