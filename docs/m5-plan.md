@@ -185,9 +185,20 @@ its call is in flight, as Quickshell has it, since BlueZ has no such state.
 
 ### 7. Windows and colours
 
-- [ ] `ext-foreign-toplevel-list`: the compositor-agnostic window list, on
+- [x] `ext-foreign-toplevel-list`: the compositor-agnostic window list, on
       the main thread's Wayland connection, as the fallback beside niri's.
-- [ ] Colours from an image: a quantizer in Rust, off the main thread.
+- ~~Colours from an image: a quantizer in Rust, off the main thread.~~
+  *Dropped, Akusen 2026-10-28:* Bioma takes its colours from matugen and no
+  longer uses `ColorQuantizer`.
+
+*Built 2026-10-28.* Bioma does not use the compositor-agnostic list either
+(its `services/Niri.qml` reads niri's IPC, which also gives geometry, pids,
+workspaces and outputs); it is built as the fallback should Bioma leave
+niri. Bound only once an interface requires `@genoma/toplevels`, since a
+compositor serving it sends every window's every title change. The list
+matched `niri msg windows` (four windows, titles and app ids), and a
+binding on it re-ran as the list changed; a title changing under the test
+was not caught in its six seconds.
 
 ### 8. Greeter and PAM
 

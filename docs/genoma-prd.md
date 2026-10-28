@@ -442,8 +442,8 @@ These replace the Quickshell modules Bioma imports today:
 | Polkit agent | `Quickshell.Services.Polkit` | `zbus` (polkit agent interface) |
 | PAM | `Quickshell.Services.Pam` | a direct libpam binding (§12) |
 | Greeter | `Quickshell.Services.Greetd` | `greetd_ipc` 0.10 |
-| Windows, workspaces | `ToplevelManager`, `WindowManager` | `ext-foreign-toplevel-list` + niri IPC |
-| Colours from an image | `ColorQuantizer` | in Rust, off the main thread |
+| Windows, workspaces | `ToplevelManager`, `WindowManager` | niri IPC; `ext-foreign-toplevel-list` as the fallback for another compositor |
+| ~~Colours from an image~~ | ~~`ColorQuantizer`~~ | *dropped 2026-10-28: Bioma's colours come from matugen* |
 
 The version numbers are the ones current on crates.io on 2026-10-28. Each
 service is verified **without UI** before anything depends on it: a headless

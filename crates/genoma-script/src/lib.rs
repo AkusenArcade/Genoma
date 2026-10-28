@@ -29,6 +29,7 @@ use genoma_services::{
     network::Network,
     niri::Niri,
     power::Power,
+    toplevels::Toplevels,
     vitals::Vitals,
 };
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
@@ -153,6 +154,7 @@ pub struct Services {
     pub media: Rc<Media>,
     pub audio: Rc<Audio>,
     pub bluetooth: Rc<Bluetooth>,
+    pub toplevels: Rc<Toplevels>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -553,6 +555,27 @@ impl UserData for BluetoothRef {
     }
 }
 
+struct ToplevelsRef(Rc<Toplevels>);
+
+impl UserData for ToplevelsRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers ext-foreign-toplevel-list.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // toplevels.list → { { identifier, title, app_id }, … }
+        fields.add_field_method_get("list", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, w) in this.0.list.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("identifier", w.identifier)?;
+                t.set("title", w.title)?;
+                t.set("app_id", w.app_id)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+}
+
 struct ClockRef(Rc<Clock>);
 
 impl UserData for ClockRef {
@@ -911,7 +934,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -921,6 +944,7 @@ impl Script {
                         "media" => "media",
                         "audio" => "audio",
                         "bluetooth" => "bluetooth",
+                        "toplevels" => "toplevels",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -937,6 +961,7 @@ impl Script {
                         "media" => lua.create_userdata(MediaRef(services.media.clone()))?,
                         "audio" => lua.create_userdata(AudioRef(services.audio.clone()))?,
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
+                        "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

@@ -65,7 +65,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -412,8 +412,14 @@ fn run(dir: PathBuf) {
     log::info!("loaded {}", dir.join("shell.luau").display());
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
+    let services_toplevels = services.toplevels.clone();
     let sources = Rc::new(RefCell::new(Sources { services, niri_stream, bus: None, started: Vec::new() }));
     sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
+    // On the Wayland connection, so started here rather than among the
+    // sources.
+    if script.borrow().wants("toplevels") {
+        app.start_toplevels(services_toplevels.clone());
+    }
 
     // Hot reload: a save in the directory, settled for a moment because an
     // editor's save is often several events.
@@ -445,6 +451,9 @@ fn run(dir: PathBuf) {
                         Ok(()) => {
                             log::info!("reloaded");
                             sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
+                            if script.borrow().wants("toplevels") {
+                                app.start_toplevels(sources.borrow().services.toplevels.clone());
+                            }
                         }
                         Err(e) => log::error!("reload failed, the last interface stays: {e}"),
                     }

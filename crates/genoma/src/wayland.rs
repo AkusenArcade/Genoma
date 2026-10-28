@@ -20,6 +20,7 @@ use smithay_client_toolkit::{
     delegate_registry,
     dispatch2::Dispatch2,
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
+    foreign_toplevel_list::{ForeignToplevelList, ForeignToplevelListHandler},
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
@@ -32,7 +33,10 @@ use smithay_client_toolkit::{
             protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
         },
         protocols::{
-            ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+            ext::{
+                background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+                foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            },
             wp::{
                 fractional_scale::v1::client::{
                     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -131,6 +135,12 @@ pub struct App {
     /// trees are to be mounted again.
     outputs_changed: bool,
     started: Instant,
+    /// The registry's globals, for what is bound only when asked for.
+    globals: smithay_client_toolkit::reexports::client::globals::GlobalList,
+    /// `ext-foreign-toplevel-list`, bound once an interface requires
+    /// `@genoma/toplevels`, and the service it fills.
+    toplevel_list: Option<ForeignToplevelList>,
+    toplevels: Option<std::rc::Rc<genoma_services::toplevels::Toplevels>>,
 }
 
 impl App {
@@ -163,6 +173,9 @@ impl App {
             input: None,
             outputs_changed: false,
             started: Instant::now(),
+            toplevel_list: None,
+            toplevels: None,
+            globals,
         };
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
@@ -186,6 +199,31 @@ impl App {
 
     pub fn main_device_pci(&self) -> Option<String> {
         self.main_device.and_then(pci_bus_id)
+    }
+
+    /// Binds `ext-foreign-toplevel-list` and keeps `toplevels` up to date:
+    /// called once an interface requires them. A compositor without the
+    /// protocol leaves the list empty and `available` false.
+    pub fn start_toplevels(&mut self, toplevels: std::rc::Rc<genoma_services::toplevels::Toplevels>) {
+        if self.toplevel_list.is_some() {
+            return;
+        }
+        let list = ForeignToplevelList::new(&self.globals, &self.qh);
+        let offered = self.globals.contents().with_list(|g| g.iter().any(|g| g.interface == "ext_foreign_toplevel_list_v1"));
+        toplevels.available.set(offered);
+        self.toplevel_list = Some(list);
+        self.toplevels = Some(toplevels);
+    }
+
+    fn publish_toplevels(&mut self) {
+        let (Some(list), Some(toplevels)) = (&self.toplevel_list, &self.toplevels) else { return };
+        let now: Vec<genoma_services::toplevels::Toplevel> = list
+            .toplevels()
+            .iter()
+            .filter_map(|t| list.info(t))
+            .map(|i| genoma_services::toplevels::Toplevel { identifier: i.identifier, title: i.title, app_id: i.app_id })
+            .collect();
+        toplevels.list.set(now);
     }
 
     /// Where input is delivered: (the surface's tree index, node, input).
@@ -866,6 +904,24 @@ impl DmabufHandler for App {
     fn failed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1) {}
 
     fn released(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_buffer::WlBuffer) {}
+}
+
+impl ForeignToplevelListHandler for App {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelList {
+        self.toplevel_list.as_mut().expect("bound before its events")
+    }
+
+    fn new_toplevel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: ExtForeignToplevelHandleV1) {
+        self.publish_toplevels();
+    }
+
+    fn update_toplevel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: ExtForeignToplevelHandleV1) {
+        self.publish_toplevels();
+    }
+
+    fn toplevel_closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: ExtForeignToplevelHandleV1) {
+        self.publish_toplevels();
+    }
 }
 
 impl BackgroundEffectHandler for App {
