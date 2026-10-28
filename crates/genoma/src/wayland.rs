@@ -1,15 +1,19 @@
-//! The surface on the compositor: a layer surface at the output's fractional
-//! scale, drawn only when its scene says something changed.
+//! The surfaces on the compositor: one layer surface per output the
+//! interface asks for, each at its output's fractional scale, each drawn only
+//! when its own scene says something changed.
 
-use std::{cell::RefCell, ffi::c_void, path::PathBuf, ptr::NonNull, rc::Rc, time::Instant};
+use std::{
+    cell::RefCell,
+    ffi::c_void,
+    path::PathBuf,
+    ptr::NonNull,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use smithay_client_toolkit::reexports::protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1;
-use smithay_client_toolkit::reexports::calloop::{LoopHandle, RegistrationToken, timer::{TimeoutAction, Timer}};
-
-use genoma_render::{Renderer, SurfaceId};
-use genoma_scene::Scene;
-use genoma_scene::NodeId;
-use genoma_script::{Input, SurfaceSpec};
+use genoma_render::{Fonts, Renderer, SurfaceId};
+use genoma_scene::{NodeId, Scene};
+use genoma_script::{Input, SurfaceSpec, Target};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
@@ -18,18 +22,25 @@ use smithay_client_toolkit::{
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
     output::{OutputHandler, OutputState},
     reexports::{
+        calloop::{
+            LoopHandle, RegistrationToken,
+            timer::{TimeoutAction, Timer},
+        },
         client::{
             Connection, EventQueue, Proxy, QueueHandle,
-            globals::{GlobalList, registry_queue_init},
+            globals::registry_queue_init,
             protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
         },
-        protocols::wp::{
-            fractional_scale::v1::client::{
-                wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
-                wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+        protocols::{
+            ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+            wp::{
+                fractional_scale::v1::client::{
+                    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+                    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+                },
+                linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
+                viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
             },
-            linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
-            viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -37,7 +48,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{PointerEvent, PointerHandler},
+        pointer::{AxisScroll, PointerEvent, PointerHandler},
     },
     shell::{
         WaylandSurface,
@@ -48,52 +59,17 @@ use smithay_client_toolkit::{
     },
 };
 
-const SURFACE: SurfaceId = 1;
-
-pub struct App {
-    conn: Connection,
-    qh: QueueHandle<App>,
-    globals: GlobalList,
-    registry: RegistryState,
-    outputs: OutputState,
-    seats: SeatState,
-    dmabuf: DmabufState,
-    compositor: CompositorState,
-    layer_shell: LayerShell,
-    viewporter: Option<WpViewporter>,
-    fractional: Option<WpFractionalScaleManagerV1>,
-    main_device: Option<u64>,
-    feedback_done: bool,
-    effects: BackgroundEffectState,
-    effect: Option<ExtBackgroundEffectSurfaceV1>,
-    /// The blur shapes last sent, so the region is set only when they move.
-    blurred: Vec<[i32; 5]>,
-    /// The input rectangles last sent, for the same reason; `None` until the
-    /// first is sent, because Wayland's default is the whole surface.
-    inputs: Option<Vec<[i32; 4]>>,
-    /// Where pointer input goes: the script's dispatcher.
-    input: Option<Box<dyn FnMut(NodeId, Input)>>,
-    hovered: Option<NodeId>,
-    pressed: Option<NodeId>,
-    /// The touchpad's recent movement: when, and how far, for the fling.
-    strokes: Vec<(Instant, f64, f64)>,
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-    /// The surface covers its output: a cell is open, or closing.
-    tall: bool,
-    /// The output the surface is on, logical size.
-    output_size: Option<(u32, u32)>,
-
-    renderer: Option<Renderer>,
-    scene: Option<Rc<RefCell<Scene>>>,
-    layer: Option<LayerSurface>,
+/// One layer surface and everything about it that is its own.
+struct Surface {
+    id: SurfaceId,
+    /// The output it was made for, by name; `None` for the compositor's
+    /// choice.
+    output: Option<String>,
+    scene: Rc<RefCell<Scene>>,
+    layer: LayerSurface,
     viewport: Option<WpViewport>,
+    effect: Option<ExtBackgroundEffectSurfaceV1>,
     target_made: bool,
-    pointer: Option<wl_pointer::WlPointer>,
-    spec: Option<SurfaceSpec>,
-    handle: Option<LoopHandle<'static, App>>,
-    /// The timer that wakes the surface for the next beat, if one is set.
-    wake: Option<RegistrationToken>,
-
     /// The surface's size in logical units, as last configured.
     logical: (u32, u32),
     /// What the content asks for; differs from `logical` until a configure.
@@ -103,6 +79,52 @@ pub struct App {
     dirty: bool,
     frame_pending: bool,
     frames: u64,
+    /// The blur shapes and input rectangles last sent, so each region is set
+    /// only when it changes; the inputs `None` until the first is sent,
+    /// because Wayland's default is the whole surface.
+    blurred: Vec<[i32; 5]>,
+    inputs: Option<Vec<[i32; 4]>>,
+    hovered: Option<NodeId>,
+    pressed: Option<NodeId>,
+    /// The touchpad's recent movement: when, and how far, for the fling.
+    strokes: Vec<(Instant, f64, f64)>,
+    /// The surface covers its output: a cell is open, or closing.
+    tall: bool,
+    /// The output's logical size.
+    output_size: Option<(u32, u32)>,
+    /// The timer that wakes the surface for the next beat, if one is set.
+    wake: Option<RegistrationToken>,
+}
+
+pub struct App {
+    conn: Connection,
+    qh: QueueHandle<App>,
+    registry: RegistryState,
+    outputs: OutputState,
+    seats: SeatState,
+    dmabuf: DmabufState,
+    effects: BackgroundEffectState,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
+    viewporter: Option<WpViewporter>,
+    fractional: Option<WpFractionalScaleManagerV1>,
+    main_device: Option<u64>,
+    feedback_done: bool,
+
+    renderer: Option<Renderer>,
+    fonts: Option<Fonts>,
+    spec: Option<SurfaceSpec>,
+    surfaces: Vec<Surface>,
+    next_id: SurfaceId,
+    handle: Option<LoopHandle<'static, App>>,
+    pointer: Option<wl_pointer::WlPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// Where pointer and keyboard input goes: the script's dispatcher, by
+    /// the index of the surface's tree.
+    input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
+    /// The outputs changed under an interface that spans them all: its
+    /// trees are to be mounted again.
+    outputs_changed: bool,
     started: Instant,
 }
 
@@ -111,51 +133,30 @@ impl App {
         let conn = Connection::connect_to_env().expect("no Wayland compositor");
         let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("registry");
         let qh = queue.handle();
-        let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor");
-        let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr-layer-shell");
-        let viewporter = globals.bind(&qh, 1..=1, Ignore).ok();
-        let fractional = globals.bind(&qh, 1..=1, Ignore).ok();
         let mut app = App {
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &qh),
             seats: SeatState::new(&globals, &qh),
             dmabuf: DmabufState::new(&globals, &qh),
             effects: BackgroundEffectState::new(&globals, &qh),
-            effect: None,
-            blurred: Vec::new(),
-            inputs: None,
-            input: None,
-            hovered: None,
-            pressed: None,
-            strokes: Vec::new(),
-            keyboard: None,
-            tall: false,
-            output_size: None,
-            compositor,
-            layer_shell,
-            viewporter,
-            fractional,
+            compositor: CompositorState::bind(&globals, &qh).expect("wl_compositor"),
+            layer_shell: LayerShell::bind(&globals, &qh).expect("wlr-layer-shell"),
+            viewporter: globals.bind(&qh, 1..=1, Ignore).ok(),
+            fractional: globals.bind(&qh, 1..=1, Ignore).ok(),
             conn: conn.clone(),
             qh: qh.clone(),
-            globals,
             main_device: None,
             feedback_done: false,
             renderer: None,
-            scene: None,
-            layer: None,
-            viewport: None,
-            target_made: false,
-            pointer: None,
+            fonts: None,
             spec: None,
+            surfaces: Vec::new(),
+            next_id: 1,
             handle: None,
-            wake: None,
-            logical: (1, 1),
-            wanted: (1, 1),
-            scale: 1.0,
-            configured: false,
-            dirty: false,
-            frame_pending: false,
-            frames: 0,
+            pointer: None,
+            keyboard: None,
+            input: None,
+            outputs_changed: false,
             started: Instant::now(),
         };
         // The compositor's main device, before any GPU is opened: rendering
@@ -171,19 +172,7 @@ impl App {
                 queue.roundtrip(&mut app).expect("roundtrip");
             }
         }
-        let _ = &app.globals;
         (app, queue)
-    }
-
-    /// Where pointer input is delivered.
-    pub fn on_input(&mut self, f: impl FnMut(NodeId, Input) + 'static) {
-        self.input = Some(Box::new(f));
-    }
-
-    fn deliver(&mut self, node: NodeId, input: Input) {
-        if let Some(f) = self.input.as_mut() {
-            f(node, input);
-        }
     }
 
     pub fn connection(&self) -> Connection {
@@ -194,48 +183,120 @@ impl App {
         self.main_device.and_then(pci_bus_id)
     }
 
-    pub fn open(
-        &mut self,
-        renderer: Renderer,
-        scene: Rc<RefCell<Scene>>,
-        spec: SurfaceSpec,
-        qh: &QueueHandle<App>,
-        handle: LoopHandle<'static, App>,
-    ) {
-        self.handle = Some(handle);
-        self.spec = Some(spec.clone());
-        self.wanted = self.measure(&scene);
-        self.renderer = Some(renderer);
-        self.scene = Some(scene);
+    /// Where input is delivered: (the surface's tree index, node, input).
+    pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) + 'static) {
+        self.input = Some(Box::new(f));
+    }
 
-        let surface = self.compositor.create_surface(qh);
-        if let Some(fractional) = &self.fractional {
-            fractional.get_fractional_scale(&surface, qh, ScaleData);
+    pub fn start(&mut self, renderer: Renderer, fonts: Fonts, handle: LoopHandle<'static, App>) {
+        self.renderer = Some(renderer);
+        self.fonts = Some(fonts);
+        self.handle = Some(handle);
+    }
+
+    /// The outputs the interface asks for, by name; `[None]` for one surface
+    /// where the compositor puts it.
+    fn wanted_outputs(&self, spec: &SurfaceSpec) -> Vec<Option<String>> {
+        let names: Vec<String> =
+            self.outputs.outputs().filter_map(|o| self.outputs.info(&o).and_then(|i| i.name)).collect();
+        if spec.all_outputs {
+            return names.into_iter().map(Some).collect();
         }
-        self.viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&surface, qh, Ignore));
-        self.effect = self.effects.get_background_effect(&surface, qh).ok();
-        if self.effect.is_none() {
+        if let Some(list) = &spec.outputs {
+            return list.iter().filter(|n| names.contains(n)).cloned().map(Some).collect();
+        }
+        // GENOMA_OUTPUT overrides the interface's output, for testing.
+        vec![std::env::var("GENOMA_OUTPUT").ok().or(spec.output.clone())]
+    }
+
+    /// Makes and removes surfaces so there is one per output the description
+    /// asks for, and places them all. Returns the targets to mount, in the
+    /// surfaces' order.
+    pub fn apply(&mut self, spec: SurfaceSpec) -> Vec<Target> {
+        let wanted = self.wanted_outputs(&spec);
+        let renderer_ids: Vec<SurfaceId> = self
+            .surfaces
+            .iter()
+            .filter(|s| !wanted.contains(&s.output))
+            .map(|s| s.id)
+            .collect();
+        if let Some(renderer) = &self.renderer {
+            for id in &renderer_ids {
+                renderer.destroy_target(*id);
+            }
+        }
+        self.surfaces.retain(|s| wanted.contains(&s.output));
+        if let Some(old) = &self.spec {
+            if old.layer != spec.layer {
+                log::warn!("a new layer takes effect at the next start");
+            }
+        }
+        self.spec = Some(spec.clone());
+        for output in &wanted {
+            if !self.surfaces.iter().any(|s| &s.output == output) {
+                self.make_surface(output.clone(), &spec);
+            }
+        }
+        for i in 0..self.surfaces.len() {
+            self.place(i);
+        }
+        self.surfaces.iter().map(|s| (s.output.clone(), s.scene.clone())).collect()
+    }
+
+    fn make_surface(&mut self, output_name: Option<String>, spec: &SurfaceSpec) {
+        let fonts = self.fonts.clone().expect("started");
+        let qh = self.qh.clone();
+        let id = self.next_id;
+        self.next_id += 1;
+        let wl = self.compositor.create_surface(&qh);
+        if let Some(fractional) = &self.fractional {
+            fractional.get_fractional_scale(&wl, &qh, ScaleData(id));
+        }
+        let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&wl, &qh, Ignore));
+        let effect = self.effects.get_background_effect(&wl, &qh).ok();
+        if effect.is_none() {
             log::warn!("the compositor offers no ext-background-effect: no blur");
         }
-
-        // GENOMA_OUTPUT overrides the interface's output, for testing.
-        let output_name = std::env::var("GENOMA_OUTPUT").ok().or(spec.output.clone());
-        let output = output_name.and_then(|name| {
-            self.outputs.outputs().find(|o| {
-                self.outputs.info(o).and_then(|info| info.name).as_deref() == Some(name.as_str())
-            })
+        let output = output_name.as_ref().and_then(|name| {
+            self.outputs.outputs().find(|o| self.outputs.info(o).and_then(|i| i.name).as_deref() == Some(name.as_str()))
         });
+        let output_size = output
+            .as_ref()
+            .and_then(|o| self.outputs.info(o))
+            .and_then(|i| i.logical_size)
+            .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
         let layer = match spec.layer.as_str() {
             "background" => Layer::Background,
             "bottom" => Layer::Bottom,
             "overlay" => Layer::Overlay,
             _ => Layer::Top,
         };
-        let layer =
-            self.layer_shell.create_layer_surface(qh, surface, layer, Some("genoma"), output.as_ref());
+        let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some("genoma"), output.as_ref());
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        self.layer = Some(layer);
-        self.place(&spec);
+        self.surfaces.push(Surface {
+            id,
+            output: output_name,
+            scene: Rc::new(RefCell::new(Scene::new(fonts))),
+            layer,
+            viewport,
+            effect,
+            target_made: false,
+            logical: (1, 1),
+            wanted: (1, 1),
+            scale: 1.0,
+            configured: false,
+            dirty: false,
+            frame_pending: false,
+            frames: 0,
+            blurred: Vec::new(),
+            inputs: None,
+            hovered: None,
+            pressed: None,
+            strokes: Vec::new(),
+            tall: false,
+            output_size,
+            wake: None,
+        });
     }
 
     /// A surface anchored to both left and right spans its edge, as a
@@ -249,24 +310,28 @@ impl App {
 
     /// The size to ask the compositor for: the content's, with 0 for a
     /// spanned width, which the compositor fills.
-    fn measure(&mut self, scene: &Rc<RefCell<Scene>>) -> (u32, u32) {
+    fn measure(&mut self, i: usize) -> (u32, u32) {
         let spans = self.spans();
-        let width = (spans && self.configured).then_some(self.logical.0 as f32);
-        let size = scene.borrow_mut().layout(width, None);
+        let s = &mut self.surfaces[i];
+        let width = (spans && s.configured).then_some(s.logical.0 as f32);
+        let size = s.scene.borrow_mut().layout(width, None);
         let w = if spans { 0 } else { size.0.ceil().max(1.0) as u32 };
         // An open cell, or one still closing, needs the whole output: its
         // expansion is drawn there and a press anywhere else must reach it.
-        let catching = scene.borrow().catcher().is_some();
-        self.tall = catching || (self.tall && scene.borrow().transitioning());
-        let h = match (self.tall, self.output_size) {
+        let catching = s.scene.borrow().catcher().is_some();
+        s.tall = catching || (s.tall && s.scene.borrow().transitioning());
+        let h = match (s.tall, s.output_size) {
             (true, Some((_, oh))) => oh,
             _ => size.1.ceil().max(1.0) as u32,
         };
         (w, h)
     }
 
-    fn place(&mut self, spec: &SurfaceSpec) {
-        let Some(layer) = &self.layer else { return };
+    fn place(&mut self, i: usize) {
+        let wanted = self.measure(i);
+        let Some(spec) = self.spec.clone() else { return };
+        let s = &mut self.surfaces[i];
+        s.wanted = wanted;
         let mut anchor = Anchor::empty();
         for edge in &spec.anchor {
             anchor |= match edge.as_str() {
@@ -280,161 +345,185 @@ impl App {
                 }
             };
         }
-        layer.set_anchor(anchor);
+        s.layer.set_anchor(anchor);
         let [top, right, bottom, left] = spec.margin;
-        layer.set_margin(top, right, bottom, left);
-        layer.set_size(self.wanted.0, self.wanted.1);
-        layer.set_exclusive_zone(if spec.reserve { self.wanted.1 as i32 } else { 0 });
-        layer.commit();
-    }
-
-    /// A reload's surface description. The output and the layer are fixed
-    /// when the surface is made; the rest moves in place.
-    pub fn respec(&mut self, spec: SurfaceSpec) {
-        if let Some(old) = &self.spec {
-            if old.output != spec.output || old.layer != spec.layer {
-                log::warn!("a new output or layer takes effect at the next start");
-            }
+        s.layer.set_margin(top, right, bottom, left);
+        s.layer.set_size(wanted.0, wanted.1);
+        // The reserved strip stays the membrane's, however tall the surface
+        // grows while a cell is open.
+        if !s.tall {
+            s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
         }
-        self.spec = Some(spec.clone());
-        self.place(&spec);
-        self.dirty = true;
+        s.layer.set_keyboard_interactivity(if s.scene.borrow().catcher().is_some() {
+            KeyboardInteractivity::Exclusive
+        } else {
+            KeyboardInteractivity::None
+        });
+        s.layer.commit();
+        s.dirty = true;
     }
 
-    /// After every batch of events: if the scene changed, lay it out and ask
-    /// for a frame. This is the only place a frame is asked for, apart from a
-    /// transition in flight.
+    /// Whether the outputs changed under an interface that spans them all,
+    /// once: its trees are then evaluated and mounted again.
+    pub fn take_outputs_changed(&mut self) -> bool {
+        std::mem::replace(&mut self.outputs_changed, false)
+    }
+
+    /// After every batch of events: each surface whose scene changed is laid
+    /// out and asks for a frame. This is the only place a frame is asked for,
+    /// apart from motion in flight.
     pub fn after_events(&mut self) {
-        let Some(scene) = self.scene.clone() else { return };
-        let changed = scene.borrow_mut().take_dirty();
-        if !(changed || self.dirty) || !self.configured {
-            return;
-        }
-        let wanted = self.measure(&scene);
-        if wanted != self.wanted {
-            // A new size waits for the compositor's configure, which draws.
-            self.wanted = wanted;
-            if let (Some(layer), Some(spec)) = (&self.layer, &self.spec) {
-                layer.set_size(wanted.0, wanted.1);
-                // The reserved strip stays the membrane's, however tall the
-                // surface grows while a cell is open.
-                if !self.tall {
-                    layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
-                }
-                layer.set_keyboard_interactivity(if scene.borrow().catcher().is_some() {
-                    KeyboardInteractivity::Exclusive
-                } else {
-                    KeyboardInteractivity::None
-                });
-                layer.commit();
+        for i in 0..self.surfaces.len() {
+            let changed = self.surfaces[i].scene.borrow_mut().take_dirty();
+            let s = &self.surfaces[i];
+            if !(changed || s.dirty) || !s.configured {
+                continue;
             }
-            return;
-        }
-        self.dirty = true;
-        if !self.frame_pending {
-            self.draw();
+            let wanted = self.measure(i);
+            if wanted != self.surfaces[i].wanted {
+                // A new size waits for the compositor's configure, which draws.
+                self.place(i);
+                continue;
+            }
+            self.surfaces[i].dirty = true;
+            if !self.surfaces[i].frame_pending {
+                self.draw(i);
+            }
         }
     }
 
-    fn draw(&mut self) {
-        let (Some(layer), Some(renderer), Some(scene)) = (&self.layer, &self.renderer, &self.scene) else {
-            return;
-        };
+    fn draw(&mut self, i: usize) {
+        let spans = self.spans();
+        let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
+        let (Some(renderer), Some(handle)) = (&self.renderer, self.handle.clone()) else { return };
+        let compositor = &self.compositor;
+        let qh = &self.qh;
+        let s = &mut self.surfaces[i];
         let started = Instant::now();
-        let surface = layer.wl_surface();
-        if !self.target_made {
-            let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
+        let surface = s.layer.wl_surface().clone();
+        if !s.target_made {
             let wl = NonNull::new(surface.id().as_ptr() as *mut c_void).unwrap();
             // Safety: the display lives as long as the connection, the surface
-            // as long as the layer surface; both outlive the target.
-            unsafe { renderer.create_target(SURFACE, display, wl) };
-            self.target_made = true;
+            // as long as its layer surface, and the target is destroyed
+            // before the surface is.
+            unsafe { renderer.create_target(s.id, display, wl) };
+            s.target_made = true;
         }
 
-        let width = (self.logical.0 as f64 * self.scale).round() as u32;
-        let height = (self.logical.1 as f64 * self.scale).round() as u32;
-        match &self.viewport {
-            Some(viewport) => viewport.set_destination(self.logical.0 as i32, self.logical.1 as i32),
-            None => surface.set_buffer_scale(self.scale.ceil() as i32),
+        let width = (s.logical.0 as f64 * s.scale).round() as u32;
+        let height = (s.logical.1 as f64 * s.scale).round() as u32;
+        match &s.viewport {
+            Some(viewport) => viewport.set_destination(s.logical.0 as i32, s.logical.1 as i32),
+            None => surface.set_buffer_scale(s.scale.ceil() as i32),
         }
-        let motion = scene.borrow_mut().advance(Instant::now(), self.scale as f32);
-        let span = self.spans().then_some(self.logical.0 as f32);
-        scene.borrow_mut().layout(span, None);
-        let list = scene.borrow_mut().draw_list(self.scale as f32);
+        let motion = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
+        s.scene.borrow_mut().layout(spans.then_some(s.logical.0 as f32), None);
+        let list = s.scene.borrow_mut().draw_list(s.scale as f32);
         let animating = motion.moving;
+
         // The blur region follows the shapes, and is part of this commit.
-        let shapes: Vec<[i32; 5]> = scene
+        let shapes: Vec<[i32; 5]> = s
+            .scene
             .borrow()
             .blur_shapes()
             .iter()
-            .map(|s| [s[0].round() as i32, s[1].round() as i32, s[2].round() as i32, s[3].round() as i32, s[4].round() as i32])
+            .map(|b| [b[0].round() as i32, b[1].round() as i32, b[2].round() as i32, b[3].round() as i32, b[4].round() as i32])
             .collect();
-        if shapes != self.blurred {
-            if let (Some(effect), Ok(region)) = (&self.effect, Region::new(&self.compositor)) {
+        if shapes != s.blurred {
+            if let (Some(effect), Ok(region)) = (&s.effect, Region::new(compositor)) {
                 for &[x, y, w, h, r] in &shapes {
                     rounded(&region, x, y, w, h, r);
                 }
                 effect.set_blur_region(Some(region.wl_region()));
             }
-            self.blurred = shapes;
+            s.blurred = shapes;
         }
-        // The input region: only what takes the pointer. The rest of the
-        // surface lets it through to the windows below.
-        let inputs: Vec<[i32; 4]> = if scene.borrow().catcher().is_some() {
-            vec![[0, 0, self.logical.0 as i32, self.logical.1 as i32]]
+        // The input region: only what takes the pointer, or the whole surface
+        // while a cell is catching. The rest lets the pointer through.
+        let inputs: Vec<[i32; 4]> = if s.scene.borrow().catcher().is_some() {
+            vec![[0, 0, s.logical.0 as i32, s.logical.1 as i32]]
         } else {
-            scene
+            s.scene
                 .borrow()
                 .input_rects()
                 .iter()
                 .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
                 .collect()
         };
-        if self.inputs.as_ref() != Some(&inputs) {
-            if let Ok(region) = Region::new(&self.compositor) {
+        if s.inputs.as_ref() != Some(&inputs) {
+            if let Ok(region) = Region::new(compositor) {
                 for &[x, y, w, h] in &inputs {
                     region.add(x, y, w, h);
                 }
                 surface.set_input_region(Some(region.wl_region()));
             }
-            self.inputs = Some(inputs);
+            s.inputs = Some(inputs);
         }
         // The scene's own record of this change is consumed by this frame.
-        scene.borrow_mut().take_dirty();
+        s.scene.borrow_mut().take_dirty();
 
         // Asked for with this frame's commit, so the next change waits for
         // the compositor instead of racing it.
-        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-        self.frame_pending = true;
-        renderer.draw(SURFACE, width, height, list);
+        surface.frame(qh, FrameCallbackData(surface.clone()));
+        s.frame_pending = true;
+        renderer.draw(s.id, width, height, list);
         log::trace!("build {} us", started.elapsed().as_micros());
-        self.dirty = animating;
-        self.frames += 1;
+        s.dirty = animating;
+        s.frames += 1;
+        log::debug!(
+            "surface {} frame {} at {:.3} s: {}×{} px, scale {}{}",
+            s.id,
+            s.frames,
+            self.started.elapsed().as_secs_f64(),
+            width,
+            height,
+            s.scale,
+            if animating { ", animating" } else { "" }
+        );
         // Between beats nothing moves: no frames, only a timer for the next.
-        if let (false, Some(wait), Some(handle)) = (animating, motion.wake, self.handle.clone()) {
-            if let Some(old) = self.wake.take() {
+        if let (false, Some(wait)) = (animating, motion.wake) {
+            if let Some(old) = s.wake.take() {
                 handle.remove(old);
             }
-            self.wake = handle
-                .insert_source(Timer::from_duration(wait), |_, _, app| {
-                    app.wake = None;
-                    app.dirty = true;
-                    if !app.frame_pending {
-                        app.draw();
+            let id = s.id;
+            s.wake = handle
+                .insert_source(Timer::from_duration(wait), move |_, _, app| {
+                    if let Some(i) = app.surfaces.iter().position(|s| s.id == id) {
+                        app.surfaces[i].wake = None;
+                        app.surfaces[i].dirty = true;
+                        if !app.surfaces[i].frame_pending {
+                            app.draw(i);
+                        }
                     }
                     TimeoutAction::Drop
                 })
                 .ok();
         }
-        log::debug!(
-            "frame {} at {:.3} s: {}×{} px, scale {}{}",
-            self.frames,
-            self.started.elapsed().as_secs_f64(),
-            width,
-            height,
-            self.scale,
-            if animating { ", animating" } else { "" }
-        );
+    }
+
+    fn by_wl(&self, wl: &wl_surface::WlSurface) -> Option<usize> {
+        self.surfaces.iter().position(|s| s.layer.wl_surface() == wl)
+    }
+
+    fn deliver(&mut self, i: usize, node: NodeId, input: Input) {
+        if let Some(f) = self.input.as_mut() {
+            f(i, node, input);
+        }
+    }
+
+    fn key(&mut self, event: &KeyEvent) {
+        // The keys go to the cell that is catching, on whichever output.
+        let Some((i, catcher)) = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .find_map(|(i, s)| s.scene.borrow().catcher().map(|c| (i, c)))
+        else {
+            return;
+        };
+        let name = event.keysym.name().unwrap_or_default();
+        let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
+        self.deliver(i, catcher, Input::Key(name));
     }
 }
 
@@ -469,7 +558,8 @@ impl<I: Proxy> Dispatch2<I, App> for Ignore {
     fn event(&self, _: &mut App, _: &I, _: I::Event, _: &Connection, _: &QueueHandle<App>) {}
 }
 
-struct ScaleData;
+/// A surface's fractional scale object, carrying the surface's id.
+struct ScaleData(SurfaceId);
 
 impl Dispatch2<WpFractionalScaleV1, App> for ScaleData {
     fn event(
@@ -482,55 +572,73 @@ impl Dispatch2<WpFractionalScaleV1, App> for ScaleData {
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             let scale = scale as f64 / 120.0;
-            if scale != app.scale {
-                app.scale = scale;
-                app.dirty = true;
+            if let Some(s) = app.surfaces.iter_mut().find(|s| s.id == self.0) {
+                if scale != s.scale {
+                    s.scale = scale;
+                    s.dirty = true;
+                }
             }
         }
     }
 }
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, factor: i32) {
+    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, factor: i32) {
         // Only without fractional scale, which already said it more exactly.
-        if self.viewport.is_none() && factor as f64 != self.scale {
-            self.scale = factor as f64;
-            self.dirty = true;
+        if let Some(i) = self.by_wl(wl) {
+            let s = &mut self.surfaces[i];
+            if s.viewport.is_none() && factor as f64 != s.scale {
+                s.scale = factor as f64;
+                s.dirty = true;
+            }
         }
     }
 
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.frame_pending = false;
-        if self.dirty {
-            self.draw();
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, _: u32) {
+        if let Some(i) = self.by_wl(wl) {
+            self.surfaces[i].frame_pending = false;
+            if self.surfaces[i].dirty {
+                self.draw(i);
+            }
         }
     }
 
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
-        self.output_size = self
+    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
+        let size = self
             .outputs
             .info(output)
             .and_then(|i| i.logical_size)
             .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
+        if let Some(i) = self.by_wl(wl) {
+            self.surfaces[i].output_size = size;
+        }
     }
 
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        std::process::exit(0);
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        // The compositor took the surface away (its output went): drop it.
+        if let Some(i) = self.by_wl(layer.wl_surface()) {
+            let s = self.surfaces.remove(i);
+            if let Some(renderer) = &self.renderer {
+                renderer.destroy_target(s.id);
+            }
+        }
     }
 
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
+        let Some(i) = self.by_wl(layer.wl_surface()) else { return };
+        let s = &mut self.surfaces[i];
         let (w, h) = configure.new_size;
-        self.logical = if w > 0 && h > 0 { (w, h) } else { self.wanted };
-        self.configured = true;
+        s.logical = if w > 0 && h > 0 { (w, h) } else { s.wanted };
+        s.configured = true;
         // A configure must be answered with a buffer, frame callback or not.
-        self.frame_pending = false;
-        self.draw();
+        s.frame_pending = false;
+        self.draw(i);
     }
 }
 
@@ -561,16 +669,6 @@ impl SeatHandler for App {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 
-impl App {
-    fn key(&mut self, event: &KeyEvent) {
-        let Some(scene) = self.scene.clone() else { return };
-        let Some(catcher) = scene.borrow().catcher() else { return };
-        let name = event.keysym.name().unwrap_or_default();
-        let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
-        self.deliver(catcher, Input::Key(name));
-    }
-}
-
 impl KeyboardHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
 
@@ -594,79 +692,82 @@ impl PointerHandler for App {
         use smithay_client_toolkit::seat::pointer::PointerEventKind as K;
         for event in events {
             log::trace!("pointer {:?} at {:?}", event.kind, event.position);
-            let Some(scene) = self.scene.clone() else { return };
+            let Some(i) = self.by_wl(&event.surface) else { continue };
+            let scene = self.surfaces[i].scene.clone();
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             let hit = match event.kind {
                 K::Leave { .. } => None,
                 _ => scene.borrow().hit_test(x, y),
             };
-            if hit != self.hovered {
-                if let Some(old) = self.hovered.take() {
-                    self.deliver(old, Input::Hover(false));
+            if hit != self.surfaces[i].hovered {
+                if let Some(old) = self.surfaces[i].hovered.take() {
+                    self.deliver(i, old, Input::Hover(false));
                 }
                 if let Some(new) = hit {
-                    self.deliver(new, Input::Hover(true));
+                    self.deliver(i, new, Input::Hover(true));
                 }
-                self.hovered = hit;
+                self.surfaces[i].hovered = hit;
             }
             match event.kind {
                 K::Press { button, .. } => {
                     let catcher = scene.borrow().catcher();
                     if let Some(c) = catcher {
                         if hit.is_none_or(|h| !scene.borrow().within(h, c)) {
-                            self.deliver(c, Input::Outside);
+                            self.deliver(i, c, Input::Outside);
                         }
                     }
-                    self.pressed = hit;
+                    self.surfaces[i].pressed = hit;
                     if let Some(node) = hit {
-                        self.deliver(node, Input::Press(button));
+                        self.deliver(i, node, Input::Press(button));
                     }
                 }
                 K::Release { button, .. } => {
                     if let Some(node) = hit {
-                        self.deliver(node, Input::Release(button));
-                        if self.pressed == Some(node) {
-                            self.deliver(node, Input::Click(button));
+                        self.deliver(i, node, Input::Release(button));
+                        if self.surfaces[i].pressed == Some(node) {
+                            self.deliver(i, node, Input::Click(button));
                         }
                     }
-                    self.pressed = None;
+                    self.surfaces[i].pressed = None;
                 }
                 K::Axis { horizontal, vertical, source, .. } => {
                     let Some(node) = hit else { continue };
                     // A touchpad stroke is followed, and remembered: when the
                     // fingers lift while moving, the content carries on at
                     // their speed over Bioma's Timing.fling, 80 ms.
-                    let finger = source == Some(wl_pointer::AxisSource::Finger);
-                    if finger {
+                    if source == Some(wl_pointer::AxisSource::Finger) {
                         let now = Instant::now();
                         if horizontal.stop || vertical.stop {
-                            let window = std::time::Duration::from_millis(80);
-                            let recent: Vec<(Instant, f64, f64)> =
-                                self.strokes.iter().filter(|s| now.duration_since(s.0) <= window).copied().collect();
+                            let window = Duration::from_millis(80);
+                            let recent: Vec<(Instant, f64, f64)> = self.surfaces[i]
+                                .strokes
+                                .iter()
+                                .filter(|s| now.duration_since(s.0) <= window)
+                                .copied()
+                                .collect();
                             let (dx, dy) = recent.iter().fold((0.0, 0.0), |a, s| (a.0 + s.1, a.1 + s.2));
-                            self.strokes.clear();
+                            self.surfaces[i].strokes.clear();
                             // Fingers that stopped before lifting leave the
                             // content where it is.
                             if !recent.is_empty() && (dx != 0.0 || dy != 0.0) {
                                 let secs = window.as_secs_f64();
-                                self.deliver(node, Input::Fling(dx / secs, dy / secs));
+                                self.deliver(i, node, Input::Fling(dx / secs, dy / secs));
                             }
                             continue;
                         }
-                        self.strokes.push((now, horizontal.absolute, vertical.absolute));
-                        self.strokes.retain(|s| now.duration_since(s.0) <= std::time::Duration::from_millis(200));
+                        let strokes = &mut self.surfaces[i].strokes;
+                        strokes.push((now, horizontal.absolute, vertical.absolute));
+                        strokes.retain(|s| now.duration_since(s.0) <= Duration::from_millis(200));
                     }
                     // A wheel speaks in steps of 120; a touchpad in logical
                     // distance, and only when it speaks at all.
-                    let step = |a: &smithay_client_toolkit::seat::pointer::AxisScroll| {
-                        if a.value120 != 0 { a.value120 as f64 / 120.0 } else { a.absolute }
-                    };
+                    let step = |a: &AxisScroll| if a.value120 != 0 { a.value120 as f64 / 120.0 } else { a.absolute };
                     let (dx, dy) = (step(&horizontal), step(&vertical));
                     if dx != 0.0 || dy != 0.0 {
-                        self.deliver(node, Input::Wheel(dx, dy));
+                        self.deliver(i, node, Input::Wheel(dx, dy));
                     }
                 }
-                K::Leave { .. } => self.pressed = None,
+                K::Leave { .. } => self.surfaces[i].pressed = None,
                 _ => {}
             }
         }
@@ -678,11 +779,19 @@ impl OutputHandler for App {
         &mut self.outputs
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        if self.spec.as_ref().is_some_and(|s| s.all_outputs || s.outputs.is_some()) {
+            self.outputs_changed = true;
+        }
+    }
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        if self.spec.as_ref().is_some_and(|s| s.all_outputs || s.outputs.is_some()) {
+            self.outputs_changed = true;
+        }
+    }
 }
 
 impl DmabufHandler for App {

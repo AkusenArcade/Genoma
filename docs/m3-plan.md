@@ -115,7 +115,17 @@ yet.
 
 ### 7. Multi-output
 
-- [ ] One surface per output for a spanning interface (`outputs = "all"`),
+*Done 2026-10-28; hotplug coded, not yet seen.* `g.surface { outputs = "all"
+| { names }, function(output) … end }` gives one surface per output, each
+with its own scene, scale, frames, regions and pointer state. Evaluation and
+mounting are now two steps: the runtime fits the surfaces to the description,
+then the script mounts one tree per surface under one scope, so a reload
+replaces them together. Handlers are keyed by (tree, node). Checked with a
+clock capsule on DP-1 and HDMI-A-1 at once, one frame a second each. An
+output added or removed refits the surfaces through the same path. That
+cannot be exercised here without unplugging a monitor.
+
+- [x] One surface per output for a spanning interface (`outputs = "all"`),
       each with its own scale. An output added later gets its surface; a
       removed one loses it.
 

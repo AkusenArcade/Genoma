@@ -24,7 +24,6 @@ use std::{
 
 use genoma_core::reactive::Effect;
 use genoma_render::{Renderer, cosmic_text::FontSystem};
-use genoma_scene::Scene;
 use genoma_script::{Script, Services};
 use genoma_services::{clock::Clock, niri::Niri, vitals::{self, Vitals}};
 use notify::Watcher;
@@ -158,6 +157,14 @@ fn probe() {
     event_loop.run(None, &mut (), |_| {}).expect("event loop");
 }
 
+/// Evaluates the interface, fits the surfaces to what it asks for, and mounts
+/// a tree on each. The last trees stay if any step fails.
+fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> {
+    let spec = script.borrow_mut().evaluate()?;
+    let targets = app.apply(spec);
+    script.borrow_mut().mount(&targets)
+}
+
 fn run(dir: PathBuf) {
     let dir = dir.canonicalize().unwrap_or_else(|e| fail(&format!("{}: {e}", dir.display())));
     let (mut app, queue) = wayland::App::connect();
@@ -170,19 +177,18 @@ fn run(dir: PathBuf) {
         log::warn!("drawing on a different GPU from the compositor's");
     }
 
-    let (services, niri_stream) = services();
-    let scene = Rc::new(RefCell::new(Scene::new(fonts)));
-    let mut script = Script::new(&dir, scene.clone(), services.clone());
-    let spec = script.load().unwrap_or_else(|e| fail(&e));
-    log::info!("loaded {}", dir.join("shell.luau").display());
-
     let mut event_loop: EventLoop<'static, wayland::App> = EventLoop::try_new().expect("event loop");
     let handle = event_loop.handle();
-    app.open(renderer, scene, spec, &queue.handle(), handle.clone());
+    app.start(renderer, fonts, handle.clone());
+
+    let (services, niri_stream) = services();
+    let script = Rc::new(RefCell::new(Script::new(&dir, services.clone())));
+    load(&script, &mut app).unwrap_or_else(|e| fail(&e));
+    log::info!("loaded {}", dir.join("shell.luau").display());
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
     let sources = Rc::new(RefCell::new(Sources { services, niri_stream, started: Vec::new() }));
-    sources.borrow_mut().start(|s| script.wants(s), &handle);
+    sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
 
     // Hot reload: a save in the directory, settled for a moment because an
     // editor's save is often several events.
@@ -194,27 +200,26 @@ fn run(dir: PathBuf) {
     })
     .expect("watcher");
     watcher.watch(&dir, notify::RecursiveMode::NonRecursive).expect("watch");
-    let script = Rc::new(RefCell::new(script));
     let dispatcher = script.clone();
-    app.on_input(move |node, input| dispatcher.borrow().dispatch(node, input));
+    app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();
+    let reloader = script.clone();
+    let reload_sources = sources.clone();
     handle
         .insert_source(rx, move |event, _, _| {
             if !matches!(event, ChannelEvent::Msg(())) || pending.replace(true) {
                 return;
             }
-            let (script, pending, sources, handle) = (script.clone(), pending.clone(), sources.clone(), timers.clone());
+            let (script, pending, sources, handle) =
+                (reloader.clone(), pending.clone(), reload_sources.clone(), timers.clone());
             timers
                 .insert_source(Timer::from_duration(Duration::from_millis(40)), move |_, _, app| {
                     pending.set(false);
-                    let result = script.borrow_mut().load();
-                    match result {
-                        Ok(spec) => {
+                    match load(&script, app) {
+                        Ok(()) => {
                             log::info!("reloaded");
-                            let script = script.borrow();
-                            sources.borrow_mut().start(|s| script.wants(s), &handle);
-                            app.respec(spec);
+                            sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
                         }
                         Err(e) => log::error!("reload failed, the last interface stays: {e}"),
                     }
@@ -225,7 +230,18 @@ fn run(dir: PathBuf) {
         .expect("reload channel");
 
     // No timeout: the loop sleeps until the compositor, a service's source,
-    // a scheduled beat or a saved file says something.
-    event_loop.run(None, &mut app, |app| app.after_events()).expect("event loop");
+    // a scheduled beat or a saved file says something. An output that comes
+    // or goes under an interface spanning them all mounts its trees again.
+    event_loop
+        .run(None, &mut app, |app| {
+            if app.take_outputs_changed() {
+                match load(&script, app) {
+                    Ok(()) => log::info!("outputs changed: surfaces fitted"),
+                    Err(e) => log::error!("outputs changed, reload failed: {e}"),
+                }
+            }
+            app.after_events();
+        })
+        .expect("event loop");
     drop(watcher);
 }

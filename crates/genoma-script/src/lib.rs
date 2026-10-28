@@ -57,7 +57,8 @@ impl Input {
 
 const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel", "on_fling", "on_outside", "on_key"];
 
-type Handlers = Rc<RefCell<HashMap<genoma_scene::NodeId, HashMap<&'static str, Function>>>>;
+/// Handlers by (target, node): node ids of different scenes can coincide.
+type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
 
 /// Where and how the shell's surface sits on the output.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +70,10 @@ pub struct SurfaceSpec {
     pub output: Option<String>,
     /// Keep windows out of the surface's strip (a membrane on its edge).
     pub reserve: bool,
+    /// `"all"` for one surface on every output, a list of output names, or
+    /// none for a single surface (on `output`, or the compositor's choice).
+    pub outputs: Option<Vec<String>>,
+    pub all_outputs: bool,
 }
 
 /// A `g.state` value: what a signal can hold across reloads.
@@ -206,40 +211,53 @@ impl UserData for ClockRef {
 
 pub struct Script {
     lua: Lua,
+    /// A file evaluated and not yet mounted: its Luau state and the surface
+    /// table it returned.
+    pending: Option<(Lua, Table)>,
     dir: PathBuf,
-    scene: Rc<RefCell<Scene>>,
     scope: Option<Scope>,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
     services: Services,
     wanted: Rc<RefCell<Vec<&'static str>>>,
     handlers: Handlers,
+    icon_dirs: Rc<RefCell<Vec<PathBuf>>>,
+    /// The scenes mounted last, in the order of the targets: a handler is
+    /// found by (target, node).
+    scenes: Vec<Rc<RefCell<Scene>>>,
 }
+
+/// One tree to mount: the output it is for, and the scene it goes into.
+pub type Target = (Option<String>, Rc<RefCell<Scene>>);
 
 fn err(message: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(message.into())
 }
 
 impl Script {
-    pub fn new(dir: &Path, scene: Rc<RefCell<Scene>>, services: Services) -> Script {
+    pub fn new(dir: &Path, services: Services) -> Script {
         Script {
             lua: Lua::new(),
+            pending: None,
             dir: dir.to_owned(),
-            scene,
             scope: None,
             states: Rc::default(),
             services,
             wanted: Rc::default(),
             handlers: Rc::default(),
+            icon_dirs: Rc::default(),
+            scenes: Vec::new(),
         }
     }
 
-    /// Delivers pointer input to the node hit, or to the nearest ancestor
-    /// that handles it: a wheel over a row reaches the list.
-    pub fn dispatch(&self, node: genoma_scene::NodeId, input: Input) {
+    /// Delivers pointer input to the node hit in target `at`'s tree, or to
+    /// the nearest ancestor that handles it: a wheel over a row reaches the
+    /// list.
+    pub fn dispatch(&self, target: usize, node: genoma_scene::NodeId, input: Input) {
+        let Some(scene) = self.scenes.get(target) else { return };
         let name = input.handler();
         let mut at = Some(node);
         while let Some(id) = at {
-            let handler = self.handlers.borrow().get(&id).and_then(|h| h.get(name)).cloned();
+            let handler = self.handlers.borrow().get(&(target, id)).and_then(|h| h.get(name)).cloned();
             if let Some(f) = handler {
                 let result = match &input {
                     Input::Outside => f.call::<()>(()),
@@ -258,7 +276,7 @@ impl Script {
             if matches!(input, Input::Hover(_)) {
                 return;
             }
-            at = self.scene.borrow().parent(id);
+            at = scene.borrow().parent(id);
         }
     }
 
@@ -272,9 +290,10 @@ impl Script {
         self.wanted.borrow().contains(&service)
     }
 
-    /// Evaluates `shell.luau` and mounts its tree, replacing the last one.
-    /// On an error the last tree stays as it was, and so does the scene.
-    pub fn load(&mut self) -> Result<SurfaceSpec, String> {
+    /// Evaluates `shell.luau` and returns where its surfaces go. Nothing is
+    /// mounted until [`Script::mount`]: the runtime first makes a surface for
+    /// each output the description asks for.
+    pub fn evaluate(&mut self) -> Result<SurfaceSpec, String> {
         // A fresh state for each load: modules are evaluated again and
         // nothing of the old chunks survives but the `g.state` signals.
         let lua = Lua::new();
@@ -290,35 +309,55 @@ impl Script {
             return Err("shell.luau must return g.surface { … }".into());
         }
         let spec = surface_spec(&surface).map_err(|e| e.to_string())?;
-        let content: Table = surface
-            .get(1)
-            .map_err(|_| "g.surface holds one node, its content".to_string())?;
+        self.pending = Some((lua, surface));
+        Ok(spec)
+    }
 
-        // Mount into a new scope first; only a tree that mounted replaces
-        // the old one.
-        let scene = self.scene.clone();
-        let root = scene.borrow().root();
+    /// Mounts the evaluated file's content into each target, replacing the
+    /// last trees. Content that is a function is called with each target's
+    /// output; a table is one tree for one surface. On an error the last
+    /// trees stay as they were, and so do the scenes.
+    pub fn mount(&mut self, targets: &[Target]) -> Result<(), String> {
+        let Some((lua, surface)) = self.pending.take() else { return Err("nothing evaluated".into()) };
+        let content: LuaValue = surface.get(1).map_err(|e| e.to_string())?;
+        if matches!(content, LuaValue::Table(_)) && targets.len() > 1 {
+            return Err("g.surface for several outputs holds a function of the output".into());
+        }
         let handlers: Handlers = Rc::default();
-        let (scope, result) = Scope::new(|| {
-            let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
-            // The holder takes the surface's whole span, so content that grows
-            // (a membrane's row) can reach the far edge.
-            let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
-            mount(&scene, &handlers, &content, holder).map(|_| holder)
+        let (scope, result) = Scope::new(|| -> mlua::Result<Vec<genoma_scene::NodeId>> {
+            let mut holders = Vec::new();
+            for (index, (output, scene)) in targets.iter().enumerate() {
+                let tree: Table = match &content {
+                    LuaValue::Function(f) => f.call(output.clone())?,
+                    LuaValue::Table(t) => t.clone(),
+                    _ => return Err(err("g.surface holds one node, or a function returning one")),
+                };
+                let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
+                // The holder takes the surface's whole span, so content that
+                // grows (a membrane's row) can reach the far edge.
+                let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
+                mount(scene, &handlers, index, &tree, holder)?;
+                holders.push(holder);
+            }
+            Ok(holders)
         });
         match result {
-            Ok(holder) => {
+            Ok(holders) => {
                 if let Some(old) = self.scope.take() {
                     old.dispose();
                 }
-                let mut s = scene.borrow_mut();
-                s.clear();
-                s.append(root, holder);
-                drop(s);
+                for ((_, scene), holder) in targets.iter().zip(holders) {
+                    let mut s = scene.borrow_mut();
+                    let root = s.root();
+                    s.clear();
+                    s.append(root, holder);
+                    s.set_icon_dirs(self.icon_dirs.borrow().clone());
+                }
+                self.scenes = targets.iter().map(|(_, s)| s.clone()).collect();
                 self.scope = Some(scope);
                 self.lua = lua;
                 *self.handlers.borrow_mut() = std::mem::take(&mut *handlers.borrow_mut());
-                Ok(spec)
+                Ok(())
             }
             Err(e) => {
                 scope.dispose();
@@ -365,7 +404,7 @@ impl Script {
             })?,
         )?;
         // g.icon_dir("~/…/assets/icons"): where icon names are looked up.
-        let scene = self.scene.clone();
+        let icon_dirs = self.icon_dirs.clone();
         g.set(
             "icon_dir",
             lua.create_function(move |_, dirs: mlua::Variadic<String>| {
@@ -374,7 +413,7 @@ impl Script {
                     .iter()
                     .map(|d| PathBuf::from(d.strip_prefix("~/").map_or(d.clone(), |r| format!("{home}/{r}"))))
                     .collect();
-                scene.borrow_mut().set_icon_dirs(dirs);
+                *icon_dirs.borrow_mut() = dirs;
                 Ok(())
             })?,
         )?;
@@ -491,6 +530,11 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
         layer: t.get::<Option<String>>("layer")?.unwrap_or_else(|| "top".into()),
         output: t.get("output")?,
         reserve: t.get::<Option<bool>>("reserve")?.unwrap_or(false),
+        all_outputs: matches!(t.get::<LuaValue>("outputs")?, LuaValue::String(ref s) if s.to_string_lossy() == "all"),
+        outputs: match t.get::<LuaValue>("outputs")? {
+            LuaValue::Table(list) => Some(list.sequence_values::<String>().collect::<mlua::Result<_>>()?),
+            _ => None,
+        },
     })
 }
 
@@ -565,7 +609,7 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
 }
 
 /// Creates the node `t` describes under `parent`, with its bindings.
-fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: genoma_scene::NodeId) -> mlua::Result<()> {
+fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, target: usize, t: &Table, parent: genoma_scene::NodeId) -> mlua::Result<()> {
     let kind = kind_of(t)?;
     let role = role_of(t.get("role")?)?;
     let node = scene.borrow_mut().create(kind, role);
@@ -611,7 +655,7 @@ fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: gen
             let LuaValue::Function(f) = value else {
                 return Err(err(format!("{key} wants a function")));
             };
-            handlers.borrow_mut().entry(node).or_default().insert(name, f);
+            handlers.borrow_mut().entry((target, node)).or_default().insert(name, f);
             if !matches!(name, "on_outside" | "on_key") {
                 scene.borrow_mut().set_interactive(node, true);
             }
@@ -629,7 +673,7 @@ fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: gen
     }
 
     for child in t.sequence_values::<Table>() {
-        mount(scene, handlers, &child?, node)?;
+        mount(scene, handlers, target, &child?, node)?;
     }
     Ok(())
 }
