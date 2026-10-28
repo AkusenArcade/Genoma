@@ -146,11 +146,23 @@ impl UserData for State {
             let signal = ud.borrow::<State>()?.0;
             signal.try_get().unwrap_or(StateValue::Nil).into_lua(lua)
         });
-        fields.add_field_function_set("value", |_, ud: mlua::AnyUserData, v: LuaValue| {
-            let signal = ud.borrow::<State>()?.0;
-            signal.set(StateValue::from_lua(&v));
-            Ok(())
-        });
+    }
+
+    // The setter is a metamethod, not a field setter: mlua guards a field
+    // setter as FnMut, and setting one signal runs the effects that set
+    // another through this same function, which the guard refuses.
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_function(
+            mlua::MetaMethod::NewIndex,
+            |_, (ud, key, v): (mlua::AnyUserData, String, LuaValue)| {
+                if key != "value" {
+                    return Err(mlua::Error::runtime(format!("a signal has no field '{key}'")));
+                }
+                let signal = ud.borrow::<State>()?.0;
+                signal.set(StateValue::from_lua(&v));
+                Ok(())
+            },
+        );
     }
 }
 
