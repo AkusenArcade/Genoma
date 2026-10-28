@@ -811,6 +811,12 @@ fn collect(
     } else {
         [parent[0] + layout.location.x, parent[1] + layout.location.y]
     };
+    // An offset moves the node and everything in it: a panel set below its
+    // thread carries its content with it.
+    if let Some(n) = tree.get_node_context(node) {
+        origin[0] += n.offset[0];
+        origin[1] += n.offset[1];
+    }
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
     if let Some(n) = tree.get_node_context_mut(node) {
         n.arc_radius = layout.size.width / 2.0;
@@ -834,8 +840,6 @@ fn collect(
         origin[0] += a.sin() * n.orbit_radius;
         origin[1] -= a.cos() * n.orbit_radius;
     }
-    origin[0] += n.offset[0];
-    origin[1] += n.offset[1];
     if n.sway > 0.0 {
         origin[0] += n.sway_range * (0.5 - 0.5 * (n.sway_phase * std::f32::consts::TAU).cos());
     }

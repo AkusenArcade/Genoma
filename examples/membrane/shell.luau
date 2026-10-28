@@ -58,6 +58,8 @@ end
 -- content once the panel has its size.
 local open = g.state("workspaces.open", false)
 local mark = g.state("workspaces.mark", 1)
+-- The mark is the keyboard's (KeyMark.qml): shown once a key has moved it.
+local keyed = g.state("workspaces.keyed", false)
 local GAP = 14 -- marginEdge 12 + tissuePadding 2
 local ROW, BUTTON, ROW_PAD, WIDTH = 44, 36, 8, 216
 local MAX_ROWS = 10
@@ -74,7 +76,10 @@ local function activeIndex(): number
 end
 
 local function setOpen(value: boolean)
-    if value then mark.value = activeIndex() end
+    if value then
+        mark.value = activeIndex()
+        keyed.value = false
+    end
     open.value = value
 end
 
@@ -99,12 +104,11 @@ local function row(i: number)
         radius = 14,
         present = function() return ws() ~= nil end,
         -- The keyboard's mark: the primary at 12% (KeyMark.qml).
-        fill = function() return if mark.value == i then theme.primary12 else "#00000000" end,
+        fill = function() return if keyed.value and mark.value == i then theme.primary12 else "#00000000" end,
         justify = "start",
         padding_left = ROW_PAD,
         gap = 12,
         on_click = function() jump(i) end,
-        on_hover = function(inside) if inside then mark.value = i end end,
         -- The button: filled where you are, a ring where something is, a
         -- fainter ring for the free place (Bioma draws that one dashed).
         g.capsule {
@@ -234,9 +238,11 @@ local workspaces = cell {
             if key == "Escape" then
                 setOpen(false)
             elseif key == "Down" then
-                mark.value = math.min(mark.value + 1, n)
+                mark.value = if keyed.value then math.min(mark.value + 1, n) else mark.value
+                keyed.value = true
             elseif key == "Up" then
-                mark.value = math.max(mark.value - 1, 1)
+                mark.value = if keyed.value then math.max(mark.value - 1, 1) else mark.value
+                keyed.value = true
             elseif key == "Return" or key == "KP_Enter" or key == "space" then
                 jump(mark.value)
             end
