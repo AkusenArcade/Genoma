@@ -276,16 +276,44 @@ program is the fallback. Registration checked for a process of its own.
 
 ### 10. Notifications, last
 
-- [ ] `org.freedesktop.Notifications` server: notify, replace, close,
+- [x] `org.freedesktop.Notifications` server: notify, replace, close,
       actions, hints, and the signals back.
+
+*Built 2026-10-28,* to what Bioma's `services/Notifications.qml` declares:
+actions, body with markup, images (as pixels or a path), persistence, the
+sound hints, urgency, `desktop-entry`, `resident`, `transient`, a progress
+`value`. The notifications live in the service, so a reload keeps them (what
+`keepOnReload` asks of Quickshell). The name is asked for without queueing:
+on the real bus, where Bioma's shell holds it, Genoma said "another
+notification server owns the session's name", served nothing, and the name
+stayed with Bioma's `qs`.
+Inside `dbus-run-session`, with `notify-send` and `dbus-monitor`:
+- a critical one with its desktop entry, value 42 and sound name, then
+  replaced through its id (`-r`), the new one without them;
+- `CloseNotification` from the sender: closed, reason 3;
+- actions offered `default=Open,later=Later`; the interface invoked "later",
+  `notify-send --wait` printed `later`, and it was dismissed, reason 2;
+- one closed by the interface as expired: reason 1;
+- a `CloseNotification` for one an action had already closed: an error and
+  no signal, as the specification asks (it had been a second signal).
+
+## Done when, checked 2026-10-28
+
+- [x] `genoma probe` shows every domain live, each checked against its
+      system tool (the remaining checks need hardware the desktop lacks, below).
+- [x] Notifications tested on a bus with no other server.
+- [x] At rest with every service started, 30 s: the main thread woke 46
+      times (the clock's 30, the vitals' 15, one niri event), the bus and
+      PipeWire threads 0; 0.067% of a core, PSS 11 MB.
+
+Left for hardware or a later moment, none blocking:
+- the laptop: the battery, Wi-Fi join/leave/forget and its failure reason;
+- one of Akusen's Bluetooth devices: pair, connect, battery, forget;
+- streams by application while something plays; a window title changing
+  under the toplevel test;
+- drawing icons given as pixels (tray, notifications): the scene needs raw
+  pixel images, carried to the port.
 - Tested inside `dbus-run-session`: on that bus there is no other server,
   which is the gate's condition, and Bioma keeps its own on the real one.
   `notify-send` sends inside the same session.
 
-## Done when
-
-- `genoma probe` shows every domain live, each checked against its system
-  tool;
-- notifications tested on a bus with no other server;
-- at rest, with every service started: no wake-ups beyond what the domains
-  themselves signal, measured as M0 measured them.

@@ -14,6 +14,7 @@ pub mod clock;
 pub mod icons;
 pub mod media;
 pub mod network;
+pub mod notifications;
 pub mod niri;
 pub mod pam;
 pub mod polkit;

@@ -30,6 +30,7 @@ use genoma_services::{
     media::{Action, Media},
     network::Network,
     niri::Niri,
+    notifications::Notifications,
     polkit::Polkit,
     power::Power,
     toplevels::Toplevels,
@@ -161,6 +162,7 @@ pub struct Services {
     pub toplevels: Rc<Toplevels>,
     pub tray: Rc<Tray>,
     pub polkit: Rc<Polkit>,
+    pub notifications: Rc<Notifications>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -703,6 +705,69 @@ impl UserData for PolkitRef {
     }
 }
 
+struct NotificationsRef(Rc<Notifications>);
+
+impl UserData for NotificationsRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether Genoma owns the session's notification name.
+        fields.add_field_method_get("serving", |_, this| Ok(this.0.serving.get()));
+        fields.add_field_method_get("error", |_, this| Ok(this.0.error.get()));
+        // notifications.list → { { id, app_name, app_icon, summary, body,
+        // actions = { { key, label }, … }, urgency (0 low, 1 normal, 2
+        // critical), expire_timeout, desktop_entry, category, image_path,
+        // has_image, resident, transient, value, sound_name, sound_file,
+        // suppress_sound, replaced }, … }, in arrival order.
+        fields.add_field_method_get("list", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, n) in this.0.list.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", n.id)?;
+                t.set("app_name", n.app_name)?;
+                t.set("app_icon", n.app_icon)?;
+                t.set("summary", n.summary)?;
+                t.set("body", n.body)?;
+                let actions = lua.create_table()?;
+                for (j, (key, label)) in n.actions.into_iter().enumerate() {
+                    let a = lua.create_table()?;
+                    a.set("key", key)?;
+                    a.set("label", label)?;
+                    actions.set(j + 1, a)?;
+                }
+                t.set("actions", actions)?;
+                t.set("urgency", n.urgency)?;
+                t.set("expire_timeout", n.expire_timeout)?;
+                t.set("desktop_entry", n.desktop_entry)?;
+                t.set("category", n.category)?;
+                t.set("image_path", n.image_path)?;
+                t.set("has_image", n.image.is_some())?;
+                t.set("resident", n.resident)?;
+                t.set("transient", n.transient)?;
+                t.set("value", n.value)?;
+                t.set("sound_name", n.sound_name)?;
+                t.set("sound_file", n.sound_file)?;
+                t.set("suppress_sound", n.suppress_sound)?;
+                t.set("replaced", n.replaced)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // notifications:close(id, "expired" | "dismissed")
+        methods.add_method("close", |_, this, (id, reason): (u32, Option<String>)| {
+            this.0.close(id, reason.as_deref().unwrap_or("dismissed"));
+            Ok(())
+        });
+        // notifications:invoke(id, key): the action; then dismissed unless
+        // the notification is resident.
+        methods.add_method("invoke", |_, this, (id, key): (u32, String)| {
+            this.0.invoke(id, key);
+            Ok(())
+        });
+    }
+}
+
 struct ClockRef(Rc<Clock>);
 
 impl UserData for ClockRef {
@@ -1068,7 +1133,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/tray" | "@genoma/polkit" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -1081,6 +1146,7 @@ impl Script {
                         "toplevels" => "toplevels",
                         "tray" => "tray",
                         "polkit" => "polkit",
+                        "notifications" => "notifications",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -1100,6 +1166,7 @@ impl Script {
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
                         "polkit" => lua.create_userdata(PolkitRef(services.polkit.clone()))?,
+                        "notifications" => lua.create_userdata(NotificationsRef(services.notifications.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

@@ -67,7 +67,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default(), polkit: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -82,7 +82,9 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray", "polkit"] {
+        for service in
+            ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications"]
+        {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -198,6 +200,19 @@ impl Sources {
                     // The session's agent: one per session, so it fails
                     // while another (Bioma's) holds it, and says so.
                     self.services.polkit.start(&bus, post, genoma_services::polkit::Subject::Session);
+                }
+                "notifications" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let notifications = self.services.notifications.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                notifications.apply(update);
+                            }
+                        })
+                        .expect("notifications channel");
+                    self.services.notifications.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
