@@ -687,6 +687,25 @@ Cost at rest unchanged: 1.92% of a core and 27 MB for the membrane.
 Carried to M4: output hotplug (coded, not exercised) and dynamic lists
 (`g.each`).
 
+**M4, closed 2026-10-28** (the record is `docs/m4-plan.md`). Each primitive
+was shown in an example, checked by Akusen and measured; at rest each costs
+no frame:
+- springs as a timing entry, interruptible, for numbers and colours;
+- threads along a quadratic Bézier, grown, with a spring-bent middle;
+- budding and reabsorption by a smooth union, from any side of the parent;
+  *his decision:* Bioma's cells open by budding (§10);
+- particles with their births on the CPU and their motion in the vertex
+  shader; kept, used in Bioma only where a case shows they inform;
+- depth: a matrix per subtree, blur that follows the tilt, text projected
+  as an image while tilted (§12 question 2, closed);
+- the half-pixel eye test, blind: the quarter pixel stays;
+- `g.each` keyed lists, and output hotplug exercised with niri turning an
+  output off and on. The same test found a freeze in Bioma on Quickshell
+  through Vulkan, fixed there in beta.59.
+
+In motion the worst p99 was 311 µs (four budding panels), inside the 2 ms
+budget. PSS 26 MB throughout.
+
 Not in M1, carried forward:
 - Damage is per surface: a change redraws the whole surface, not only the
   region it touched. That costs nothing at this size; it moves to M2, where a

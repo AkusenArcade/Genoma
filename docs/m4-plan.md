@@ -1,5 +1,7 @@
 # M4 — the living layer
 
+**Closed 2026-10-28 by Akusen.** Every step built, shown and measured below.
+
 PRD §8 and §11: threads that grow along a path, budding and reabsorption,
 particles with data behind them, depth transitions, and springs as an
 animation source. **Each primitive at rest costs nothing, and in motion stays
