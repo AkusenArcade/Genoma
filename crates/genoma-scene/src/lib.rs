@@ -1077,25 +1077,30 @@ fn collect(
                 _ => ([0.0; 4], [0.0; 4]),
             };
             out.shape_here = Some([x, y, w, h, radius / scale]);
-            out.list.rects.push(Rect {
-                origin: [x * scale, y * scale],
-                size,
-                radius,
-                rim,
-                level: n.level,
-                cut: 0.0,
-                fill: fade(n.fill),
-                rim_top: fade(n.rim_top),
-                rim_bottom: fade(n.rim_bottom),
-                wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
-                arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
-                fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
-                clip: out.clip,
-                path: [0.0; 4],
-                path_end: [0.0; 4],
-                bud,
-                bud_shape,
-            });
+            // A shape grown to nothing draws nothing, bridge included: a bud
+            // still inside its cell would otherwise swell the cell's edge.
+            let nothing = w <= 0.01 || h <= 0.01;
+            if !nothing {
+                out.list.rects.push(Rect {
+                    origin: [x * scale, y * scale],
+                    size,
+                    radius,
+                    rim,
+                    level: n.level,
+                    cut: 0.0,
+                    fill: fade(n.fill),
+                    rim_top: fade(n.rim_top),
+                    rim_bottom: fade(n.rim_bottom),
+                    wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
+                    arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
+                    fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
+                    clip: out.clip,
+                    path: [0.0; 4],
+                    path_end: [0.0; 4],
+                    bud,
+                    bud_shape,
+                });
+            }
             // A band drawn only outside its cells: each child capsule's
             // shape is taken back out of it before the child is drawn.
             if hollow {

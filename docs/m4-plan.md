@@ -49,12 +49,25 @@ documents, not here.
 
 ### 3. Budding and reabsorption (§8.2)
 
-- [ ] A capsule may bud from its parent: the panel and its cell joined by a
+*Built 2026-10-28, `examples/living` ("bud").*
+- A capsule with `bud` is drawn as one shape with the nearest capsule above
+  it: the polynomial smooth minimum of the two fields, masked outside the
+  parent so its glass is never covered twice. The rim follows the joined
+  outline, and the quad grows to cover the parent's box, where the bridge
+  is.
+- The panel starts inside its cell, grown to nothing. It leaves on the
+  timing set with its neck narrowing from 36 to 0, and is taken back the
+  same way, faster.
+- A shape grown to nothing draws nothing, bridge included.
+- Zoomed captures show the panel coming out of the cell's edge as one shape.
+- At rest: no frames.
+
+- [x] A capsule may bud from its parent: the panel and its cell joined by a
       smooth union of their two distance fields, with a neck that narrows to
       a thread and parts. Closing runs back as reabsorption.
-- [ ] Only the panel and the bridge are drawn from the union; the parent's
+- [x] Only the panel and the bridge are drawn from the union; the parent's
       own interior is taken out, so glass never sits on glass.
-- [ ] The rim follows the joined outline.
+- [x] The rim follows the joined outline.
 
 ### 4. Particles with data behind them (§8.3, §5.4)
 
