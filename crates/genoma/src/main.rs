@@ -65,7 +65,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -80,7 +80,7 @@ struct Sources {
 
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
-        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio"] {
+        for service in ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth"] {
             if !wants(service) || self.started.contains(&service) {
                 continue;
             }
@@ -155,6 +155,19 @@ impl Sources {
                         })
                         .expect("audio channel");
                     self.services.audio.start(post);
+                }
+                "bluetooth" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let bluetooth = self.services.bluetooth.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                bluetooth.apply(update);
+                            }
+                        })
+                        .expect("bluetooth channel");
+                    self.services.bluetooth.start(&bus, post);
                 }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
@@ -342,6 +355,25 @@ fn probe() {
     });
     let a = services.audio.clone();
     Effect::new(move || println!("audio   {} links, {} active", a.links.get().len(), a.links.get().iter().filter(|l| l.active).count()));
+    let b = services.bluetooth.clone();
+    Effect::new(move || match b.adapter.get() {
+        Some(a) => println!(
+            "bluetooth adapter {} {} powered {} discovering {} discoverable {} pairable {}",
+            a.name, a.address, a.powered, a.discovering, a.discoverable, a.pairable
+        ),
+        None => println!("bluetooth no adapter"),
+    });
+    let b = services.bluetooth.clone();
+    Effect::new(move || {
+        let devices = b.devices.get();
+        println!("bluetooth {} devices", devices.len());
+        for d in devices.iter().take(6) {
+            println!(
+                "bluetooth   {} {:?} {:?} paired {} connected {} battery {:?} {}",
+                d.address, d.name, d.icon, d.paired, d.connected, d.battery, d.busy
+            );
+        }
+    });
     let mut sources = Sources { services, niri_stream: stream, bus: None, started: Vec::new() };
     sources.start(|_| true, &handle);
     event_loop.run(None, &mut (), |_| {}).expect("event loop");

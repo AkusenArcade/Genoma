@@ -23,6 +23,7 @@ use genoma_core::{
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
     audio::Audio,
+    bluetooth::{Bluetooth, DeviceCall},
     clock::Clock,
     media::{Action, Media},
     network::Network,
@@ -151,6 +152,7 @@ pub struct Services {
     pub network: Rc<Network>,
     pub media: Rc<Media>,
     pub audio: Rc<Audio>,
+    pub bluetooth: Rc<Bluetooth>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -468,6 +470,86 @@ impl UserData for AudioRef {
             this.0.set_default(id);
             Ok(())
         });
+    }
+}
+
+struct BluetoothRef(Rc<Bluetooth>);
+
+impl UserData for BluetoothRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // bluetooth.adapter → { name, address, powered, discovering,
+        // discoverable, pairable }, or nil without one.
+        fields.add_field_method_get("adapter", |lua, this| {
+            let Some(a) = this.0.adapter.get() else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("name", a.name)?;
+            t.set("address", a.address)?;
+            t.set("powered", a.powered)?;
+            t.set("discovering", a.discovering)?;
+            t.set("discoverable", a.discoverable)?;
+            t.set("pairable", a.pairable)?;
+            Ok(LuaValue::Table(t))
+        });
+        // bluetooth.devices → { { address, name, device_name, icon, paired,
+        // trusted, connected, blocked, battery (0…1 or nil), busy }, … }
+        fields.add_field_method_get("devices", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, d) in this.0.devices.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("address", d.address)?;
+                t.set("name", d.name)?;
+                t.set("device_name", d.device_name)?;
+                t.set("icon", d.icon)?;
+                t.set("paired", d.paired)?;
+                t.set("trusted", d.trusted)?;
+                t.set("connected", d.connected)?;
+                t.set("blocked", d.blocked)?;
+                t.set("battery", d.battery)?;
+                t.set("busy", d.busy)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // bluetooth.failure → { address, error } for the last failed call.
+        fields.add_field_method_get("failure", |lua, this| {
+            let Some((address, error)) = this.0.failure.get() else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("address", address)?;
+            t.set("error", error)?;
+            Ok(LuaValue::Table(t))
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("set_powered", |_, this, on: bool| {
+            this.0.set_powered(on);
+            Ok(())
+        });
+        // bluetooth:set_discovering(true) while a list is open, false after.
+        methods.add_method("set_discovering", |_, this, on: bool| {
+            this.0.set_discovering(on);
+            Ok(())
+        });
+        methods.add_method("forget", |_, this, address: String| {
+            this.0.forget(&address);
+            Ok(())
+        });
+        methods.add_method("set_trusted", |_, this, (address, on): (String, bool)| {
+            this.0.on_device(&address, DeviceCall::Trusted(on));
+            Ok(())
+        });
+        for (method, call) in [("connect", 0u8), ("disconnect", 1), ("pair", 2), ("cancel_pair", 3)] {
+            methods.add_method(method, move |_, this, address: String| {
+                let call = match call {
+                    0 => DeviceCall::Connect,
+                    1 => DeviceCall::Disconnect,
+                    2 => DeviceCall::Pair,
+                    _ => DeviceCall::CancelPair,
+                };
+                this.0.on_device(&address, call);
+                Ok(())
+            });
+        }
     }
 }
 
@@ -829,7 +911,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -838,6 +920,7 @@ impl Script {
                         "network" => "network",
                         "media" => "media",
                         "audio" => "audio",
+                        "bluetooth" => "bluetooth",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -853,6 +936,7 @@ impl Script {
                         "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,
                         "media" => lua.create_userdata(MediaRef(services.media.clone()))?,
                         "audio" => lua.create_userdata(AudioRef(services.audio.clone()))?,
+                        "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

@@ -8,6 +8,7 @@
 //! connections live on one bus thread, which posts into the loop.
 
 pub mod audio;
+pub mod bluetooth;
 pub mod bus;
 pub mod clock;
 pub mod icons;

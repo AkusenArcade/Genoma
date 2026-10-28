@@ -162,10 +162,26 @@ PipeWire stores. The `pipewire` 0.10 crate on its own thread,
 
 ### 6. Bluetooth
 
-- [ ] BlueZ: adapter (powered, discovering), devices (connected, paired,
+- [x] BlueZ: adapter (powered, discovering), devices (connected, paired,
       battery), connect and disconnect. **Over zbus, not `bluer`:** `bluer`
       brings a tokio runtime for what is a handful of D-Bus objects, and the
       bus connection is already there. Checked against `bluetoothctl`.
+
+*Built 2026-10-28,* to what Bioma's `services/Bluetooth.qml` reads: the
+default adapter, devices with name, own name, icon, paired, trusted,
+connected, blocked and battery, and the last failed call; the actions power,
+discovery (while a list is open), connect, disconnect, pair, cancel pairing,
+forget, trusted. One `GetManagedObjects` read again after any BlueZ signal,
+the burst given 60 ms. A device is `busy` ("connecting", "pairing"…) while
+its call is in flight, as Quickshell has it, since BlueZ has no such state.
+- The probe matched `bluetoothctl show`: AkuLinux, powered, not
+  discoverable or pairable.
+- Discovery from Luau on and off: the two unnamed devices nearby that
+  `bluetoothctl devices` listed came through, and `Discovering` went back to
+  no.
+- [ ] **With one of Akusen's devices:** pair, connect, the battery,
+      disconnect, forget. Pairing a device that wants a code needs an agent;
+      whether Bioma relies on one (and which) is checked then.
 
 ### 7. Windows and colours
 
