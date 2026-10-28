@@ -16,6 +16,7 @@ use std::{
 mod auth;
 pub mod dbus;
 mod greetd;
+mod values;
 pub mod io;
 
 use genoma_core::{
@@ -990,6 +991,30 @@ impl Script {
                 io::file(&host, t)
             })?,
         )?;
+        // g.computed(fn), g.animated(value), g.json_set(text, path, value):
+        // an interface's own modules (Bioma's core/ singletons).
+        g.set("computed", lua.create_function(|_, f: Function| Ok(values::computed(f)))?)?;
+        let host = self.host.clone();
+        g.set("animated", lua.create_function(move |_, v: LuaValue| values::animated(&host, v))?)?;
+        g.set("json_set", lua.create_function(values::json_set)?)?;
+        // g.effect(fn): runs it now and again whenever what it read changes;
+        // stopped with the load. For what reacts rather than draws: the
+        // timing set redefined when its speed changes, a theme transition
+        // started when the palette does.
+        g.set(
+            "effect",
+            lua.create_function(|_, f: Function| {
+                Effect::new(move || {
+                    if let Err(e) = f.call::<()>(()) {
+                        log::error!("g.effect: {e}");
+                    }
+                });
+                Ok(())
+            })?,
+        )?;
+        // g.env("XDG_CONFIG_HOME") → its value or nil: the sandbox has no
+        // environment of its own.
+        g.set("env", lua.create_function(|_, name: String| Ok(std::env::var(name).ok()))?)?;
         // g.dir: the interface's directory.
         g.set("dir", self.dir.display().to_string())?;
         // g.parse_json(text) → the value; g.to_json(value, pretty) → text.

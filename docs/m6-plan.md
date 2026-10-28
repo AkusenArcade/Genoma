@@ -84,12 +84,22 @@ directory, `g.parse_json` and `g.to_json`.
 ### 1. Core
 
 The `core/` singletons as Luau modules of signals:
-- [ ] Config: `config/default.json` then `override.json`, both watched,
+- [x] Config: `config/default.json` then `override.json`, both watched,
       written back atomically; the same keys.
-- [ ] Theme: the palette (matugen's or a saved one) as animated signals, so
+- [x] Theme: the palette (matugen's or a saved one) as animated signals, so
       the theme cell still retints everything live.
-- [ ] Timing, Metrics, Typography from `docs/design/tokens.css`, as the
+- [x] Timing, Metrics, Typography from `docs/design/tokens.css`, as the
       QML singletons have them.
+
+*Done 2026-10-28* (Bioma's `genoma/core/`, checks in `genoma/PORT.md`).
+Genoma gained, for it: `g.computed` (a memo), `g.effect`, `g.env`,
+`g.animated` (a number or colour carried to a target over a timing entry,
+every value in motion stepped together in one batch on one ticker, so a
+theme's four roles move as one and what derives from them is computed once
+a step), and `g.json_set` (a document with keys set and the rest in its
+order, serde_json with `preserve_order`). The derived colours match Qt's to
+the byte; the palette crosses in 32 steps of 8 ms; a write leaves the rest
+of the override as it was; at rest nothing wakes.
 
 ### 2. Structure
 
