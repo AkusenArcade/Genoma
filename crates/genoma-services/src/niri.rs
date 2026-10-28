@@ -3,8 +3,9 @@
 //! `services/Niri.qml`). Nothing polls.
 
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
+    time::Duration,
 };
 
 use genoma_core::reactive::{Memo, Signal, batch};
@@ -18,6 +19,8 @@ pub struct Workspace {
     pub output: Option<String>,
     pub is_active: bool,
     pub is_focused: bool,
+    /// No window on it: the free place.
+    pub vacant: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +47,7 @@ fn workspace(v: &Value) -> Option<Workspace> {
         output: v.get("output").and_then(Value::as_str).map(str::to_owned),
         is_active: v.get("is_active").and_then(Value::as_bool).unwrap_or(false),
         is_focused: v.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
+        vacant: v.get("active_window_id").is_none_or(Value::is_null),
     })
 }
 
@@ -80,6 +84,34 @@ impl Niri {
     /// The workspace shown on `output` now.
     pub fn active(&self, output: &str) -> Option<Workspace> {
         self.workspaces.get().into_iter().find(|w| w.is_active && w.output.as_deref() == Some(output))
+    }
+
+    /// The workspaces on `output`, in their order.
+    pub fn on_output(&self, output: &str) -> Vec<Workspace> {
+        let mut list: Vec<_> =
+            self.workspaces.get().into_iter().filter(|w| w.output.as_deref() == Some(output)).collect();
+        list.sort_by_key(|w| w.idx);
+        list
+    }
+
+    /// Sends one action and waits for niri's reply, on a connection of its
+    /// own: the event stream is never written to. `action` is the JSON of
+    /// niri's `Action`, as `{"FocusWorkspace":{"reference":{"Id":3}}}`.
+    pub fn action(&self, action: &str) -> Result<(), String> {
+        let path = std::env::var_os("NIRI_SOCKET").ok_or("NIRI_SOCKET is not set")?;
+        let mut stream = UnixStream::connect(path).map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        stream.write_all(format!("{{\"Action\":{action}}}\n").as_bytes()).map_err(|e| e.to_string())?;
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).map_err(|e| e.to_string())?;
+        if reply.contains("\"Err\"") {
+            return Err(reply.trim().to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn focus_workspace(&self, id: u64) -> Result<(), String> {
+        self.action(&format!("{{\"FocusWorkspace\":{{\"reference\":{{\"Id\":{id}}}}}}}"))
     }
 
     /// The focused window, wherever it is.

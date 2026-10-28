@@ -21,7 +21,7 @@ use smithay_client_toolkit::{
         client::{
             Connection, EventQueue, Proxy, QueueHandle,
             globals::{GlobalList, registry_queue_init},
-            protocol::{wl_buffer, wl_output, wl_pointer, wl_seat, wl_surface},
+            protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -36,6 +36,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{PointerEvent, PointerHandler},
     },
     shell::{
@@ -74,6 +75,11 @@ pub struct App {
     input: Option<Box<dyn FnMut(NodeId, Input)>>,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// The surface covers its output: a cell is open, or closing.
+    tall: bool,
+    /// The output the surface is on, logical size.
+    output_size: Option<(u32, u32)>,
 
     renderer: Option<Renderer>,
     scene: Option<Rc<RefCell<Scene>>>,
@@ -119,6 +125,9 @@ impl App {
             input: None,
             hovered: None,
             pressed: None,
+            keyboard: None,
+            tall: false,
+            output_size: None,
             compositor,
             layer_shell,
             viewporter,
@@ -237,12 +246,20 @@ impl App {
 
     /// The size to ask the compositor for: the content's, with 0 for a
     /// spanned width, which the compositor fills.
-    fn measure(&self, scene: &Rc<RefCell<Scene>>) -> (u32, u32) {
+    fn measure(&mut self, scene: &Rc<RefCell<Scene>>) -> (u32, u32) {
         let spans = self.spans();
         let width = (spans && self.configured).then_some(self.logical.0 as f32);
         let size = scene.borrow_mut().layout(width, None);
         let w = if spans { 0 } else { size.0.ceil().max(1.0) as u32 };
-        (w, size.1.ceil().max(1.0) as u32)
+        // An open cell, or one still closing, needs the whole output: its
+        // expansion is drawn there and a press anywhere else must reach it.
+        let catching = scene.borrow().catcher().is_some();
+        self.tall = catching || (self.tall && scene.borrow().transitioning());
+        let h = match (self.tall, self.output_size) {
+            (true, Some((_, oh))) => oh,
+            _ => size.1.ceil().max(1.0) as u32,
+        };
+        (w, h)
     }
 
     fn place(&mut self, spec: &SurfaceSpec) {
@@ -296,7 +313,16 @@ impl App {
             self.wanted = wanted;
             if let (Some(layer), Some(spec)) = (&self.layer, &self.spec) {
                 layer.set_size(wanted.0, wanted.1);
-                layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
+                // The reserved strip stays the membrane's, however tall the
+                // surface grows while a cell is open.
+                if !self.tall {
+                    layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 });
+                }
+                layer.set_keyboard_interactivity(if scene.borrow().catcher().is_some() {
+                    KeyboardInteractivity::Exclusive
+                } else {
+                    KeyboardInteractivity::None
+                });
                 layer.commit();
             }
             return;
@@ -351,12 +377,16 @@ impl App {
         }
         // The input region: only what takes the pointer. The rest of the
         // surface lets it through to the windows below.
-        let inputs: Vec<[i32; 4]> = scene
-            .borrow()
-            .input_rects()
-            .iter()
-            .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
-            .collect();
+        let inputs: Vec<[i32; 4]> = if scene.borrow().catcher().is_some() {
+            vec![[0, 0, self.logical.0 as i32, self.logical.1 as i32]]
+        } else {
+            scene
+                .borrow()
+                .input_rects()
+                .iter()
+                .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
+                .collect()
+        };
         if self.inputs.as_ref() != Some(&inputs) {
             if let Ok(region) = Region::new(&self.compositor) {
                 for &[x, y, w, h] in &inputs {
@@ -475,7 +505,13 @@ impl CompositorHandler for App {
         }
     }
 
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
+        self.output_size = self
+            .outputs
+            .info(output)
+            .and_then(|i| i.logical_size)
+            .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
+    }
 
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
@@ -506,6 +542,9 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seats.get_pointer(qh, &seat).ok();
         }
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
+        }
     }
 
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
@@ -517,6 +556,34 @@ impl SeatHandler for App {
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl App {
+    fn key(&mut self, event: &KeyEvent) {
+        let Some(scene) = self.scene.clone() else { return };
+        let Some(catcher) = scene.borrow().catcher() else { return };
+        let name = event.keysym.name().unwrap_or_default();
+        let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
+        self.deliver(catcher, Input::Key(name));
+    }
+}
+
+impl KeyboardHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
+
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        self.key(&event);
+    }
+
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        self.key(&event);
+    }
+
+    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
+
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: RawModifiers, _: u32) {}
 }
 
 impl PointerHandler for App {
@@ -541,6 +608,12 @@ impl PointerHandler for App {
             }
             match event.kind {
                 K::Press { button, .. } => {
+                    let catcher = scene.borrow().catcher();
+                    if let Some(c) = catcher {
+                        if hit.is_none_or(|h| !scene.borrow().within(h, c)) {
+                            self.deliver(c, Input::Outside);
+                        }
+                    }
                     self.pressed = hit;
                     if let Some(node) = hit {
                         self.deliver(node, Input::Press(button));

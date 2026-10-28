@@ -35,35 +35,42 @@ Press/Release pairs giving two `on_click(272)`, and wheel steps as ±1.
 
 ### 2. niri actions
 
-- [ ] `niri:focus_workspace(id)` and the like: a request on a second socket,
+- [x] `niri:focus_workspace(id)` and the like: a request on a second socket,
       one JSON line out and one reply in. The event stream stays read-only.
 
 ### 3. Expansion grows from its origin
 
+*Done 2026-10-28, with step 4.* A contact sheet of the synthetic click shows
+the thread, the panel growing from the node at its tip, the content fading
+in, and the closing run back. New in the toolkit for it: `delay` in the
+timing set; transition names chosen by a function (so opening and closing
+use different entries); `growth` and `reach`; `attach = "below" |
+"below-center"`; group `opacity`; `catch` with `on_outside` and `on_key`.
+
 From `structure/Cell.qml` (Expansion, `opening`, `closing`):
-- [ ] a vertical thread (`components/Thread.qml`), 1.3 px with a 2.5 node at
+- [x] a vertical thread (`components/Thread.qml`), 1.3 px with a 2.5 node at
       its tip, grows from the cell's edge over `gap` = marginEdge +
       tissuePadding (14) in `Timing.grow` 100 ms on `easeOpenFlat`
       `[0.2, 0.9, 0.3, 1.0]`;
-- [ ] after `Timing.stagger` × 2 (32 ms), the panel grows from its anchor
+- [x] after `Timing.stagger` × 2 (32 ms), the panel grows from its anchor
       (origin start: left-aligned under the cell) over `Timing.grow` on the
       same curve;
-- [ ] content enters only once the panel is grown, by opacity. That needs a
+- [x] content enters only once the panel is grown, by opacity. That needs a
       **group opacity** property, which multiplies every alpha in a
       subtree;
-- [ ] closing runs back: the panel over `Timing.close` 150 ms on
+- [x] closing runs back: the panel over `Timing.close` 150 ms on
       `easeClose` `[0.5, 0.0, 0.9, 0.5]`, and the thread after a 32 ms
       pause;
-- [ ] **growth is width and height**, never scale.
+- [x] **growth is width and height**, never scale.
 
 ### 4. The surface while open
 
-- [ ] On open, the membrane's surface grows to the output's height (one
+- [x] On open, the membrane's surface grows to the output's height (one
       configure) and catches the pointer everywhere. A click outside the
       panel closes, as Bioma's full-screen catcher (`structure/InputSurface.qml`)
       does. On close, the surface shrinks back after the animation.
-- [ ] Keyboard interactivity goes on-demand while a cell is open and back
-      to none when it closes.
+- [x] Keyboard interactivity goes **exclusive** while a cell is open (Bioma's
+      open cell holds the keyboard) and back to none when it closes.
 
 ### 5. Keyboard and touchpad
 

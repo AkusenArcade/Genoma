@@ -77,6 +77,8 @@ pub struct Image {
     pub height: u32,
     /// Top-left corner, physical pixels, on whole pixels.
     pub origin: [f32; 2],
+    /// Multiplies the image's own alpha: a subtree fading in.
+    pub alpha: f32,
 }
 
 /// What one surface shows, in drawing order: every rect, then every image,

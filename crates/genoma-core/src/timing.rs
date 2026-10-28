@@ -65,6 +65,8 @@ pub struct Timing {
     /// Seconds, before the speed setting.
     pub duration: f64,
     pub curve: Curve,
+    /// Seconds to wait before moving: a cascade's stagger.
+    pub delay: f64,
 }
 
 #[derive(Default)]
@@ -87,7 +89,9 @@ pub fn get(name: &str) -> Option<Timing> {
     SET.with(|s| {
         let set = s.borrow();
         let mut timing = *set.entries.get(name)?;
-        timing.duration /= set.speed.unwrap_or(1.0).max(0.01);
+        let speed = set.speed.unwrap_or(1.0).max(0.01);
+        timing.duration /= speed;
+        timing.delay /= speed;
         Some(timing)
     })
 }
@@ -115,7 +119,7 @@ mod tests {
 
     #[test]
     fn speed_scales_every_duration() {
-        define("open", Timing { duration: 0.25, curve: Curve::LINEAR });
+        define("open", Timing { duration: 0.25, curve: Curve::LINEAR, delay: 0.0 });
         set_speed(2.0);
         assert_eq!(get("open").unwrap().duration, 0.125);
         assert!(get("fade").is_none(), "no entry, no duration");

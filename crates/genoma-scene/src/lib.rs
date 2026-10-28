@@ -102,6 +102,11 @@ pub struct Node {
     offset: [f32; 2],
     /// Takes pointer input: it is hit-tested and belongs to the input region.
     interactive: bool,
+    opacity: f32,
+    attach: u8,
+    catch: bool,
+    growth: f32,
+    reach: f32,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -152,6 +157,11 @@ impl Node {
             arc_rate: 0.0,
             offset: [0.0; 2],
             interactive: false,
+            opacity: 1.0,
+            attach: 0,
+            catch: false,
+            growth: 1.0,
+            reach: 1.0,
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -269,6 +279,36 @@ impl Scene {
         if let Some(n) = self.tree.get_node_context_mut(node) {
             n.interactive = interactive;
             self.dirty = true;
+        }
+    }
+
+    /// The node that is catching the pointer and the keyboard, if any.
+    pub fn catcher(&self) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(self.root, &mut |id, n| {
+            if n.catch && found.is_none() {
+                found = Some(id);
+            }
+        });
+        found
+    }
+
+    /// Whether a transition is in flight: an expansion still closing keeps
+    /// its surface until it has.
+    pub fn transitioning(&self) -> bool {
+        !self.animations.is_empty()
+    }
+
+    /// Whether `node` is `ancestor` or inside it.
+    pub fn within(&self, mut node: NodeId, ancestor: NodeId) -> bool {
+        loop {
+            if node == ancestor {
+                return true;
+            }
+            match self.tree.parent(node) {
+                Some(p) => node = p,
+                None => return false,
+            }
         }
     }
 
@@ -394,6 +434,11 @@ impl Scene {
             Prop::Radius => Value::Number(n.radius?),
             Prop::Level => Value::Number(n.level),
             Prop::Arc => Value::Number(n.arc),
+            Prop::Opacity => Value::Number(n.opacity),
+            Prop::Growth => Value::Number(n.growth),
+            Prop::Reach => Value::Number(n.reach),
+            Prop::OffsetX => Value::Number(n.offset[0]),
+            Prop::OffsetY => Value::Number(n.offset[1]),
             Prop::Fill => Value::Color(n.fill),
             Prop::FillBottom => Value::Color(n.fill_bottom),
             Prop::RimTop => Value::Color(n.rim_top),
@@ -483,6 +528,18 @@ impl Scene {
             Prop::Fill => n.fill = take!(colour),
             Prop::FillBottom => n.fill_bottom = take!(colour),
             Prop::ArcRate => (n.arc_rate, mover) = (take!(number).max(0.0), true),
+            Prop::Opacity => n.opacity = take!(number).clamp(0.0, 1.0),
+            Prop::Attach => {
+                n.attach = match take!(text).as_str() {
+                    "below" => 1,
+                    "above" => 2,
+                    "below-center" => 3,
+                    _ => 0,
+                }
+            }
+            Prop::Catch => n.catch = take!(flag),
+            Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
+            Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -549,7 +606,9 @@ impl Scene {
         let animations = std::mem::take(&mut self.animations);
         let mut running = Vec::new();
         for a in animations {
-            let t = (now.duration_since(a.start).as_secs_f64() / a.timing.duration).clamp(0.0, 1.0);
+            // Before its delay a transition holds where it started.
+            let elapsed = now.saturating_duration_since(a.start).as_secs_f64() - a.timing.delay;
+            let t = (elapsed / a.timing.duration).clamp(0.0, 1.0);
             let y = a.timing.curve.eval(t) as f32;
             let value = match (&a.from, &a.to) {
                 (Value::Number(f), Value::Number(to)) => Value::Number(f + (to - f) * y),
@@ -674,7 +733,7 @@ impl Scene {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
         let mut out = Out { list: &mut list, icons: &mut self.icons, blur: Vec::new() };
-        collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], scale, &mut out);
+        collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         list
     }
@@ -733,6 +792,7 @@ fn collect(
     fonts: &mut ct::FontSystem,
     node: NodeId,
     parent: [f32; 4],
+    alpha: f32,
     scale: f32,
     out: &mut Out,
 ) {
@@ -740,8 +800,14 @@ fn collect(
     // An overlay is centred in its parent, whatever taffy reports for an
     // out-of-flow box.
     let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
+    let attach = tree.get_node_context(node).map_or(0, |n| n.attach);
     let mut origin = if overlay {
-        [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0]
+        match attach {
+            1 => [parent[0], parent[1] + parent[3]],
+            2 => [parent[0], parent[1] - layout.size.height],
+            3 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + parent[3]],
+            _ => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0],
+        }
     } else {
         [parent[0] + layout.location.x, parent[1] + layout.location.y]
     };
@@ -754,6 +820,13 @@ fn collect(
     if !n.present {
         return;
     }
+    // Group opacity: everything below multiplies by it, and a subtree at
+    // zero draws nothing.
+    let alpha = alpha * n.opacity;
+    if alpha <= 0.0 {
+        return;
+    }
+    let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
     // Motion moves and swells what a node draws, never its place in the
     // layout: nothing around a beating dot shifts.
     if n.orbit_radius > 0.0 {
@@ -769,10 +842,24 @@ fn collect(
     match n.kind {
         Kind::Capsule => {
             let swell = n.swell();
-            let w = layout.size.width * swell;
-            let h = layout.size.height * swell;
-            let x = origin[0] - (w - layout.size.width) / 2.0;
+            let mut w = layout.size.width * swell;
+            let mut h = layout.size.height * swell;
+            let mut x = origin[0] - (w - layout.size.width) / 2.0;
             let y = origin[1] - (h - layout.size.height) / 2.0;
+            // Growth: the shape's rectangle on its way from a point (the
+            // node at its parent's bottom centre) to its own. Its content is
+            // never scaled: it enters once the shape is grown.
+            if n.growth < 1.0 {
+                let g = n.growth;
+                let node_x = parent[0] + parent[2] / 2.0;
+                x = node_x + (x - node_x) * g;
+                w *= g;
+                h *= g;
+            }
+            // Reach: a thread drawn from its top down to this fraction.
+            if n.reach < 1.0 {
+                h *= n.reach;
+            }
             let size = [w * scale, h * scale];
             let radius = n.radius.map_or(size[1] / 2.0, |r| r * scale).min(size[0].min(size[1]) / 2.0);
             let rim = rim_width(n, scale);
@@ -787,12 +874,12 @@ fn collect(
                 rim,
                 level: n.level,
                 cut: 0.0,
-                fill: n.fill,
-                rim_top: n.rim_top,
-                rim_bottom: n.rim_bottom,
+                fill: fade(n.fill),
+                rim_top: fade(n.rim_top),
+                rim_bottom: fade(n.rim_bottom),
                 wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, 0.0],
                 arc: [0.0, n.arc, 0.0, 0.0],
-                fill_to: n.fill_bottom,
+                fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
             });
             // A band drawn only outside its cells: each child capsule's
             // shape is taken back out of it before the child is drawn.
@@ -836,6 +923,7 @@ fn collect(
                         width: pixels,
                         height: pixels,
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                        alpha,
                     });
                 }
             }
@@ -846,13 +934,13 @@ fn collect(
                 buffer,
                 origin: [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale],
                 scale,
-                color: n.color,
+                color: fade(n.color),
             });
         }
         Kind::Box => {}
     }
     for child in tree.children(node).unwrap_or_default() {
-        collect(tree, fonts, child, [own[0], own[1], own[2], own[3]], scale, out);
+        collect(tree, fonts, child, [own[0], own[1], own[2], own[3]], alpha, scale, out);
     }
 }
 

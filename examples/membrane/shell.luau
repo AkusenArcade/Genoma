@@ -16,6 +16,15 @@ g.timing {
     transition = { duration = 0.18, curve = { 0.25, 0.46, 0.45, 0.94 } },
     -- The trail follows the continuous hand across each second.
     second = { duration = 1.0 },
+    -- An expansion's cascade (Cell.qml opening and closing): Timing.grow 100
+    -- on easeOpenFlat, the panel 2 × stagger later; closing on easeClose,
+    -- Timing.close 150, the thread 2 × stagger later.
+    thread_open = { duration = 0.10, curve = { 0.2, 0.9, 0.3, 1.0 } },
+    thread_close = { duration = 0.118, delay = 0.032, curve = { 0.5, 0.0, 0.9, 0.5 } },
+    panel_open = { duration = 0.10, delay = 0.032, curve = { 0.2, 0.9, 0.3, 1.0 } },
+    panel_close = { duration = 0.15, curve = { 0.5, 0.0, 0.9, 0.5 } },
+    content_open = { duration = 0.12, delay = 0.132 },
+    content_close = { duration = 0.06 },
 }
 
 local OUTPUT = "HDMI-A-1"
@@ -43,12 +52,109 @@ local function tissue(cells: { any })
 end
 
 -- ---- Workspaces (cells/workspaces/Workspaces.qml) -------------------------
+-- At rest the mark and the name; a click opens the list of this output's
+-- workspaces (WorkspaceList.qml), grown out of the cell as Cell.qml grows
+-- an expansion: the thread first, the panel from the node at its tip, the
+-- content once the panel has its size.
+local open = g.state("workspaces.open", false)
+local mark = g.state("workspaces.mark", 1)
+local GAP = 14 -- marginEdge 12 + tissuePadding 2
+local ROW, BUTTON, ROW_PAD, WIDTH = 44, 36, 8, 216
+local MAX_ROWS = 10
+
+local function list()
+    return niri:workspaces(OUTPUT)
+end
+
+local function activeIndex(): number
+    for i, w in list() do
+        if w.active then return i end
+    end
+    return 1
+end
+
+local function setOpen(value: boolean)
+    if value then mark.value = activeIndex() end
+    open.value = value
+end
+
+local function jump(i: number)
+    local w = list()[i]
+    if w then niri:focus_workspace(w.id) end
+    setOpen(false)
+end
+
+local function step(delta: number)
+    local l = list()
+    local i = math.clamp(activeIndex() + delta, 1, #l)
+    if l[i] then niri:focus_workspace(l[i].id) end
+end
+
+local function row(i: number)
+    local function ws() return list()[i] end
+    return g.capsule {
+        role = "button",
+        width = WIDTH,
+        height = ROW,
+        radius = 14,
+        present = function() return ws() ~= nil end,
+        -- The keyboard's mark: the primary at 12% (KeyMark.qml).
+        fill = function() return if mark.value == i then theme.primary12 else "#00000000" end,
+        justify = "start",
+        padding_left = ROW_PAD,
+        gap = 12,
+        on_click = function() jump(i) end,
+        on_hover = function(inside) if inside then mark.value = i end end,
+        -- The button: filled where you are, a ring where something is, a
+        -- fainter ring for the free place (Bioma draws that one dashed).
+        g.capsule {
+            width = BUTTON,
+            height = BUTTON,
+            fill = function() local w = ws(); return if w and w.active then theme.primaryTop else "#00000000" end,
+            fill_bottom = function() local w = ws(); return if w and w.active then theme.primaryBottom else "#00000000" end,
+            rim_top = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.lineFaint else theme.line end,
+            rim_bottom = function() local w = ws(); return if w and w.active then "#00000000" elseif w and w.vacant then theme.lineFaint else theme.line end,
+            g.text {
+                font = "Orbitron",
+                size = 14,
+                tabular = true,
+                color = function()
+                    local w = ws()
+                    return if w and w.active then theme.background elseif w and w.vacant then theme.text30 else theme.text72
+                end,
+                text = function() local w = ws(); return if w then tostring(w.idx) else "" end,
+            },
+        },
+        g.text {
+            font = "Spectral",
+            size = 14,
+            max_width = WIDTH - ROW_PAD * 2 - BUTTON - 12,
+            color = function()
+                local w = ws()
+                return if w and w.name then (if w.active then theme.text else theme.text50) else theme.text28
+            end,
+            text = function() local w = ws(); return if w then (w.name or "empty") else "" end,
+        },
+    }
+end
+
+local rows: { [any]: any } = {}
+for i = 1, MAX_ROWS do
+    rows[i] = row(i)
+end
+
+local panelHeight = function(): number
+    return math.min(math.max(#list(), 1), 5) * ROW + 20
+end
+
 local workspaces = cell {
     role = "status",
     name = "Workspace",
     padding_x = 16,
     gap = 11,
     min_width = 96,
+    on_click = function() setOpen(not open.value) end,
+    on_wheel = function(_, dy) step(if dy > 0 then 1 else -1) end,
     -- The mark (components/WorkspaceBars.qml): bars 16 × 7.5 of a 24 grid,
     -- radius 3, stroke 1.4 crisped, snapped to the pixel, 2 px apart; at
     -- 16 that is 11 × 5 at y 2 and 9, inside a 16 square.
@@ -80,6 +186,71 @@ local workspaces = cell {
             local w = niri:active(OUTPUT)
             return if w == nil then "" elseif w.name then w.name else tostring(w.idx)
         end,
+    },
+    -- The thread (Thread.qml): 1.3, from the cell's edge down the gap.
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 1.3,
+        height = GAP,
+        radius = 0,
+        fill = theme.line,
+        reach = function() return if open.value then 1 else 0 end,
+        transition = { reach = function() return if open.value then "thread_open" else "thread_close" end },
+    },
+    -- The node at its tip.
+    g.capsule {
+        overlay = true,
+        attach = "below-center",
+        width = 5,
+        height = 5,
+        fill = theme.node,
+        offset_y = function() return if open.value then GAP - 2.5 else -2.5 end,
+        opacity = function() return if open.value then 1 else 0 end,
+        transition = {
+            offset_y = function() return if open.value then "thread_open" else "thread_close" end,
+            opacity = function() return if open.value then "thread_open" else "thread_close" end,
+        },
+    },
+    -- The panel, from the node outward; its content once it is grown.
+    g.capsule {
+        overlay = true,
+        attach = "below",
+        offset_y = GAP,
+        width = WIDTH + 20,
+        height = panelHeight,
+        radius = 20,
+        padding = 10,
+        fill = theme.cellFill,
+        rim_top = theme.rim,
+        rim_bottom = theme.line,
+        blur = true,
+        growth = function() return if open.value then 1 else 0 end,
+        transition = { growth = function() return if open.value then "panel_open" else "panel_close" end },
+        catch = function() return open.value end,
+        on_outside = function() setOpen(false) end,
+        on_key = function(key: string)
+            local n = #list()
+            if key == "Escape" then
+                setOpen(false)
+            elseif key == "Down" then
+                mark.value = math.min(mark.value + 1, n)
+            elseif key == "Up" then
+                mark.value = math.max(mark.value - 1, 1)
+            elseif key == "Return" or key == "KP_Enter" or key == "space" then
+                jump(mark.value)
+            end
+        end,
+        -- The well (Well.qml), rows inside it.
+        g.capsule {
+            radius = 10,
+            fill = theme.well,
+            direction = "column",
+            justify = "start",
+            opacity = function() return if open.value then 1 else 0 end,
+            transition = { opacity = function() return if open.value then "content_open" else "content_close" end },
+            table.unpack(rows),
+        },
     },
 }
 

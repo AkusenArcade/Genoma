@@ -52,6 +52,11 @@ pub enum Prop {
     PaddingRight,
     OffsetX,
     OffsetY,
+    Opacity,
+    Attach,
+    Catch,
+    Growth,
+    Reach,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +126,13 @@ pub const PROPS: &[PropInfo] = &[
     p("arc_rate", Prop::ArcRate, Ty::Number, false, "Turns a second the arc grows by between the values it is set to: a trail that keeps up with a continuous hand."),
     p("padding_left", Prop::PaddingLeft, Ty::Number, false, "Inner space on the left."),
     p("padding_right", Prop::PaddingRight, Ty::Number, false, "Inner space on the right."),
-    p("offset_x", Prop::OffsetX, Ty::Number, false, "Moves what the node draws, not its place in the layout."),
-    p("offset_y", Prop::OffsetY, Ty::Number, false, "Moves what the node draws, not its place in the layout."),
+    p("offset_x", Prop::OffsetX, Ty::Number, true, "Moves what the node draws, not its place in the layout."),
+    p("offset_y", Prop::OffsetY, Ty::Number, true, "Moves what the node draws, not its place in the layout."),
+    p("opacity", Prop::Opacity, Ty::Number, true, "The whole subtree's opacity, 0 to 1: every alpha in it is multiplied."),
+    p("attach", Prop::Attach, Ty::Choice(&["center", "below", "above", "below-center"]), false, "Where an overlay sits: centred in its parent, under or over it left-aligned, or under it centred."),
+    p("growth", Prop::Growth, Ty::Number, true, "0 to 1: the shape grows from its parent's bottom centre to its own rectangle; content is not scaled."),
+    p("reach", Prop::Reach, Ty::Number, true, "0 to 1: how far down a thread is drawn."),
+    p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];
 

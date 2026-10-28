@@ -22,8 +22,12 @@ use genoma_services::{clock::Clock, niri::Niri, vitals::Vitals};
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
 /// Pointer input for a node, as the surface saw it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Input {
+    /// A press outside the node that is catching (an open cell).
+    Outside,
+    /// A key, by its xkb name ("Escape", "Up", "Return", "a").
+    Key(String),
     Hover(bool),
     Press(u32),
     Release(u32),
@@ -36,6 +40,8 @@ pub enum Input {
 impl Input {
     fn handler(&self) -> &'static str {
         match self {
+            Input::Outside => "on_outside",
+            Input::Key(_) => "on_key",
             Input::Hover(_) => "on_hover",
             Input::Press(_) => "on_press",
             Input::Release(_) => "on_release",
@@ -45,7 +51,7 @@ impl Input {
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel", "on_outside", "on_key"];
 
 type Handlers = Rc<RefCell<HashMap<genoma_scene::NodeId, HashMap<&'static str, Function>>>>;
 
@@ -95,11 +101,16 @@ struct State(Signal<StateValue>);
 
 impl UserData for State {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("value", |lua, this| {
-            this.0.try_get().unwrap_or(StateValue::Nil).into_lua(lua)
+        // The userdata is borrowed only to copy the signal out: setting it
+        // runs the effects that read it, and they read it through this same
+        // userdata, which a borrow held across the set would lock.
+        fields.add_field_function_get("value", |lua, ud: mlua::AnyUserData| {
+            let signal = ud.borrow::<State>()?.0;
+            signal.try_get().unwrap_or(StateValue::Nil).into_lua(lua)
         });
-        fields.add_field_method_set("value", |_, this, v: LuaValue| {
-            this.0.set(StateValue::from_lua(&v));
+        fields.add_field_function_set("value", |_, ud: mlua::AnyUserData, v: LuaValue| {
+            let signal = ud.borrow::<State>()?.0;
+            signal.set(StateValue::from_lua(&v));
             Ok(())
         });
     }
@@ -137,6 +148,24 @@ impl UserData for NiriRef {
             t.set("idx", w.idx)?;
             t.set("name", w.name)?;
             Ok(LuaValue::Table(t))
+        });
+        // niri:workspaces("DP-1") → { { id, idx, name, active }, … } in order
+        methods.add_method("workspaces", |lua, this, output: String| {
+            let list = lua.create_table()?;
+            for (i, w) in this.0.on_output(&output).into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", w.id)?;
+                t.set("idx", w.idx)?;
+                t.set("name", w.name)?;
+                t.set("active", w.is_active)?;
+                t.set("vacant", w.vacant)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // niri:focus_workspace(id): the action, on its own connection.
+        methods.add_method("focus_workspace", |_, this, id: u64| {
+            this.0.focus_workspace(id).map_err(err)
         });
         // niri:focused_on("DP-1") → { title = …, app_id = … } or nil
         methods.add_method("focused_on", |lua, this, output: String| {
@@ -208,10 +237,12 @@ impl Script {
         while let Some(id) = at {
             let handler = self.handlers.borrow().get(&id).and_then(|h| h.get(name)).cloned();
             if let Some(f) = handler {
-                let result = match input {
-                    Input::Hover(entered) => f.call::<()>(entered),
-                    Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(b),
-                    Input::Wheel(dx, dy) => f.call::<()>((dx, dy)),
+                let result = match &input {
+                    Input::Outside => f.call::<()>(()),
+                    Input::Key(name) => f.call::<()>(name.as_str()),
+                    Input::Hover(entered) => f.call::<()>(*entered),
+                    Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(*b),
+                    Input::Wheel(dx, dy) => f.call::<()>((*dx, *dy)),
                 };
                 if let Err(e) = result {
                     log::error!("{name}: {e}");
@@ -323,7 +354,8 @@ impl Script {
                         Some(_) => return Err(err(format!("timing {name}: a curve is four numbers"))),
                         None => Curve::LINEAR,
                     };
-                    timing::define(&name, Timing { duration, curve });
+                    let delay: f64 = entry.get::<Option<f64>>("delay")?.unwrap_or(0.0);
+                    timing::define(&name, Timing { duration, curve, delay });
                 }
                 Ok(())
             })?,
@@ -538,22 +570,28 @@ fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: gen
 
     // transition = { fill = "theme" }: names from the timing set, never
     // numbers. Checked here, at load, not when the value first moves.
-    let mut transitions: HashMap<Prop, String> = HashMap::new();
+    let mut transitions: HashMap<Prop, TimingName> = HashMap::new();
     if let Some(table) = t.get::<Option<Table>>("transition")? {
         for pair in table.pairs::<String, LuaValue>() {
             let (key, value) = pair?;
             let prop = Prop::from_name(&key).ok_or_else(|| err(format!("transition: no property {key}")))?;
             let name = match value {
-                LuaValue::String(s) => s.to_string_lossy(),
+                LuaValue::String(s) => {
+                    let name = s.to_string_lossy();
+                    if timing::get(&name).is_none() {
+                        return Err(err(format!("transition.{key}: no timing named {name}")));
+                    }
+                    TimingName::Fixed(name)
+                }
+                // A function chooses the entry when the value changes: an
+                // opening and a closing move on different curves.
+                LuaValue::Function(f) => TimingName::Chosen(f),
                 _ => {
                     return Err(err(format!(
                         "transition.{key}: durations come from the timing set; name an entry"
                     )));
                 }
             };
-            if timing::get(&name).is_none() {
-                return Err(err(format!("transition.{key}: no timing named {name}")));
-            }
             transitions.insert(prop, name);
         }
     }
@@ -570,7 +608,9 @@ fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: gen
                 return Err(err(format!("{key} wants a function")));
             };
             handlers.borrow_mut().entry(node).or_default().insert(name, f);
-            scene.borrow_mut().set_interactive(node, true);
+            if !matches!(name, "on_outside" | "on_key") {
+                scene.borrow_mut().set_interactive(node, true);
+            }
             continue;
         }
         let prop = Prop::from_name(&key).ok_or_else(|| err(format!("{kind:?} has no property {key}")))?;
@@ -592,7 +632,35 @@ fn mount(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, t: &Table, parent: gen
 
 /// A property that follows a function: an effect that calls it and sets the
 /// result, again whenever something it read changes.
-fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Function, timing_name: Option<String>) {
+/// A transition's timing: an entry's name, or a function that names one.
+#[derive(Clone)]
+enum TimingName {
+    Fixed(String),
+    Chosen(Function),
+}
+
+impl TimingName {
+    fn resolve(&self) -> Option<Timing> {
+        match self {
+            TimingName::Fixed(name) => timing::get(name),
+            TimingName::Chosen(f) => {
+                let name = genoma_core::reactive::untracked(|| f.call::<String>(()));
+                match name {
+                    Ok(name) => timing::get(&name).or_else(|| {
+                        log::error!("transition: no timing named {name}");
+                        None
+                    }),
+                    Err(e) => {
+                        log::error!("transition: {e}");
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Function, timing_name: Option<TimingName>) {
     Effect::new(move || {
         let value = match f.call::<LuaValue>(()) {
             Ok(v) => v,
@@ -603,7 +671,7 @@ fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Fu
         };
         match convert(prop, &value) {
             Ok(value) => {
-                let timing = timing_name.as_deref().and_then(timing::get);
+                let timing = timing_name.as_ref().and_then(TimingName::resolve);
                 if let Err(e) = scene.borrow_mut().set(node, prop, value, timing) {
                     log::error!("binding {prop:?}: {e}");
                 }
