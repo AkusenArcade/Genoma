@@ -122,6 +122,7 @@ pub struct Node {
     scroll_y: f32,
     dash: [f32; 2],
     italic: bool,
+    wrap: bool,
     weight: Option<u16>,
     /// Letter spacing, em.
     tracking: f32,
@@ -199,6 +200,7 @@ impl Node {
             scroll_y: 0.0,
             dash: [0.0; 2],
             italic: false,
+            wrap: false,
             weight: None,
             tracking: 0.0,
             crisp: false,
@@ -803,6 +805,7 @@ impl Scene {
             Prop::Dash => n.dash[0] = take!(number).max(0.0),
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
             Prop::Italic => (n.italic, reshape) = (take!(flag), true),
+            Prop::Wrap => (n.wrap, reshape) = (take!(flag), true),
             Prop::Weight => (n.weight, reshape) = (Some(take!(number).clamp(100.0, 900.0) as u16), true),
             Prop::Tracking => (n.tracking, reshape) = (take!(number), true),
             Prop::Crisp => n.crisp = take!(flag),
@@ -1135,12 +1138,18 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     };
     let attrs = style.attrs();
     // A limited width ends the line in an ellipsis: never wrapped, never
-    // shrunk (Bioma's window title).
-    buffer.set_wrap(ct::Wrap::None);
-    buffer.set_ellipsize(match n.max_width {
-        Some(_) => ct::Ellipsize::End(ct::EllipsizeHeightLimit::Lines(1)),
-        None => ct::Ellipsize::None,
-    });
+    // shrunk (Bioma's window title). A sentence that may wrap goes on to
+    // the next line instead.
+    if n.wrap && n.max_width.is_some() {
+        buffer.set_wrap(ct::Wrap::WordOrGlyph);
+        buffer.set_ellipsize(ct::Ellipsize::None);
+    } else {
+        buffer.set_wrap(ct::Wrap::None);
+        buffer.set_ellipsize(match n.max_width {
+            Some(_) => ct::Ellipsize::End(ct::EllipsizeHeightLimit::Lines(1)),
+            None => ct::Ellipsize::None,
+        });
+    }
     buffer.set_size(n.max_width, None);
     buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, None);
     buffer.shape_until_scroll(fonts, false);
