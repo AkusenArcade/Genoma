@@ -96,21 +96,31 @@ const SIZES: &[&str] = &[
     "48x48/apps", "apps/64", "apps/48", "32x32/apps",
 ];
 
+/// Theme by theme, and in each the name as written before its lower case:
+/// a desktop entry asks for `Alacritty`, the chosen theme draws `alacritty`,
+/// and hicolor's `Alacritty` further down the chain is not the one meant.
+/// The unthemed pixmaps are the last resort, as Qt's lookup has it.
 fn in_theme(dirs: &[PathBuf], icon: &str) -> Option<PathBuf> {
+    let lower = icon.to_lowercase();
+    let names: &[&str] = if lower == icon { &[icon] } else { &[icon, &lower] };
     for dir in dirs {
-        for size in SIZES {
-            for ext in ["svg", "png"] {
-                let p = dir.join(size).join(format!("{icon}.{ext}"));
-                if p.exists() {
-                    return Some(p);
+        for name in names {
+            for size in SIZES {
+                for ext in ["svg", "png"] {
+                    let p = dir.join(size).join(format!("{name}.{ext}"));
+                    if p.exists() {
+                        return Some(p);
+                    }
                 }
             }
         }
     }
-    for ext in ["svg", "png"] {
-        let p = Path::new("/usr/share/pixmaps").join(format!("{icon}.{ext}"));
-        if p.exists() {
-            return Some(p);
+    for name in names {
+        for ext in ["svg", "png"] {
+            let p = Path::new("/usr/share/pixmaps").join(format!("{name}.{ext}"));
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
     None
