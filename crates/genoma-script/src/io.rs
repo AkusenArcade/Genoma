@@ -58,6 +58,12 @@ fn err(message: impl Into<String>) -> mlua::Error {
 }
 
 fn call(f: &Function, what: &str, args: impl IntoLuaMulti) {
+    // A callback of a load that has been replaced: its state is gone. What
+    // a g.watch handler starts is detached, so its timers outlive the load
+    // they belong to, and fire into nothing.
+    if f.weak_lua().try_upgrade().is_none() {
+        return;
+    }
     if let Err(e) = f.call::<()>(args) {
         log::error!("{what}: {e}");
     }

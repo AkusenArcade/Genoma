@@ -103,10 +103,18 @@ of the override as it was; at rest nothing wakes.
 
 ### 2. Structure
 
-- [ ] Membrane, tissue, cell: the layout engine from the configuration. A
+- [x] Membrane, tissue, cell: the layout engine from the configuration. A
       new cell still costs one config block.
-- [ ] The cell registry, the expansion grown by budding, the input surface
+- [x] The cell registry, the expansion grown by budding, the input surface
       that catches outside presses.
+
+Done 2026-10-29 (Bioma 1ff83a2, 9c150eb and the floats after them; the
+checks are in Bioma's `genoma/PORT.md`). What Genoma gained for it: a
+catching surface leaves the other surfaces on its output their presses and
+takes the keyboard; `g.ipc` and `genoma ipc`, for keybinds;
+`niri.focused_output`; a signal set while another is being set; a reload on
+a save anywhere in the interface's directory; a timer of a replaced load
+that fires into nothing instead of a destroyed state.
 
 ### 3. Services
 

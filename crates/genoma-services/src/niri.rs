@@ -81,6 +81,11 @@ impl Niri {
         Ok((Niri { workspaces, windows, focused, title }, stream))
     }
 
+    /// The output the keyboard is pointed at: the focused workspace's.
+    pub fn focused_output(&self) -> Option<String> {
+        self.workspaces.get().into_iter().find(|w| w.is_focused).and_then(|w| w.output)
+    }
+
     /// The workspace shown on `output` now.
     pub fn active(&self, output: &str) -> Option<Workspace> {
         self.workspaces.get().into_iter().find(|w| w.is_active && w.output.as_deref() == Some(output))

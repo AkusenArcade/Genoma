@@ -3,6 +3,7 @@
 //!     genoma <interface directory>     run the interface
 //!     genoma probe                     print every service as it changes, no UI
 //!     genoma types                     print the Luau definitions of the nodes
+//!     genoma ipc <target> <function> …  call into the running interface
 //!
 //! `run` loads `shell.luau` from the directory, opens its surface on the
 //! compositor, and keeps it true: a signal that changes re-runs the bindings
@@ -11,6 +12,7 @@
 //! directory reloads the interface in place.
 
 mod access;
+mod ipc;
 mod wayland;
 
 use std::{
@@ -49,6 +51,7 @@ fn main() {
         Some("probe") => probe(),
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         Some("polkit-test") => polkit_test(),
+        Some("ipc") => ipc::call(std::env::args().skip(2).collect()),
         other => run(PathBuf::from(other.unwrap_or("examples/clock"))),
     }
 }
@@ -623,7 +626,10 @@ fn run(dir: PathBuf) {
         }
     })
     .expect("watcher");
-    watcher.watch(&dir, notify::RecursiveMode::NonRecursive).expect("watch");
+    // Recursive: a module the interface requires from a folder of its own
+    // (Bioma's structure/, cells/) is as much the interface as shell.luau.
+    watcher.watch(&dir, notify::RecursiveMode::Recursive).expect("watch");
+    ipc::serve(&handle, script.clone());
     let dispatcher = script.clone();
     app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
     let pending = Rc::new(Cell::new(false));

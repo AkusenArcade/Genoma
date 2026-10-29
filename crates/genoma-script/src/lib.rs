@@ -189,6 +189,8 @@ struct NiriRef(Rc<Niri>);
 impl UserData for NiriRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
+        // niri.focused_output → "DP-1": where a shortcut means.
+        fields.add_field_method_get("focused_output", |_, this| Ok(this.0.focused_output()));
         // niri.focused → { title = …, app_id = … } or nil, on any output.
         fields.add_field_method_get("focused", |lua, this| {
             let Some(w) = this.0.focused_window() else { return Ok(LuaValue::Nil) };
@@ -826,6 +828,9 @@ pub struct Script {
 /// out against its length (Bioma's membranes).
 pub type Target = (usize, Option<String>, Rc<RefCell<Scene>>, Option<(u32, u32)>);
 
+/// Where `g.ipc` keeps its targets, in each load's state.
+const IPC: &str = "genoma.ipc";
+
 fn err(message: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(message.into())
 }
@@ -882,6 +887,25 @@ impl Script {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// A call from outside (`genoma ipc`): the function `g.ipc` registered
+    /// under `target`, with the words as strings. Its value, as text, is
+    /// the reply.
+    pub fn ipc(&self, target: &str, function: &str, args: &[String]) -> Result<String, String> {
+        let targets: Table = self.lua.named_registry_value(IPC).map_err(|_| "nothing answers yet".to_owned())?;
+        let Some(functions) = targets.get::<Option<Table>>(target).map_err(|e| e.to_string())? else {
+            return Err(format!("no target \"{target}\""));
+        };
+        let Some(f) = functions.get::<Option<Function>>(function).map_err(|e| e.to_string())? else {
+            return Err(format!("\"{target}\" has no function \"{function}\""));
+        };
+        let args = args.iter().map(|a| self.lua.create_string(a).map(LuaValue::String)).collect::<mlua::Result<Vec<_>>>();
+        let value: LuaValue = f.call(mlua::MultiValue::from_iter(args.map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+        Ok(match value {
+            LuaValue::Nil => String::new(),
+            other => other.to_string().map_err(|e| e.to_string())?,
+        })
     }
 
     /// Whether an interface has required the service (`"clock"`, `"niri"`,
@@ -1020,6 +1044,16 @@ impl Script {
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
         let g = lua.create_table()?;
+        // g.ipc("cell", { toggle = function(domain) … end }): what a call
+        // from outside reaches, for this load.
+        lua.set_named_registry_value(IPC, lua.create_table()?)?;
+        g.set(
+            "ipc",
+            lua.create_function(|lua, (target, functions): (String, Table)| {
+                let targets: Table = lua.named_registry_value(IPC)?;
+                targets.set(target, functions)
+            })?,
+        )?;
         // The building blocks of a service written in Luau (PRD §9.2).
         let host = self.host.clone();
         g.set("timer", lua.create_function(move |_, t: Table| io::timer(&host, t))?)?;
