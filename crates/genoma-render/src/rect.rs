@@ -249,6 +249,43 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 }
 
 // Signed distance to a rounded box: negative inside, in pixels.
+// How far round a rounded rectangle's outline the point nearest `p` is,
+// from the middle of the top edge clockwise, and the outline's length. A
+// circle and a pill are its cases: dashes measured by the angle about the
+// centre stretched along a pill's long sides.
+fn perimeter_at(p: vec2<f32>, half: vec2<f32>, radius: f32) -> vec2<f32> {
+    let r = min(radius, min(half.x, half.y));
+    let a = max(half - vec2<f32>(r), vec2<f32>(0.0));
+    let q = r * 1.5707963;
+    let total = 4.0 * a.x + 4.0 * a.y + 4.0 * q;
+    let c = clamp(p, -a, a);
+    var d = p - c;
+    // Inside the straight part's reach: the nearest side decides.
+    if (abs(d.x) < 1e-4 && abs(d.y) < 1e-4) {
+        if (a.x - abs(p.x) < a.y - abs(p.y)) { d = vec2<f32>(sign(p.x), 0.0); } else { d = vec2<f32>(0.0, sign(p.y)); }
+    }
+    var s = 0.0;
+    if (abs(d.x) < 1e-4) {
+        if (d.y < 0.0) {
+            s = p.x;
+            if (s < 0.0) { s = s + total; }
+        } else {
+            s = a.x + 2.0 * q + 2.0 * a.y + (a.x - p.x);
+        }
+    } else if (abs(d.y) < 1e-4) {
+        if (d.x > 0.0) { s = a.x + q + (p.y + a.y); } else { s = 3.0 * a.x + 3.0 * q + 2.0 * a.y + (a.y - p.y); }
+    } else if (d.x > 0.0 && d.y < 0.0) {
+        s = a.x + r * atan2(d.x, -d.y);
+    } else if (d.x > 0.0) {
+        s = a.x + q + 2.0 * a.y + r * atan2(d.y, d.x);
+    } else if (d.y > 0.0) {
+        s = 3.0 * a.x + 2.0 * q + 2.0 * a.y + r * atan2(-d.x, d.y);
+    } else {
+        s = 3.0 * a.x + 3.0 * q + 4.0 * a.y + r * atan2(-d.y, -d.x);
+    }
+    return vec2<f32>(s, max(total, 1.0));
+}
+
 fn rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
     let r = min(radius, min(half.x, half.y));
     let q = abs(p) - half + vec2<f32>(r);
@@ -329,13 +366,18 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         }
         fill = mix(in.fill, in.fill_to, clamp(along_fill, 0.0, 1.0));
     }
-    // Dashes along a round rim: the distance travelled round the circle.
+    // Dashes along the rim: the distance travelled round the outline from
+    // twelve o'clock, clockwise, with the pattern stretched to fit it a whole
+    // number of times, so the last dash never meets the first.
     var dashed = 1.0;
     if (in.arc.z > 0.0) {
+        let walk = perimeter_at(in.local, in.half, in.shape.x);
         let period = in.arc.z + in.arc.w;
-        let along = fract(atan2(in.local.x, -in.local.y) / 6.2831853 + 1.0) * 6.2831853 * min(in.half.x, in.half.y);
-        let at = along - floor(along / period) * period;
-        dashed = clamp(min(at, in.arc.z - at) + 0.5, 0.0, 1.0);
+        let count = max(1.0, round(walk.y / period));
+        let fitted = walk.y / count;
+        let dash = in.arc.z * fitted / period;
+        let at = walk.x - floor(walk.x / fitted) * fitted;
+        dashed = clamp(min(at, dash - at) + 0.5, 0.0, 1.0);
     }
     let rim_alpha = rim_colour.a * (outer - inner) * part * dashed * outside_parent;
     let fill_alpha = fill.a * inner * surface * part * outside_parent;
