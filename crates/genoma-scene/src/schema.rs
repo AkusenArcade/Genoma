@@ -91,6 +91,7 @@ pub enum Prop {
     PivotX,
     PivotY,
     Values,
+    FillAcross,
     Follow,
     Clock,
 }
@@ -167,6 +168,7 @@ pub const PROPS: &[PropInfo] = &[
     p("sway", Prop::Sway, Ty::Number, false, "Seconds for one sway, there and back. 0 is still."),
     p("sway_range", Prop::SwayRange, Ty::Number, false, "How far the sway travels, logical units."),
     p("fill_bottom", Prop::FillBottom, Ty::Color, true, "With it, the fill runs from `fill` at the top to this at the bottom."),
+    p("fill_across", Prop::FillAcross, Ty::Bool, false, "The fill's gradient runs from `fill` at the left edge to `fill_bottom` at the right: a progress line."),
     p("arc_rate", Prop::ArcRate, Ty::Number, false, "Turns a second the arc grows by between the values it is set to: a trail that keeps up with a continuous hand."),
     p("padding_left", Prop::PaddingLeft, Ty::Number, false, "Inner space on the left."),
     p("padding_right", Prop::PaddingRight, Ty::Number, false, "Inner space on the right."),

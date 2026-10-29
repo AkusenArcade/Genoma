@@ -941,14 +941,16 @@ impl PointerHandler for App {
                     }
                     self.surfaces[i].pressed = hit;
                     if let Some(node) = hit {
-                        self.deliver(i, node, Input::Press(button));
+                        let (lx, ly) = scene.borrow().local(node, x, y);
+                        self.deliver(i, node, Input::Press(button, lx, ly));
                     }
                 }
                 K::Release { button, .. } => {
                     if let Some(node) = hit {
-                        self.deliver(i, node, Input::Release(button));
+                        let (lx, ly) = scene.borrow().local(node, x, y);
+                        self.deliver(i, node, Input::Release(button, lx, ly));
                         if self.surfaces[i].pressed == Some(node) {
-                            self.deliver(i, node, Input::Click(button));
+                            self.deliver(i, node, Input::Click(button, lx, ly));
                         }
                     }
                     self.surfaces[i].pressed = None;

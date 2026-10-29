@@ -28,7 +28,8 @@ pub struct Rect {
     pub rim_bottom: [f32; 4],
     /// The fill's surface as a wave: amplitude and wavelength in pixels, and
     /// the phase (0…1) it has travelled. Zero amplitude is a flat level. The
-    /// last is 1 for a level that fills from the left.
+    /// last is flags: 1 for a level that fills from the left, 2 for a fill
+    /// gradient that runs from the left edge to the right one.
     pub wave: [f32; 4],
     /// Only this part of the shape is drawn: start and sweep in turns,
     /// clockwise from twelve. A sweep of 1 or more is the whole shape; on a
@@ -304,7 +305,8 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         level = level + in.wave.x * sin(6.2831853 * (x / max(in.wave.y, 1.0) - in.wave.z));
     }
     var surface = clamp(level - from_bottom + 0.5, 0.0, 1.0);
-    if (in.wave.w > 0.5) {
+    let flags = u32(in.wave.w + 0.5);
+    if ((flags & 1u) != 0u) {
         surface = clamp(in.shape.z * in.half.x * 2.0 - (in.local.x + in.half.x) + 0.5, 0.0, 1.0);
     }
 
@@ -321,7 +323,11 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
 
     var fill = in.fill;
     if (in.fill_to.a > 0.0) {
-        fill = mix(in.fill, in.fill_to, clamp(height / max(in.half.y * 2.0, 1.0), 0.0, 1.0));
+        var along_fill = height / max(in.half.y * 2.0, 1.0);
+        if ((flags & 2u) != 0u) {
+            along_fill = (in.local.x + in.half.x) / max(in.half.x * 2.0, 1.0);
+        }
+        fill = mix(in.fill, in.fill_to, clamp(along_fill, 0.0, 1.0));
     }
     // Dashes along a round rim: the distance travelled round the circle.
     var dashed = 1.0;

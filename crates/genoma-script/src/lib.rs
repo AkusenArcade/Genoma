@@ -59,10 +59,12 @@ pub enum Input {
     /// it types and the modifiers held.
     Key(Key),
     Hover(bool),
-    Press(u32),
-    Release(u32),
+    /// The button, and where on the node, logical units from its top-left
+    /// corner: a progress line seeks to where it was pressed.
+    Press(u32, f32, f32),
+    Release(u32, f32, f32),
     /// A press and a release on the same node.
-    Click(u32),
+    Click(u32, f32, f32),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -76,9 +78,9 @@ impl Input {
             Input::Outside => "on_outside",
             Input::Key(_) => "on_key",
             Input::Hover(_) => "on_hover",
-            Input::Press(_) => "on_press",
-            Input::Release(_) => "on_release",
-            Input::Click(_) => "on_click",
+            Input::Press(..) => "on_press",
+            Input::Release(..) => "on_release",
+            Input::Click(..) => "on_click",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
@@ -931,7 +933,7 @@ impl Script {
                         f.call::<()>((key.name.as_str(), key.text.clone(), mods))
                     })(),
                     Input::Hover(entered) => f.call::<()>(*entered),
-                    Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(*b),
+                    Input::Press(b, x, y) | Input::Release(b, x, y) | Input::Click(b, x, y) => f.call::<()>((*b, *x, *y)),
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                 };
                 if let Err(e) = result {

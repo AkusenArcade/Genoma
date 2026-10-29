@@ -158,6 +158,7 @@ pub struct Node {
     wave_period: f32,
     wave_time: f32,
     level_left: bool,
+    fill_across: bool,
     wave_phase: f32,
     arc: f32,
     sway: f32,
@@ -237,6 +238,7 @@ impl Node {
             wave_period: 1.0,
             wave_time: 0.0,
             level_left: false,
+            fill_across: false,
             wave_phase: 0.0,
             arc: 1.0,
             sway: 0.0,
@@ -563,6 +565,12 @@ impl Scene {
             }
         });
         found
+    }
+
+    /// A point in the surface, logical units, from `node`'s top-left corner
+    /// as last drawn.
+    pub fn local(&self, node: NodeId, x: f32, y: f32) -> (f32, f32) {
+        self.tree.get_node_context(node).map_or((0.0, 0.0), |n| (x - n.bounds[0], y - n.bounds[1]))
     }
 
     /// The rectangles that take the pointer, logical units: the input region.
@@ -923,6 +931,7 @@ impl Scene {
             Prop::WavePeriod => n.wave_period = take!(number).max(1.0),
             Prop::WaveTime => (n.wave_time, mover) = (take!(number).max(0.0), true),
             Prop::LevelLeft => n.level_left = take!(flag),
+            Prop::FillAcross => n.fill_across = take!(flag),
             Prop::Arc => n.arc = take!(number),
             Prop::Angle => n.angle = take!(number).rem_euclid(1.0),
             Prop::Sway => (n.sway, mover) = (take!(number).max(0.0), true),
@@ -1515,7 +1524,12 @@ fn collect(
                     fill: fade(n.fill),
                     rim_top: fade(n.rim_top),
                     rim_bottom: fade(n.rim_bottom),
-                    wave: [n.wave * scale, n.wave_period * scale, n.wave_phase, if n.level_left { 1.0 } else { 0.0 }],
+                    wave: [
+                        n.wave * scale,
+                        n.wave_period * scale,
+                        n.wave_phase,
+                        (if n.level_left { 1.0 } else { 0.0 }) + if n.fill_across { 2.0 } else { 0.0 },
+                    ],
                     arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
                     fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
                     clip: out.clip,

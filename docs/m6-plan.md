@@ -46,7 +46,7 @@ sources.
 | ~~A text field~~: done 2026-10-29 for the vitals' filter: keys with their text and modifiers, held keys repeating; the field itself is Bioma's `components/field.luau` | the vitals' and the clock's expansions, then the launcher, settings, the lock, the greeter |
 | ~~A fragment shader node~~: `g.shader` done 2026-10-29 (a WGSL `shade(p)` over a prelude, up to 128 bound numbers eased by the node at the display's rate, a clock that runs only while asked; compiled under an error scope, so a broken file draws nothing and says why). `fluid.frag` translated by hand; the lava lamp, cytoplasm and osmosis still to come | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
-| Images over the network (cover art by `https:`) | media |
+| ~~Images over the network~~: not Genoma's, as it turned out: Bioma downloads a remote cover once to its cache (`curl`, 2026-10-29) and `g.image` reads the file | media |
 | Drag and drop | organisms' arrange mode |
 
 ## Steps, in dependency order
