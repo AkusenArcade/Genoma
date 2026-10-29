@@ -11,8 +11,10 @@ use bytemuck::{Pod, Zeroable};
 struct Quad {
     origin: [f32; 2],
     size: [f32; 2],
+    /// Alpha, then the corners' radius.
     alpha: [f32; 4],
     clip: [f32; 4],
+    uv: [f32; 4],
     m: [[f32; 4]; 4],
 }
 
@@ -27,11 +29,14 @@ struct Varyings {
     @location(0) uv: vec2<f32>,
     @location(1) alpha: f32,
     @location(2) clip: vec4<f32>,
+    @location(3) local: vec2<f32>,
+    @location(4) shape: vec3<f32>,
 };
 
 @vertex
 fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @location(1) size: vec2<f32>, @location(2) alpha: vec4<f32>, @location(3) clip: vec4<f32>,
-      @location(4) m0: vec4<f32>, @location(5) m1: vec4<f32>, @location(6) m2: vec4<f32>, @location(7) m3: vec4<f32>) -> Varyings {
+      @location(4) m0: vec4<f32>, @location(5) m1: vec4<f32>, @location(6) m2: vec4<f32>, @location(7) m3: vec4<f32>,
+      @location(8) uv: vec4<f32>) -> Varyings {
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u));
     let pixel = origin + corner * size;
     // Depth, as the rects have it: w carries the perspective.
@@ -39,9 +44,11 @@ fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @locat
     let q = vec4<f32>(dot(m0, p), dot(m1, p), dot(m2, p), dot(m3, p));
     var out: Varyings;
     out.position = vec4<f32>((q.xy / q.w) / globals.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0) * vec4<f32>(q.w, q.w, 1.0, q.w);
-    out.uv = corner;
+    out.uv = mix(uv.xy, uv.zw, corner);
     out.alpha = alpha.x;
     out.clip = clip;
+    out.local = corner * size;
+    out.shape = vec3<f32>(size, alpha.y);
     return out;
 }
 
@@ -51,8 +58,17 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
     }
-    // Already premultiplied, as tiny-skia rasterises.
-    return textureSample(image, smp, in.uv) * in.alpha;
+    // Already premultiplied, as tiny-skia rasterises; the corners cut here,
+    // antialiased across a pixel.
+    var cover = 1.0;
+    let r = min(in.shape.z, min(in.shape.x, in.shape.y) * 0.5);
+    if (r > 0.0) {
+        let half = in.shape.xy * 0.5;
+        let q = abs(in.local - half) - (half - vec2<f32>(r));
+        let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+        cover = clamp(0.5 - d, 0.0, 1.0);
+    }
+    return textureSample(image, smp, in.uv) * in.alpha * cover;
 }
 "#;
 
@@ -139,7 +155,7 @@ impl Pipeline {
                     array_stride: std::mem::size_of::<Quad>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4,
-                        4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4],
+                        8 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -260,9 +276,10 @@ impl Pipeline {
             }
             quads.push(Quad {
                 origin: image.origin,
-                size: [image.width as f32, image.height as f32],
-                alpha: [image.alpha, 0.0, 0.0, 0.0],
+                size: image.size,
+                alpha: [image.alpha, image.radius, 0.0, 0.0],
                 clip: image.clip,
+                uv: image.uv,
                 m: image.transform,
             });
             self.draws.push(image.key);

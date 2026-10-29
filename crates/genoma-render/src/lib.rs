@@ -83,6 +83,14 @@ pub struct Image {
     pub height: u32,
     /// Top-left corner, physical pixels, on whole pixels.
     pub origin: [f32; 2],
+    /// The size it is drawn at, physical pixels: the texture's, or smaller
+    /// for a part of it (`uv`).
+    pub size: [f32; 2],
+    /// The part of the texture drawn, 0…1: u0, v0, u1, v1.
+    pub uv: [f32; 4],
+    /// Corners rounded as it is drawn, physical pixels: the texture keeps
+    /// square ones, so one decode serves every width it is shown at.
+    pub radius: f32,
     /// Multiplies the image's own alpha: a subtree fading in.
     pub alpha: f32,
     /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.

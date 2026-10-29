@@ -20,3 +20,9 @@ wgpu = { version = "30", default-features = false, features = ["std", "parking_l
 
 [profile.release]
 debug = "line-tables-only"
+
+# taffy 0.15.1 with one fix (vendor/taffy/GENOMA.md): a removed node left in
+# a hidden containing block's hoisted list was a panic in the layout's
+# rounding pass.
+[patch.crates-io]
+taffy = { path = "vendor/taffy" }

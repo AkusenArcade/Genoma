@@ -160,6 +160,8 @@ pub struct Node {
     level_left: bool,
     fill_across: bool,
     raised: bool,
+    /// An image's decode size, logical units, when not its box's.
+    decode: [Option<f32>; 2],
     wave_phase: f32,
     arc: f32,
     sway: f32,
@@ -241,6 +243,7 @@ impl Node {
             level_left: false,
             fill_across: false,
             raised: false,
+            decode: [None, None],
             wave_phase: 0.0,
             arc: 1.0,
             sway: 0.0,
@@ -948,6 +951,8 @@ impl Scene {
             Prop::LevelLeft => n.level_left = take!(flag),
             Prop::FillAcross => n.fill_across = take!(flag),
             Prop::Raised => n.raised = take!(flag),
+            Prop::DecodeWidth => n.decode[0] = Some(take!(number)).filter(|v| *v > 0.0),
+            Prop::DecodeHeight => n.decode[1] = Some(take!(number)).filter(|v| *v > 0.0),
             Prop::Arc => n.arc = take!(number),
             Prop::Angle => n.angle = take!(number).rem_euclid(1.0),
             Prop::Sway => (n.sway, mover) = (take!(number).max(0.0), true),
@@ -1776,6 +1781,9 @@ fn collect_node(
                         width: pixels,
                         height: pixels,
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                        size: [pixels as f32, pixels as f32],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        radius: 0.0,
                         alpha,
                         clip: out.clip,
                         transform: out.transform,
@@ -1786,15 +1794,33 @@ fn collect_node(
         Kind::Image => {
             let w = (layout.size.width * scale).round() as u32;
             let h = (layout.size.height * scale).round() as u32;
+            // Decoded at its own size when it has one: a box whose width
+            // moves (a carousel's step) shows the middle of one decode
+            // rather than asking for a new one every frame.
+            let dw = n.decode[0].map_or(w, |d| (d * scale).round() as u32).max(1);
+            let dh = n.decode[1].map_or(h, |d| (d * scale).round() as u32).max(1);
             if let (Some(source), true) = (n.src.clone(), w > 0 && h > 0) {
                 let radius = n.radius.unwrap_or(0.0) * scale;
-                if let Some((key, data)) = out.images.get(&source, w, h, n.fit, radius) {
+                if let Some((key, data)) = out.images.get(&source, dw, dh, n.fit, 0.0) {
+                    let part = |shown: u32, decoded: u32| {
+                        if shown >= decoded {
+                            (0.0, 1.0)
+                        } else {
+                            let m = (decoded - shown) as f32 / 2.0 / decoded as f32;
+                            (m, 1.0 - m)
+                        }
+                    };
+                    let (u0, u1) = part(w, dw);
+                    let (v0, v1) = part(h, dh);
                     out.list.images.push(genoma_render::Image {
                         key,
                         pixels: data,
-                        width: w,
-                        height: h,
+                        width: dw,
+                        height: dh,
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                        size: [w as f32, h as f32],
+                        uv: [u0, v0, u1, v1],
+                        radius,
                         alpha,
                         clip: out.clip,
                         transform: out.transform,
@@ -1815,6 +1841,9 @@ fn collect_node(
                     width: r.width,
                     height: r.height,
                     origin: [at[0].floor() + r.offset[0] as f32, at[1].floor() + r.offset[1] as f32],
+                    size: [r.width as f32, r.height as f32],
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    radius: 0.0,
                     alpha: alpha * n.color[3],
                     clip: out.clip,
                     transform: out.transform,
