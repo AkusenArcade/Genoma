@@ -122,6 +122,11 @@ Bioma's own services (about fifty) in Luau on `g.process`, `g.file`,
 `g.socket`, `g.dbus` and the built-in domains, each verified headless
 before a cell depends on it, as Bioma's were from Prisma.
 
+**Genoma chooses, Quickshell acts** until step 7 (Akusen, 2026-10-29): a
+service that acts on the desktop (matugen, templates, gsettings, the
+wallpaper's state) writes from Bioma on Genoma only the shared
+configuration and state, and Bioma on Quickshell runs the effects.
+
 **Steps 3 and 4 go phase by phase** (Akusen, 2026-10-29): the services a
 phase's cells read, then those cells, then the next phase. A service is
 then tried by a real cell at once, and something is on screen sooner. The
