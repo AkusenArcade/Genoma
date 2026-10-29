@@ -9,6 +9,7 @@
 
 mod glyphs;
 mod icons;
+mod images;
 mod schema;
 
 use std::{
@@ -33,6 +34,8 @@ pub enum Kind {
     Capsule,
     Text,
     Icon,
+    /// A picture from a file, fitted to its box (`g.image`).
+    Image,
     /// A quadratic Bézier with a width, grown along its length.
     Thread,
     /// Particles born at a rate, from `from` toward a heading or to `to`.
@@ -104,6 +107,8 @@ pub struct Node {
     angle: f32,
     orbit_radius: f32,
     icon: Option<String>,
+    src: Option<String>,
+    fit: images::Fit,
     gradient: (Option<[f32; 4]>, Option<[f32; 4]>),
     stroke: Option<f32>,
     hollow: bool,
@@ -183,6 +188,8 @@ impl Node {
             angle: 0.0,
             orbit_radius: 0.0,
             icon: None,
+            src: None,
+            fit: images::Fit::Cover,
             gradient: (None, None),
             stroke: None,
             hollow: false,
@@ -388,6 +395,7 @@ pub struct Scene {
     last_step: Option<Instant>,
     dirty: bool,
     icons: icons::Icons,
+    images: images::Images,
     glyphs: glyphs::Glyphs,
     /// Particles' clock: their births and their age are seconds since this.
     epoch: Instant,
@@ -421,6 +429,7 @@ impl Scene {
             last_step: None,
             dirty: true,
             icons: icons::Icons::default(),
+            images: images::Images::default(),
             glyphs: glyphs::Glyphs::default(),
             epoch: Instant::now(),
             now: 0.0,
@@ -575,7 +584,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Thread | Kind::Emitter => Style { flex_shrink: 0.0, ..Style::default() },
+            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter => Style { flex_shrink: 0.0, ..Style::default() },
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -852,6 +861,14 @@ impl Scene {
             Prop::Orbit => (n.orbit, mover) = (take!(number), true),
             Prop::OrbitRadius => n.orbit_radius = take!(number),
             Prop::Icon => n.icon = Some(take!(text)),
+            Prop::Src => n.src = Some(take!(text)),
+            Prop::Fit => {
+                n.fit = match take!(text).as_str() {
+                    "contain" => images::Fit::Contain,
+                    "fill" => images::Fit::Fill,
+                    _ => images::Fit::Cover,
+                }
+            }
             Prop::GradientTop => n.gradient.0 = Some(take!(colour)),
             Prop::GradientBottom => n.gradient.1 = Some(take!(colour)),
             Prop::Stroke => n.stroke = Some(take!(number)),
@@ -955,6 +972,15 @@ impl Scene {
         }
         self.animations = running;
         let mut motion = Motion { moving: !self.animations.is_empty(), wake: None };
+        // An image that finished decoding is news; one still decoding is
+        // looked for again on a short beat.
+        if self.images.collect() {
+            self.dirty = true;
+            motion.moving = true;
+        }
+        if self.images.pending() {
+            motion.wake = Some(images::BEAT);
+        }
 
         for &node in &self.movers {
             let Some(n) = self.tree.get_node_context_mut(node) else { continue };
@@ -1072,9 +1098,10 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, glyphs: &mut self.glyphs, blur: Vec::new() };
+        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
+        self.images.sweep();
         list
     }
 }
@@ -1172,6 +1199,7 @@ struct Out<'a> {
     /// The clip in force, physical pixels: x0, y0, x1, y1.
     clip: [f32; 4],
     icons: &'a mut icons::Icons,
+    images: &'a mut images::Images,
     glyphs: &'a mut glyphs::Glyphs,
     blur: Vec<Blur>,
 }
@@ -1565,6 +1593,25 @@ fn collect(
                         pixels: data,
                         width: pixels,
                         height: pixels,
+                        origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                        alpha,
+                        clip: out.clip,
+                        transform: out.transform,
+                    });
+                }
+            }
+        }
+        Kind::Image => {
+            let w = (layout.size.width * scale).round() as u32;
+            let h = (layout.size.height * scale).round() as u32;
+            if let (Some(source), true) = (n.src.clone(), w > 0 && h > 0) {
+                let radius = n.radius.unwrap_or(0.0) * scale;
+                if let Some((key, data)) = out.images.get(&source, w, h, n.fit, radius) {
+                    out.list.images.push(genoma_render::Image {
+                        key,
+                        pixels: data,
+                        width: w,
+                        height: h,
                         origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
                         alpha,
                         clip: out.clip,

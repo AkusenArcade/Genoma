@@ -1342,7 +1342,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "thread", "emitter", "each"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "each"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -1572,6 +1572,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "capsule" => Kind::Capsule,
         "text" => Kind::Text,
         "icon" => Kind::Icon,
+        "image" => Kind::Image,
         "thread" => Kind::Thread,
         "emitter" => Kind::Emitter,
         other => return Err(err(format!("unknown node {other}"))),

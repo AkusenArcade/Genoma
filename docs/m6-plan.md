@@ -42,7 +42,7 @@ sources.
 
 | Gap | First needed by |
 |---|---|
-| Images from files (PNG, JPEG, WebP) and from pixels | the wallpaper (step 4.2); media art; tray and notification pixmaps |
+| ~~Images from files~~: `g.image` done 2026-10-29 (PNG, JPEG, WebP, SVG; cover, contain, fill; rounded; decoded off the frame). From pixels still to come | the wallpaper, media art, the theme's thumbnails; pixels for tray and notification icons |
 | ~~A text field~~: done 2026-10-29 for the vitals' filter: keys with their text and modifiers, held keys repeating; the field itself is Bioma's `components/field.luau` | the vitals' and the clock's expansions, then the launcher, settings, the lock, the greeter |
 | A fragment shader node, Bioma's four `.frag` translated to WGSL | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
