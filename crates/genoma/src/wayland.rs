@@ -90,6 +90,11 @@ struct Surface {
     /// because Wayland's default is the whole surface.
     blurred: Vec<[i32; 4]>,
     inputs: Option<Vec<[i32; 4]>>,
+    /// What is cut out of a catching surface's input: the other surfaces'
+    /// inputs on its output, as last sent.
+    holes: Vec<[i32; 4]>,
+    /// Whether the surface last asked for the keyboard.
+    keyboard: bool,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     /// The touchpad's recent movement: when, and how far, for the fling.
@@ -354,6 +359,8 @@ impl App {
             frames: 0,
             blurred: Vec::new(),
             inputs: None,
+            holes: Vec::new(),
+            keyboard: false,
             hovered: None,
             pressed: None,
             strokes: Vec::new(),
@@ -431,7 +438,8 @@ impl App {
             None if !s.tall => s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
             None => {}
         }
-        s.layer.set_keyboard_interactivity(if s.scene.borrow().catcher().is_some() {
+        s.keyboard = s.scene.borrow().catcher().is_some();
+        s.layer.set_keyboard_interactivity(if s.keyboard {
             KeyboardInteractivity::Exclusive
         } else {
             KeyboardInteractivity::None
@@ -469,8 +477,31 @@ impl App {
         }
     }
 
+    /// What the interface's other surfaces on this one's output take the
+    /// pointer for. A catching surface leaves those to them, so a press on
+    /// another membrane's cell reaches that cell rather than closing this
+    /// one: the two regions never overlap, whatever the stacking. Only full
+    /// surfaces are counted, since they alone share the output's origin.
+    fn holes_for(&self, i: usize) -> Vec<[i32; 4]> {
+        let s = &self.surfaces[i];
+        let mut holes = Vec::new();
+        for (j, other) in self.surfaces.iter().enumerate() {
+            let full = self.specs.get(other.spec).is_some_and(|spec| spec.full);
+            if j == i || !full || !other.configured || other.output != s.output {
+                continue;
+            }
+            for r in other.scene.borrow().input_rects() {
+                holes.push([r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32]);
+            }
+        }
+        holes
+    }
+
     fn draw(&mut self, i: usize) {
         let spans = self.spans(i);
+        let catching = self.surfaces[i].scene.borrow().catcher().is_some();
+        let holes = if catching { self.holes_for(i) } else { Vec::new() };
+        let mut inputs_changed = false;
         let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
         let (Some(renderer), Some(handle)) = (&self.renderer, self.handle.clone()) else { return };
         let compositor = &self.compositor;
@@ -519,8 +550,9 @@ impl App {
             s.blurred = shapes;
         }
         // The input region: only what takes the pointer, or the whole surface
-        // while a cell is catching. The rest lets the pointer through.
-        let inputs: Vec<[i32; 4]> = if s.scene.borrow().catcher().is_some() {
+        // less the holes while a cell is catching. The rest lets the pointer
+        // through.
+        let inputs: Vec<[i32; 4]> = if catching {
             vec![[0, 0, s.logical.0 as i32, s.logical.1 as i32]]
         } else {
             s.scene
@@ -530,14 +562,29 @@ impl App {
                 .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
                 .collect()
         };
-        if s.inputs.as_ref() != Some(&inputs) {
+        if s.inputs.as_ref() != Some(&inputs) || s.holes != holes {
             if let Ok(region) = Region::new(compositor) {
                 for &[x, y, w, h] in &inputs {
                     region.add(x, y, w, h);
                 }
+                for &[x, y, w, h] in &holes {
+                    region.subtract(x, y, w, h);
+                }
                 surface.set_input_region(Some(region.wl_region()));
             }
+            inputs_changed = s.inputs.as_ref() != Some(&inputs);
             s.inputs = Some(inputs);
+            s.holes = holes;
+        }
+        // The keyboard while a cell is catching, with this frame's commit: a
+        // full surface never changes size, so it is never placed again.
+        if s.keyboard != catching {
+            s.layer.set_keyboard_interactivity(if catching {
+                KeyboardInteractivity::Exclusive
+            } else {
+                KeyboardInteractivity::None
+            });
+            s.keyboard = catching;
         }
         // The scene's own record of this change is consumed by this frame.
         s.scene.borrow_mut().take_dirty();
@@ -587,6 +634,21 @@ impl App {
                     TimeoutAction::Drop
                 })
                 .ok();
+        }
+
+        // What this surface takes moved, so a surface catching on the same
+        // output cuts its holes again.
+        if inputs_changed {
+            let output = self.surfaces[i].output.clone();
+            for j in 0..self.surfaces.len() {
+                let s = &self.surfaces[j];
+                if j != i && s.configured && s.output == output && s.scene.borrow().catcher().is_some() {
+                    self.surfaces[j].dirty = true;
+                    if !self.surfaces[j].frame_pending {
+                        self.draw(j);
+                    }
+                }
+            }
         }
     }
 
