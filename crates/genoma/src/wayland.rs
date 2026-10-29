@@ -636,7 +636,13 @@ impl App {
         surface.frame(qh, FrameCallbackData(surface.clone()));
         s.frame_pending = true;
         renderer.draw(s.id, width, height, list);
-        log::trace!("build {} us", started.elapsed().as_micros());
+        let built = started.elapsed();
+        log::trace!("build {} us", built.as_micros());
+        // A frame the eye can catch late: said, with what it held, so a
+        // stall reported afterwards can be read back.
+        if built > Duration::from_millis(20) {
+            log::warn!("surface {} frame {}: built in {} ms", s.id, s.frames + 1, built.as_millis());
+        }
         s.dirty = animating;
         s.frames += 1;
         if s.access_checked.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {

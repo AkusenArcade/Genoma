@@ -142,7 +142,17 @@ impl Gpu {
     pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
         let started = std::time::Instant::now();
         self.draw_inner(id, width, height, list);
-        log::trace!("render {} us", started.elapsed().as_micros());
+        let took = started.elapsed();
+        log::trace!("render {} us", took.as_micros());
+        if took > std::time::Duration::from_millis(20) {
+            log::warn!(
+                "surface {id}: rendered in {} ms ({} rects, {} images, {} texts)",
+                took.as_millis(),
+                list.rects.len(),
+                list.images.len(),
+                list.texts.len()
+            );
+        }
     }
 
     fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
