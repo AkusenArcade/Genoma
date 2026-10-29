@@ -42,6 +42,7 @@ use smithay_client_toolkit::{
                     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
                     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
                 },
+                cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
                 linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
                 viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
             },
@@ -52,7 +53,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{AxisScroll, PointerEvent, PointerHandler},
+        pointer::{AxisScroll, PointerEvent, PointerHandler, cursor_shape::CursorShapeManager},
     },
     shell::{
         WaylandSurface,
@@ -135,6 +136,14 @@ pub struct App {
     next_id: SurfaceId,
     handle: Option<LoopHandle<'static, App>>,
     pointer: Option<wl_pointer::WlPointer>,
+    /// `wp-cursor-shape`: the pointer's shape by name, drawn by the
+    /// compositor in the user's cursor theme. The device is the pointer's.
+    cursor_shapes: Option<CursorShapeManager>,
+    cursor_device: Option<WpCursorShapeDeviceV1>,
+    /// The serial of the pointer's last entry, which a shape is set with,
+    /// and the shape set since: none until one is.
+    cursor_serial: u32,
+    cursor_shape: Option<&'static str>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// A seat whose keyboard arrived before the loop did: the keyboard is
     /// taken with key repeat, which needs the loop.
@@ -182,6 +191,10 @@ impl App {
             next_id: 1,
             handle: None,
             pointer: None,
+            cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
+            cursor_device: None,
+            cursor_serial: 0,
+            cursor_shape: None,
             keyboard: None,
             keyboard_seat: None,
             modifiers: Modifiers::default(),
@@ -476,6 +489,7 @@ impl App {
         // The reserved strip stays the membrane's, however tall the surface
         // grows while a cell is open.
         match spec.reserve_strip {
+            _ if spec.above_zones => s.layer.set_exclusive_zone(-1),
             Some(strip) => s.layer.set_exclusive_zone(if spec.reserve { strip } else { 0 }),
             None if !s.tall => s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
             None => {}
@@ -879,6 +893,9 @@ impl SeatHandler for App {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seats.get_pointer(qh, &seat).ok();
+            if let (Some(pointer), Some(shapes)) = (&self.pointer, &self.cursor_shapes) {
+                self.cursor_device = Some(shapes.get_shape_device(pointer, qh));
+            }
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let _ = qh;
@@ -888,6 +905,9 @@ impl SeatHandler for App {
 
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer {
+            if let Some(device) = self.cursor_device.take() {
+                device.destroy();
+            }
             if let Some(pointer) = self.pointer.take() {
                 pointer.release();
             }
@@ -937,7 +957,21 @@ impl PointerHandler for App {
                 }
                 self.surfaces[i].hovered = hit;
             }
+            if let K::Enter { serial } = event.kind {
+                self.cursor_serial = serial;
+                self.cursor_shape = None;
+            }
+            if !matches!(event.kind, K::Leave { .. }) {
+                let wanted = hit.map_or(genoma_scene::CURSORS[0], |h| scene.borrow().cursor(h));
+                self.set_cursor(wanted);
+            }
             match event.kind {
+                K::Motion { .. } => {
+                    if let Some(node) = self.surfaces[i].pressed {
+                        let (lx, ly) = scene.borrow().local(node, x, y);
+                        self.deliver(i, node, Input::Drag(lx, ly));
+                    }
+                }
                 K::Press { button, .. } => {
                     let catcher = scene.borrow().catcher();
                     if let Some(c) = catcher {
@@ -1002,6 +1036,28 @@ impl PointerHandler for App {
                 _ => {}
             }
         }
+    }
+}
+
+impl App {
+    /// The pointer's shape, set only when it changes: the compositor draws
+    /// it from the user's cursor theme.
+    fn set_cursor(&mut self, name: &'static str) {
+        if self.cursor_shape == Some(name) {
+            return;
+        }
+        let Some(device) = &self.cursor_device else { return };
+        let shape = match name {
+            "pointer" => Shape::Pointer,
+            "crosshair" => Shape::Crosshair,
+            "text" => Shape::Text,
+            "grab" => Shape::Grab,
+            "grabbing" => Shape::Grabbing,
+            "not-allowed" => Shape::NotAllowed,
+            _ => Shape::Default,
+        };
+        device.set_shape(self.cursor_serial, shape);
+        self.cursor_shape = Some(name);
     }
 }
 

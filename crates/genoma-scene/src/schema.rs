@@ -93,6 +93,7 @@ pub enum Prop {
     Values,
     FillAcross,
     Raised,
+    Cursor,
     DecodeWidth,
     DecodeHeight,
     Follow,
@@ -123,6 +124,10 @@ pub struct PropInfo {
 const fn p(name: &'static str, prop: Prop, ty: Ty, animatable: bool, doc: &'static str) -> PropInfo {
     PropInfo { name, prop, ty, animatable, doc }
 }
+
+/// The pointer shapes a node can ask for; the first is the compositor's
+/// default, which a node names nothing to get.
+pub const CURSORS: [&str; 7] = ["default", "pointer", "crosshair", "text", "grab", "grabbing", "not-allowed"];
 
 pub const PROPS: &[PropInfo] = &[
     p("width", Prop::Width, Ty::Number, true, "Fixed width, logical units."),
@@ -215,6 +220,7 @@ pub const PROPS: &[PropInfo] = &[
     p("decode_width", Prop::DecodeWidth, Ty::Number, false, "An image decoded at this width, logical units, rather than its box's: a box narrower shows the middle of it. For a box whose size moves."),
     p("decode_height", Prop::DecodeHeight, Ty::Number, false, "An image decoded at this height, logical units."),
     p("raised", Prop::Raised, Ty::Bool, false, "Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it."),
+    p("cursor", Prop::Cursor, Ty::Choice(&CURSORS), false, "The pointer's shape over this node and what it holds, unless a node inside names its own."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];
 

@@ -285,6 +285,24 @@ impl UserData for Process {
             }
             Ok(())
         });
+        // p:signal(2): a signal by number, for a program that ends cleanly
+        // on one (a recorder closes its file on SIGINT). The exit still
+        // comes through on_exit; an ended process is left alone, its pid
+        // being someone else's once it is reaped.
+        methods.add_method("signal", |_, this, number: i32| {
+            if this.running.exit.get().is_some() {
+                return Ok(());
+            }
+            let Some(signal) = rustix::process::Signal::from_named_raw(number) else {
+                return Err(err(format!("g.process signal: no signal {number}")));
+            };
+            if let Some(child) = this.running.child.borrow().as_ref() {
+                if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+                    let _ = rustix::process::kill_process(pid, signal);
+                }
+            }
+            Ok(())
+        });
         methods.add_method("stop", |_, this, ()| {
             this.stop.stop();
             Ok(())

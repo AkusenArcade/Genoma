@@ -24,7 +24,7 @@ use taffy::{
     LengthPercentage, LengthPercentageAuto, Size, Style, TaffyTree,
 };
 
-pub use schema::{PROPS, Prop, PropInfo, Ty, luau_definitions};
+pub use schema::{CURSORS, PROPS, Prop, PropInfo, Ty, luau_definitions};
 pub use taffy::NodeId;
 
 /// What a node draws. A box only arranges its children.
@@ -160,6 +160,9 @@ pub struct Node {
     level_left: bool,
     fill_across: bool,
     raised: bool,
+    /// The pointer's shape over it, an index into `schema::CURSORS`; 0 is
+    /// whatever the node around it asks for.
+    cursor: u8,
     /// An image's decode size, logical units, when not its box's.
     decode: [Option<f32>; 2],
     wave_phase: f32,
@@ -243,6 +246,7 @@ impl Node {
             level_left: false,
             fill_across: false,
             raised: false,
+            cursor: 0,
             decode: [None, None],
             wave_phase: 0.0,
             arc: 1.0,
@@ -544,6 +548,21 @@ impl Scene {
     /// its surface until it has.
     pub fn transitioning(&self) -> bool {
         !self.animations.is_empty()
+    }
+
+    /// The pointer's shape over `node`, by its name in `schema::CURSORS`:
+    /// its own, or the nearest it sits in that names one.
+    pub fn cursor(&self, mut node: NodeId) -> &'static str {
+        loop {
+            match self.tree.get_node_context(node) {
+                Some(n) if n.cursor != 0 => return schema::CURSORS[n.cursor as usize],
+                _ => {}
+            }
+            match self.tree.parent(node) {
+                Some(p) => node = p,
+                None => return schema::CURSORS[0],
+            }
+        }
     }
 
     /// Whether `node` is `ancestor` or inside it.
@@ -951,6 +970,10 @@ impl Scene {
             Prop::LevelLeft => n.level_left = take!(flag),
             Prop::FillAcross => n.fill_across = take!(flag),
             Prop::Raised => n.raised = take!(flag),
+            Prop::Cursor => {
+                let name = take!(text);
+                n.cursor = schema::CURSORS.iter().position(|c| *c == name).unwrap_or(0) as u8;
+            }
             Prop::DecodeWidth => n.decode[0] = Some(take!(number)).filter(|v| *v > 0.0),
             Prop::DecodeHeight => n.decode[1] = Some(take!(number)).filter(|v| *v > 0.0),
             Prop::Arc => n.arc = take!(number),

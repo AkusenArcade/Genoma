@@ -65,6 +65,10 @@ pub enum Input {
     Release(u32, f32, f32),
     /// A press and a release on the same node.
     Click(u32, f32, f32),
+    /// The pointer moving while a button is held, to the node the press
+    /// landed on, logical units from its top-left corner wherever the
+    /// pointer has gone since: a rectangle being drawn.
+    Drag(f32, f32),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -81,13 +85,14 @@ impl Input {
             Input::Press(..) => "on_press",
             Input::Release(..) => "on_release",
             Input::Click(..) => "on_click",
+            Input::Drag(..) => "on_drag",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_wheel", "on_fling", "on_outside", "on_key"];
 
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
@@ -108,6 +113,10 @@ pub struct SurfaceSpec {
     /// The size of its output, whatever its content: a membrane whose cells
     /// open over the windows, as Bioma's are, so the surface never resizes.
     pub full: bool,
+    /// Over what the other surfaces keep for themselves, rather than inside
+    /// what they leave: a surface that is the whole output, its origin the
+    /// output's (a selection drawn over the desktop).
+    pub above_zones: bool,
     /// `"all"` for one surface on every output, a list of output names, or
     /// none for a single surface (on `output`, or the compositor's choice).
     pub outputs: Option<Vec<String>>,
@@ -934,6 +943,7 @@ impl Script {
                     })(),
                     Input::Hover(entered) => f.call::<()>(*entered),
                     Input::Press(b, x, y) | Input::Release(b, x, y) | Input::Click(b, x, y) => f.call::<()>((*b, *x, *y)),
+                    Input::Drag(x, y) => f.call::<()>((*x, *y)),
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                 };
                 if let Err(e) = result {
@@ -1569,6 +1579,7 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
             _ => None,
         },
         full: t.get::<Option<bool>>("full")?.unwrap_or(false),
+        above_zones: t.get::<Option<bool>>("above_zones")?.unwrap_or(false),
         namespace: t.get::<Option<String>>("namespace")?.unwrap_or_else(|| "genoma".into()),
         all_outputs: matches!(t.get::<LuaValue>("outputs")?, LuaValue::String(ref s) if s.to_string_lossy() == "all"),
         outputs: match t.get::<LuaValue>("outputs")? {

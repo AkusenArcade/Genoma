@@ -49,7 +49,8 @@ sources.
 | ~~Images over the network~~: not Genoma's, as it turned out: Bioma downloads a remote cover once to its cache (`curl`, 2026-10-29) and `g.image` reads the file | media |
 | ~~Folders~~: `g.folder` done 2026-10-29 (entries by name, watched) | the wallpaper library, the palettes on offer, the thumbnails Quickshell made |
 | ~~A raised layer~~: `raised` done 2026-10-29 (drawn after the whole surface, text included, its shape cutting what is under it first; hit first) | the theme cell's lists over its capsules, then every dropdown in settings |
-| Drag and drop | organisms' arrange mode |
+| ~~A pointer that drags, and its shape~~: done 2026-10-29: `on_drag(x, y)` to the node the press landed on while the button is held; `cursor` on a node and what it holds (`wp-cursor-shape`); a surface `above_zones`, its origin the output's; `p:signal(n)` on a process | the utility's selection rectangle, its recorder and dictation's |
+| Drag and drop | organisms' arrange mode (on `on_drag`) |
 
 ## Steps, in dependency order
 
