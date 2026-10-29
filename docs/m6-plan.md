@@ -122,6 +122,12 @@ Bioma's own services (about fifty) in Luau on `g.process`, `g.file`,
 `g.socket`, `g.dbus` and the built-in domains, each verified headless
 before a cell depends on it, as Bioma's were from Prisma.
 
+**Steps 3 and 4 go phase by phase** (Akusen, 2026-10-29): the services a
+phase's cells read, then those cells, then the next phase. A service is
+then tried by a real cell at once, and something is on screen sooner. The
+services of phase 2 (Niri, NiriConfig and Monitors reading, SystemMonitor,
+Time, Calendar, Proxy reading, Apps) are done: Bioma's `genoma/PORT.md`.
+
 ### 4. Cells, in Bioma's build order
 
 1. [ ] Window title, workspaces, vitals, clock: M2's membrane, moved over and
