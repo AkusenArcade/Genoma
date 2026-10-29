@@ -492,6 +492,111 @@ pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
     Ok(Watched { path, text, stop })
 }
 
+// ---- g.folder --------------------------------------------------------------
+
+/// One entry of a folder: its name, and whether it is a folder itself.
+#[derive(Clone, Debug, PartialEq)]
+struct Entry {
+    name: String,
+    dir: bool,
+}
+
+pub struct Folder {
+    path: PathBuf,
+    entries: Signal<Vec<Entry>>,
+    stop: Rc<Stop>,
+}
+
+impl UserData for Folder {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // d.entries: { { name, path, dir } }, by name, hidden ones left out;
+        // empty while the folder does not exist. A binding that reads it
+        // follows the folder.
+        fields.add_field_method_get("entries", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, e) in this.entries.try_get().unwrap_or_default().iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("name", e.name.as_str())?;
+                t.set("path", this.path.join(&e.name).display().to_string())?;
+                t.set("dir", e.dir)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        fields.add_field_method_get("path", |_, this| Ok(this.path.display().to_string()));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("stop", |_, this, ()| {
+            this.stop.stop();
+            Ok(())
+        });
+    }
+}
+
+fn list_folder(path: &Path) -> Vec<Entry> {
+    let Ok(read) = std::fs::read_dir(path) else { return Vec::new() };
+    let mut out: Vec<Entry> = read
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            // Through a link, as a file manager shows it.
+            let dir = std::fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false);
+            Some(Entry { name, dir })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// `g.folder { path = "~/Pictures/Wallpapers" }`: what is in a folder, read
+/// now and again whenever an entry comes, goes or is renamed (`watch =
+/// false` reads once). Not recursive.
+pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
+    let path = expand(&t.get::<String>("path")?);
+    let entries = Signal::new(list_folder(&path));
+    let stop = Stop::new(host);
+    if t.get::<Option<bool>>("watch")?.unwrap_or(true) {
+        let watch = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC).and_then(|fd| {
+            inotify::add_watch(
+                &fd,
+                &path,
+                inotify::WatchFlags::MOVED_TO
+                    | inotify::WatchFlags::MOVED_FROM
+                    | inotify::WatchFlags::CREATE
+                    | inotify::WatchFlags::DELETE
+                    | inotify::WatchFlags::CLOSE_WRITE,
+            )?;
+            Ok(fd)
+        });
+        match watch {
+            Ok(fd) => {
+                let (path, entries) = (path.clone(), entries.clone());
+                stop.hold(host.readable(
+                    fd,
+                    Box::new(move |fd| {
+                        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+                        let mut events = inotify::Reader::new(fd, &mut buf);
+                        while events.next().is_ok() {}
+                        // Set only when the list differs: a file written in
+                        // place is a change of content, not of the folder.
+                        let now = list_folder(&path);
+                        if entries.try_get().as_ref() != Some(&now) {
+                            entries.set(now);
+                        }
+                        true
+                    }),
+                ))
+            }
+            Err(e) => log::warn!("g.folder {}: no watch: {e}", path.display()),
+        }
+    }
+    Ok(Folder { path, entries, stop })
+}
+
 // ---- g.socket --------------------------------------------------------------
 
 pub struct Socket {

@@ -47,6 +47,8 @@ sources.
 | ~~A fragment shader node~~: `g.shader` done 2026-10-29 (a WGSL `shade(p)` over a prelude, up to 128 bound numbers eased by the node at the display's rate, a clock that runs only while asked; compiled under an error scope, so a broken file draws nothing and says why). `fluid.frag` translated by hand; the lava lamp, cytoplasm and osmosis still to come | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
 | ~~Images over the network~~: not Genoma's, as it turned out: Bioma downloads a remote cover once to its cache (`curl`, 2026-10-29) and `g.image` reads the file | media |
+| ~~Folders~~: `g.folder` done 2026-10-29 (entries by name, watched) | the wallpaper library, the palettes on offer, the thumbnails Quickshell made |
+| ~~A raised layer~~: `raised` done 2026-10-29 (drawn after the whole surface, text included, its shape cutting what is under it first; hit first) | the theme cell's lists over its capsules, then every dropdown in settings |
 | Drag and drop | organisms' arrange mode |
 
 ## Steps, in dependency order

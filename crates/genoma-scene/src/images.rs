@@ -4,6 +4,10 @@
 //! wallpaper takes a tenth of a second to decode, and the frame that asked
 //! for it must not wait. Until it is ready the node draws nothing, and the
 //! scene looks again on a short beat.
+//!
+//! A few threads take the requests in turn, not one each: a grid of fifty
+//! photographs decoded at once is fifty full-size frames in memory together
+//! (a 4K one is 33 MB), and the machine taken from whatever else it does.
 
 use std::{
     collections::HashMap,
@@ -34,10 +38,28 @@ enum Entry {
 /// A request's result, handed back by the thread that decoded it.
 type Done = Arc<Mutex<Vec<(u64, Option<Arc<Vec<u8>>>)>>>;
 
+struct Request {
+    key: u64,
+    source: String,
+    width: u32,
+    height: u32,
+    fit: Fit,
+    radius: f32,
+}
+
+/// The requests waiting, newest last, and how many threads take them.
+#[derive(Default)]
+struct Queue {
+    waiting: Mutex<(std::collections::VecDeque<Request>, usize)>,
+}
+
+const WORKERS: usize = 3;
+
 #[derive(Default)]
 pub struct Images {
     cache: HashMap<u64, (Entry, u64)>,
     done: Done,
+    queue: Arc<Queue>,
     /// Counts the frames drawn, to let go of what no frame has asked for in
     /// a while.
     frame: u64,
@@ -63,17 +85,35 @@ impl Images {
             };
         }
         self.cache.insert(key, (Entry::Pending, frame));
-        let (source, done) = (source.to_owned(), self.done.clone());
-        std::thread::Builder::new()
-            .name("genoma-image".into())
-            .spawn(move || {
-                let pixels = decode(&source, width, height, fit, radius).map(Arc::new);
+        let request = Request { key, source: source.to_owned(), width, height, fit, radius };
+        let mut waiting = self.queue.waiting.lock().unwrap();
+        waiting.0.push_back(request);
+        // A thread more while there are fewer than WORKERS; each takes
+        // requests until none is left, then ends.
+        if waiting.1 < WORKERS {
+            waiting.1 += 1;
+            let (queue, done) = (self.queue.clone(), self.done.clone());
+            let spawned = std::thread::Builder::new().name("genoma-image".into()).spawn(move || loop {
+                let next = {
+                    let mut waiting = queue.waiting.lock().unwrap();
+                    match waiting.0.pop_front() {
+                        Some(r) => r,
+                        None => {
+                            waiting.1 -= 1;
+                            return;
+                        }
+                    }
+                };
+                let pixels = decode(&next.source, next.width, next.height, next.fit, next.radius).map(Arc::new);
                 if pixels.is_none() {
-                    log::warn!("g.image {source}: could not be read");
+                    log::warn!("g.image {}: could not be read", next.source);
                 }
-                done.lock().unwrap().push((key, pixels));
-            })
-            .ok();
+                done.lock().unwrap().push((next.key, pixels));
+            });
+            if spawned.is_err() {
+                waiting.1 -= 1;
+            }
+        }
         None
     }
 

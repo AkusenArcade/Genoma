@@ -92,6 +92,7 @@ pub enum Prop {
     PivotY,
     Values,
     FillAcross,
+    Raised,
     Follow,
     Clock,
 }
@@ -209,6 +210,7 @@ pub const PROPS: &[PropInfo] = &[
     p("weight", Prop::Weight, Ty::Number, false, "Font weight, 100 to 900 (400 regular, 500 medium, 700 bold)."),
     p("tracking", Prop::Tracking, Ty::Number, false, "Letter spacing, in em (Bioma's labels: 0.06)."),
     p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
+    p("raised", Prop::Raised, Ty::Bool, false, "Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];
 

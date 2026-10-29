@@ -258,8 +258,11 @@ impl Pipeline {
         queue.write_buffer(&self.uniforms, 0, &bytes);
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<usize>) {
         for (i, key) in self.draws.iter().enumerate() {
+            if !only.contains(&i) {
+                continue;
+            }
             let Some((Some(pipeline), _)) = self.pipelines.get(key) else { continue };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.group, &[(i as u64 * STRIDE) as u32]);

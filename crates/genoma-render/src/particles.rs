@@ -231,12 +231,12 @@ impl Pipeline {
         }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.draws.is_empty() {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<usize>) {
+        if self.draws.is_empty() || only.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
-        for key in &self.draws {
+        for key in &self.draws[only.start.min(self.draws.len())..only.end.min(self.draws.len())] {
             let slot = &self.slots[key];
             if slot.count > 0 {
                 pass.set_bind_group(0, &slot.group, &[]);

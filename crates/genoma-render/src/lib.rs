@@ -92,9 +92,13 @@ pub struct Image {
 }
 
 /// What one surface shows, in drawing order: every rect, then every image,
-/// then every shader node, the particles, and every text.
+/// then every shader node, the particles, and every text; then the same
+/// again for what is raised over all of it (a list a dropdown opened). Each
+/// kind's items are the base layer's then the raised one's, `base` saying
+/// where the base ends; none is all base.
 #[derive(Default)]
 pub struct DrawList {
+    pub base: Option<Layer>,
     pub rects: Vec<Rect>,
     pub images: Vec<Image>,
     pub shaders: Vec<Shader>,
@@ -105,6 +109,29 @@ pub struct DrawList {
 
 /// A surface the render thread knows, named by the main thread.
 pub type SurfaceId = u32;
+
+/// How many of each kind the base layer has: the rest are raised.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Layer {
+    pub rects: usize,
+    pub images: usize,
+    pub shaders: usize,
+    pub emitters: usize,
+    pub texts: usize,
+}
+
+impl DrawList {
+    /// The counts now: what is pushed after this is in the next layer.
+    pub fn mark(&self) -> Layer {
+        Layer {
+            rects: self.rects.len(),
+            images: self.images.len(),
+            shaders: self.shaders.len(),
+            emitters: self.emitters.len(),
+            texts: self.texts.len(),
+        }
+    }
+}
 
 /// A pointer the main thread vouches for: a `wl_display` or `wl_surface`
 /// that outlives the target made from it.

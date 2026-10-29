@@ -279,14 +279,17 @@ impl Pipeline {
         }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.draws.is_empty() {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<usize>) {
+        if self.draws.is_empty() || only.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals_group, &[]);
         pass.set_vertex_buffer(0, self.quads.slice(..));
         for (i, key) in self.draws.iter().enumerate() {
+            if !only.contains(&i) {
+                continue;
+            }
             pass.set_bind_group(1, &self.textures[key].0, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }

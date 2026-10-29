@@ -565,15 +565,20 @@ impl Pipeline {
         }
     }
 
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if self.count == 0 {
+    /// The rects in `only` (indices into the list uploaded): one layer.
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<u32>) {
+        if self.count == 0 || only.is_empty() {
             return;
         }
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         for (cut, range) in &self.runs {
+            let range = range.start.max(only.start)..range.end.min(only.end);
+            if range.is_empty() {
+                continue;
+            }
             pass.set_pipeline(if *cut { &self.cutter } else { &self.pipeline });
-            pass.draw(0..4, range.clone());
+            pass.draw(0..4, range);
         }
     }
 }

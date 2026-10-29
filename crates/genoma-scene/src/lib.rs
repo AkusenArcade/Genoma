@@ -159,6 +159,7 @@ pub struct Node {
     wave_time: f32,
     level_left: bool,
     fill_across: bool,
+    raised: bool,
     wave_phase: f32,
     arc: f32,
     sway: f32,
@@ -239,6 +240,7 @@ impl Node {
             wave_time: 0.0,
             level_left: false,
             fill_across: false,
+            raised: false,
             wave_phase: 0.0,
             arc: 1.0,
             sway: 0.0,
@@ -556,15 +558,28 @@ impl Scene {
 
     /// The topmost interactive node under a point, logical units, as last
     /// drawn: the last one in drawing order wins, as it is drawn on top.
+    /// What is raised is drawn over everything else, so it is hit first.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        let mut found = None;
-        self.walk(self.root, &mut |id, n| {
+        let (mut found, mut raised) = (None, None);
+        self.walk_layered(self.root, false, &mut |id, n, up| {
             let [bx, by, bw, bh] = n.bounds;
             if n.interactive && x >= bx && y >= by && x < bx + bw && y < by + bh {
-                found = Some(id);
+                if up { raised = Some(id) } else { found = Some(id) }
             }
         });
-        found
+        raised.or(found)
+    }
+
+    fn walk_layered(&self, node: NodeId, up: bool, f: &mut dyn FnMut(NodeId, &Node, bool)) {
+        let Some(n) = self.tree.get_node_context(node) else { return };
+        if !n.present {
+            return;
+        }
+        let up = up || n.raised;
+        f(node, n, up);
+        for child in self.tree.children(node).unwrap_or_default() {
+            self.walk_layered(child, up, f);
+        }
     }
 
     /// A point in the surface, logical units, from `node`'s top-left corner
@@ -932,6 +947,7 @@ impl Scene {
             Prop::WaveTime => (n.wave_time, mover) = (take!(number).max(0.0), true),
             Prop::LevelLeft => n.level_left = take!(flag),
             Prop::FillAcross => n.fill_across = take!(flag),
+            Prop::Raised => n.raised = take!(flag),
             Prop::Arc => n.arc = take!(number),
             Prop::Angle => n.angle = take!(number).rem_euclid(1.0),
             Prop::Sway => (n.sway, mover) = (take!(number).max(0.0), true),
@@ -1182,9 +1198,20 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new() };
+        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
+        let upper = out.upper;
+        let has_upper = !(upper.rects.is_empty() && upper.images.is_empty() && upper.shaders.is_empty()
+            && upper.emitters.is_empty() && upper.texts.is_empty());
+        if has_upper {
+            list.base = Some(list.mark());
+            list.rects.extend(upper.rects);
+            list.images.extend(upper.images);
+            list.shaders.extend(upper.shaders);
+            list.emitters.extend(upper.emitters);
+            list.texts.extend(upper.texts);
+        }
         self.images.sweep();
         list
     }
@@ -1286,6 +1313,9 @@ struct Out<'a> {
     images: &'a mut images::Images,
     glyphs: &'a mut glyphs::Glyphs,
     blur: Vec<Blur>,
+    /// What is raised, gathered apart and put after the rest at the end.
+    upper: DrawList,
+    raised: bool,
 }
 
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -1352,7 +1382,30 @@ fn rim_width(n: &Node, scale: f32) -> f32 {
     }
 }
 
+/// A raised node and everything in it go to the raised layer, drawn after
+/// the whole base layer; a raised node inside a raised one is already there.
 fn collect(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+) {
+    let raise = !out.raised && tree.get_node_context(node).is_some_and(|n| n.raised && n.present);
+    if raise {
+        std::mem::swap(out.list, &mut out.upper);
+        out.raised = true;
+    }
+    collect_node(tree, fonts, node, parent, alpha, scale, out);
+    if raise {
+        std::mem::swap(out.list, &mut out.upper);
+        out.raised = false;
+    }
+}
+
+fn collect_node(
     tree: &mut TaffyTree<Node>,
     fonts: &mut ct::FontSystem,
     node: NodeId,
@@ -1513,6 +1566,31 @@ fn collect(
             // A shape grown to nothing draws nothing, bridge included: a bud
             // still inside its cell would otherwise swell the cell's edge.
             let nothing = w <= 0.01 || h <= 0.01;
+            // A raised shape first erases what the base layer drew under it:
+            // its glass then shows the compositor's blur of what is behind
+            // the surface, not the shell's own shapes through it.
+            if !nothing && n.raised {
+                out.list.rects.push(Rect {
+                    origin: [x * scale, y * scale],
+                    size,
+                    radius,
+                    rim: 0.0,
+                    level: 1.0,
+                    cut: 1.0,
+                    fill: [0.0, 0.0, 0.0, 1.0],
+                    rim_top: [0.0; 4],
+                    rim_bottom: [0.0; 4],
+                    wave: [0.0; 4],
+                    arc: Rect::WHOLE,
+                    fill_to: [0.0; 4],
+                    clip: out.clip,
+                    path: [0.0; 4],
+                    path_end: [0.0; 4],
+                    bud,
+                    bud_shape,
+                    transform: out.transform,
+                });
+            }
             if !nothing {
                 out.list.rects.push(Rect {
                     origin: [x * scale, y * scale],

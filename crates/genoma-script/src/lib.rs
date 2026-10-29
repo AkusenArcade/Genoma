@@ -1159,6 +1159,17 @@ impl Script {
                 io::file(&host, t)
             })?,
         )?;
+        let (host, dir) = (self.host.clone(), self.dir.clone());
+        g.set(
+            "folder",
+            lua.create_function(move |_, t: Table| {
+                let path: String = t.get("path")?;
+                if !(path.starts_with('/') || path.starts_with('~') || path.starts_with('$')) {
+                    t.set("path", dir.join(&path).display().to_string())?;
+                }
+                io::folder(&host, t)
+            })?,
+        )?;
         // g.computed(fn), g.animated(value), g.json_set(text, path, value):
         // an interface's own modules (Bioma's core/ singletons).
         g.set("computed", lua.create_function(|_, f: Function| Ok(values::computed(f)))?)?;
