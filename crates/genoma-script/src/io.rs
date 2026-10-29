@@ -408,6 +408,13 @@ impl UserData for Watched {
             this.text.set(Some(text));
             Ok(())
         });
+        // f:read(): read again now, and the content: /proc and /sys say
+        // nothing when they change, so a sampler asks.
+        methods.add_method("read", |_, this, ()| {
+            let text = std::fs::read_to_string(&this.path).ok();
+            this.text.set(text.clone());
+            Ok(text)
+        });
         methods.add_method("stop", |_, this, ()| {
             this.stop.stop();
             Ok(())

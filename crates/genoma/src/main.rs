@@ -578,6 +578,7 @@ fn probe() {
 /// Evaluates the interface, fits the surfaces to what it asks for, and mounts
 /// a tree on each. The last trees stay if any step fails.
 fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> {
+    script.borrow_mut().set_outputs(app.output_list());
     let specs = script.borrow_mut().evaluate()?;
     let targets = app.apply(specs);
     script.borrow_mut().mount(&targets)?;

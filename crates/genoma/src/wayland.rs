@@ -247,6 +247,24 @@ impl App {
 
     /// The outputs the interface asks for, by name; `[None]` for one surface
     /// where the compositor puts it.
+    /// The outputs as the compositor describes them, in its order: what an
+    /// interface may place its surfaces on.
+    pub fn output_list(&self) -> Vec<genoma_script::OutputInfo> {
+        self.outputs
+            .outputs()
+            .filter_map(|o| self.outputs.info(&o))
+            .filter_map(|i| {
+                Some(genoma_script::OutputInfo {
+                    name: i.name?,
+                    description: i.description.unwrap_or_default(),
+                    make: i.make,
+                    model: i.model,
+                    size: i.logical_size.map(|(w, h)| (w.max(0) as u32, h.max(0) as u32)),
+                })
+            })
+            .collect()
+    }
+
     fn wanted_outputs(&self, spec: &SurfaceSpec) -> Vec<Option<String>> {
         let names: Vec<String> =
             self.outputs.outputs().filter_map(|o| self.outputs.info(&o).and_then(|i| i.name)).collect();

@@ -105,13 +105,44 @@ pub struct SurfaceSpec {
     pub namespace: String,
 }
 
+/// An output as the compositor describes it, for `g.outputs()`.
+#[derive(Clone, Debug, Default)]
+pub struct OutputInfo {
+    pub name: String,
+    pub description: String,
+    pub make: String,
+    pub model: String,
+    pub size: Option<(u32, u32)>,
+}
+
 /// A `g.state` value: what a signal can hold across reloads.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// A table is held by reference, and equal only to itself: a service sets a
+/// new list rather than changing the one it set, or nothing hears of it.
+/// One from a load that has been replaced reads as nil.
+#[derive(Clone, Debug)]
 enum StateValue {
     Nil,
     Bool(bool),
     Number(f64),
     Text(String),
+    Table(Table),
+}
+
+impl PartialEq for StateValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (StateValue::Nil, StateValue::Nil) => true,
+            (StateValue::Bool(a), StateValue::Bool(b)) => a == b,
+            (StateValue::Number(a), StateValue::Number(b)) => a == b,
+            (StateValue::Text(a), StateValue::Text(b)) => a == b,
+            // mlua asserts that two values it compares share a state.
+            (StateValue::Table(a), StateValue::Table(b)) => {
+                a.weak_lua() == b.weak_lua() && a.weak_lua().try_upgrade().is_some() && a.to_pointer() == b.to_pointer()
+            }
+            _ => false,
+        }
+    }
 }
 
 impl StateValue {
@@ -121,6 +152,7 @@ impl StateValue {
             LuaValue::Integer(i) => StateValue::Number(*i as f64),
             LuaValue::Number(n) => StateValue::Number(*n),
             LuaValue::String(s) => StateValue::Text(s.to_string_lossy()),
+            LuaValue::Table(t) => StateValue::Table(t.clone()),
             _ => StateValue::Nil,
         }
     }
@@ -131,6 +163,8 @@ impl StateValue {
             StateValue::Bool(b) => LuaValue::Boolean(b),
             StateValue::Number(n) => LuaValue::Number(n),
             StateValue::Text(t) => LuaValue::String(lua.create_string(&t)?),
+            StateValue::Table(t) if *t.weak_lua() == lua.weak() => LuaValue::Table(t),
+            StateValue::Table(_) => LuaValue::Nil,
         })
     }
 }
@@ -266,6 +300,7 @@ impl UserData for PowerRef {
             t.set("state", b.state)?;
             t.set("time_to_empty", b.time_to_empty)?;
             t.set("time_to_full", b.time_to_full)?;
+            t.set("energy_rate", b.energy_rate)?;
             Ok(t)
         });
         fields.add_field_method_get("on_battery", |_, this| Ok(this.0.on_battery.get()));
@@ -821,6 +856,9 @@ pub struct Script {
     /// The scenes mounted last, in the order of the targets: a handler is
     /// found by (target, node).
     scenes: Vec<Rc<RefCell<Scene>>>,
+    /// The outputs at the moment of the load: a load is evaluated again
+    /// whenever they change.
+    outputs: Rc<RefCell<Vec<OutputInfo>>>,
 }
 
 /// One tree to mount: the output it is for, and the scene it goes into.
@@ -851,7 +889,13 @@ impl Script {
             handlers: Rc::default(),
             icon_dirs: Rc::default(),
             scenes: Vec::new(),
+            outputs: Rc::default(),
         }
+    }
+
+    /// What `g.outputs()` answers in the next load.
+    pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
+        *self.outputs.borrow_mut() = outputs;
     }
 
     /// Delivers pointer input to the node hit in target `at`'s tree, or to
@@ -1047,6 +1091,28 @@ impl Script {
         // g.ipc("cell", { toggle = function(domain) … end }): what a call
         // from outside reaches, for this load.
         lua.set_named_registry_value(IPC, lua.create_table()?)?;
+        // g.outputs() → { { name, description, make, model, width, height } }:
+        // the outputs now, in the compositor's order. A change reloads.
+        let outputs = self.outputs.clone();
+        g.set(
+            "outputs",
+            lua.create_function(move |lua, ()| {
+                let list = lua.create_table()?;
+                for (i, o) in outputs.borrow().iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("name", o.name.as_str())?;
+                    t.set("description", o.description.as_str())?;
+                    t.set("make", o.make.as_str())?;
+                    t.set("model", o.model.as_str())?;
+                    if let Some((w, h)) = o.size {
+                        t.set("width", w)?;
+                        t.set("height", h)?;
+                    }
+                    list.set(i + 1, t)?;
+                }
+                Ok(list)
+            })?,
+        )?;
         g.set(
             "ipc",
             lua.create_function(|lua, (target, functions): (String, Table)| {
@@ -1120,6 +1186,12 @@ impl Script {
                 Ok(())
             })?,
         )?;
+        // g.batch(fn): the signals fn sets are heard once it returns, so a
+        // binding reading several of them runs once, not once for each.
+        g.set(
+            "batch",
+            lua.create_function(|_, f: Function| genoma_core::reactive::batch(|| f.call::<LuaValue>(())))?,
+        )?;
         // g.untracked(fn): its result, without what it read becoming a
         // dependency of the binding around it.
         g.set(
@@ -1163,7 +1235,10 @@ impl Script {
             lua.create_function(|lua, text: String| {
                 use mlua::LuaSerdeExt;
                 let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| err(format!("g.parse_json: {e}")))?;
-                lua.to_value(&value)
+                // A JSON null is nil, as Luau reads absence: niri's
+                // `"id": null` is no focused window, not a truthy value.
+                let options = mlua::serde::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
+                lua.to_value_with(&value, options)
             })?,
         )?;
         g.set(

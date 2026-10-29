@@ -28,6 +28,9 @@ pub struct Battery {
     /// Seconds; 0 when UPower does not know.
     pub time_to_empty: i64,
     pub time_to_full: i64,
+    /// Watts going in or out (UPower's `EnergyRate`), a magnitude; 0 while
+    /// it is still measuring, or on a machine that does not report it.
+    pub energy_rate: f64,
 }
 
 pub struct Power {
@@ -78,6 +81,8 @@ trait Device {
     fn time_to_empty(&self) -> zbus::Result<i64>;
     #[zbus(property)]
     fn time_to_full(&self) -> zbus::Result<i64>;
+    #[zbus(property)]
+    fn energy_rate(&self) -> zbus::Result<f64>;
 }
 
 #[zbus::proxy(interface = "org.freedesktop.UPower", default_service = "org.freedesktop.UPower", default_path = "/org/freedesktop/UPower")]
@@ -121,6 +126,7 @@ async fn battery(device: &DeviceProxy<'_>) -> zbus::Result<Battery> {
         state: state_name(device.state().await?),
         time_to_empty: device.time_to_empty().await?,
         time_to_full: device.time_to_full().await?,
+        energy_rate: device.energy_rate().await.unwrap_or(0.0).abs(),
     })
 }
 
