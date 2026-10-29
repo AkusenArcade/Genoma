@@ -179,7 +179,16 @@ impl Gpu {
             target.size = Some((width, height));
         }
 
-        let frame = match target.surface.get_current_texture() {
+        // How long the buffer took to come back: a frame the eye catches late
+        // because the GPU or the compositor held it, said apart from one that
+        // took long to draw.
+        let asked = std::time::Instant::now();
+        let acquired = target.surface.get_current_texture();
+        let waited = asked.elapsed();
+        if waited > std::time::Duration::from_millis(8) {
+            log::warn!("surface {id}: waited {} ms for a buffer", waited.as_millis());
+        }
+        let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             other => {
