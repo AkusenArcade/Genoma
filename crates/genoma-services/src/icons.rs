@@ -136,3 +136,99 @@ pub fn app_icon(app_id: &str) -> Option<PathBuf> {
     cache.insert(app_id.to_owned(), found.clone());
     found
 }
+
+/// An icon by name (or path) through the theme, as `app_icon` finds an
+/// application's: what Quickshell's `iconPath` answers.
+pub fn icon_path(icon: &str) -> Option<PathBuf> {
+    if Path::new(icon).is_absolute() {
+        return Path::new(icon).exists().then(|| PathBuf::from(icon));
+    }
+    let key = format!("icon:{icon}");
+    let mut cache = CACHE.lock().unwrap();
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(found) = cache.get(&key) {
+        return found.clone();
+    }
+    let dirs = chain(&theme().unwrap_or_else(|| "hicolor".into()));
+    let found = in_theme(&dirs, icon);
+    cache.insert(key, found.clone());
+    found
+}
+
+/// One application's desktop entry, the `[Desktop Entry]` group.
+#[derive(Clone, Debug, Default)]
+pub struct DesktopEntry {
+    /// The file name without `.desktop`: `org.gnome.Nautilus`.
+    pub id: String,
+    pub name: String,
+    pub generic_name: String,
+    pub comment: String,
+    pub icon: String,
+    pub exec: String,
+    pub startup_class: String,
+    pub path: String,
+    pub terminal: bool,
+    pub keywords: Vec<String>,
+    pub categories: Vec<String>,
+    pub file: PathBuf,
+}
+
+/// The applications the menu offers, in the order the data directories
+/// rank them: an entry in the user's directory hides the system's of the
+/// same id, and one that is `Hidden`, `NoDisplay` or not an application is
+/// left out.
+pub fn desktop_entries() -> Vec<DesktopEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for dir in data_dirs() {
+        let Ok(files) = fs::read_dir(dir.join("applications")) else { continue };
+        let mut files: Vec<PathBuf> = files.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for path in files {
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_owned();
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else { continue };
+            let mut fields = HashMap::new();
+            let mut in_group = false;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_group = line == "[Desktop Entry]";
+                    continue;
+                }
+                if !in_group {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    fields.entry(key.trim().to_owned()).or_insert_with(|| value.trim().to_owned());
+                }
+            }
+            let get = |k: &str| fields.get(k).cloned().unwrap_or_default();
+            let yes = |k: &str| get(k).eq_ignore_ascii_case("true");
+            if get("Type") != "Application" || yes("Hidden") || yes("NoDisplay") {
+                continue;
+            }
+            let list = |k: &str| get(k).split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            out.push(DesktopEntry {
+                id,
+                name: get("Name"),
+                generic_name: get("GenericName"),
+                comment: get("Comment"),
+                icon: get("Icon"),
+                exec: get("Exec"),
+                startup_class: get("StartupWMClass"),
+                path: get("Path"),
+                terminal: yes("Terminal"),
+                keywords: list("Keywords"),
+                categories: list("Categories"),
+                file: path,
+            });
+        }
+    }
+    out
+}

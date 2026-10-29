@@ -1186,6 +1186,39 @@ impl Script {
                 Ok(())
             })?,
         )?;
+        // g.desktop_entries() → { { id, name, generic_name, comment, icon,
+        // exec, startup_class, path, terminal, keywords, categories, file } }:
+        // the applications the menu offers, read now.
+        g.set(
+            "desktop_entries",
+            lua.create_function(|lua, ()| {
+                let list = lua.create_table()?;
+                for (i, e) in genoma_services::icons::desktop_entries().into_iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("id", e.id)?;
+                    t.set("name", e.name)?;
+                    t.set("generic_name", e.generic_name)?;
+                    t.set("comment", e.comment)?;
+                    t.set("icon", e.icon)?;
+                    t.set("exec", e.exec)?;
+                    t.set("startup_class", e.startup_class)?;
+                    t.set("path", e.path)?;
+                    t.set("terminal", e.terminal)?;
+                    t.set("keywords", e.keywords)?;
+                    t.set("categories", e.categories)?;
+                    t.set("file", e.file.display().to_string())?;
+                    list.set(i + 1, t)?;
+                }
+                Ok(list)
+            })?,
+        )?;
+        // g.icon_path("firefox") → the file the icon theme gives for it, or nil.
+        g.set(
+            "icon_path",
+            lua.create_function(|_, name: String| {
+                Ok(genoma_services::icons::icon_path(&name).map(|p| p.display().to_string()))
+            })?,
+        )?;
         // g.batch(fn): the signals fn sets are heard once it returns, so a
         // binding reading several of them runs once, not once for each.
         g.set(

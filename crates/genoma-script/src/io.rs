@@ -293,14 +293,22 @@ impl UserData for Process {
 }
 
 /// `g.process { command = { "nmcli", "-t", "device" }, on_line = …,
-/// on_error_line = …, on_exit = function(code) … end }`. Lines come as the
-/// program writes them; `on_exit` after the last one, with the exit code (128
-/// plus the signal for a process killed by one).
+/// on_error_line = …, on_exit = function(code) … end, env = { … } }`. Lines
+/// come as the program writes them; `on_exit` after the last one, with the
+/// exit code (128 plus the signal for a process killed by one). `env` adds to
+/// the shell's environment: what must not be on a command line every user
+/// can read (`ps`) travels there.
 pub fn process(host: &HostRef, t: Table) -> mlua::Result<Process> {
     let command: Vec<String> = t.get("command")?;
     let Some(program) = command.first() else { return Err(err("g.process: command is empty")) };
     let mut command_line = Command::new(program);
     command_line.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(env) = t.get::<Option<Table>>("env")? {
+        for pair in env.pairs::<String, String>() {
+            let (key, value) = pair?;
+            command_line.env(key, value);
+        }
+    }
     // A program dies with the shell: killed outright, Genoma runs no
     // cleanup, and a watcher left behind would run for nobody.
     // Safety: one system call between fork and exec, async-signal-safe.
