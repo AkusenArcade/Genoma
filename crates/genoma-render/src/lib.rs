@@ -25,9 +25,11 @@ mod gpu;
 mod image;
 mod particles;
 mod rect;
+mod shader;
 
 pub use particles::{Emitter, EmitterParams};
 pub use rect::Rect;
+pub use shader::Shader;
 
 /// Fonts, shared by the main thread (which shapes text to lay it out) and the
 /// render thread (which rasterises the glyphs). Shaping and drawing never run
@@ -90,11 +92,12 @@ pub struct Image {
 }
 
 /// What one surface shows, in drawing order: every rect, then every image,
-/// then every text.
+/// then every shader node, the particles, and every text.
 #[derive(Default)]
 pub struct DrawList {
     pub rects: Vec<Rect>,
     pub images: Vec<Image>,
+    pub shaders: Vec<Shader>,
     pub texts: Vec<Text>,
     /// Drawn over the rects and images, under the text.
     pub emitters: Vec<Emitter>,

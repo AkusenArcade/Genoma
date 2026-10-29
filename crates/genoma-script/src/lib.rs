@@ -1342,7 +1342,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "each"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "each"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -1575,6 +1575,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "image" => Kind::Image,
         "thread" => Kind::Thread,
         "emitter" => Kind::Emitter,
+        "shader" => Kind::Shader,
         other => return Err(err(format!("unknown node {other}"))),
     })
 }
@@ -1629,6 +1630,16 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
             LuaValue::Number(n) => Ok(Value::Text(n.to_string())),
             LuaValue::Nil => Ok(Value::Text(String::new())),
             _ => Err(wrong("a string")),
+        },
+        Ty::Numbers => match v {
+            LuaValue::Table(t) => t
+                .sequence_values::<f64>()
+                .map(|n| n.map(|n| n as f32))
+                .collect::<mlua::Result<Vec<f32>>>()
+                .map(Value::Numbers)
+                .map_err(|_| wrong("a list of numbers")),
+            LuaValue::Nil => Ok(Value::Numbers(Vec::new())),
+            _ => Err(wrong("a list of numbers")),
         },
         Ty::Choice(options) => match v {
             LuaValue::String(s) if options.contains(&s.to_string_lossy().as_str()) => {

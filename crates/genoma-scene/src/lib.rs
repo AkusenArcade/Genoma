@@ -40,6 +40,9 @@ pub enum Kind {
     Thread,
     /// Particles born at a rate, from `from` toward a heading or to `to`.
     Emitter,
+    /// A field the interface writes in WGSL, fed by numbers it binds
+    /// (`g.shader`).
+    Shader,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -62,6 +65,7 @@ pub enum Value {
     Color([f32; 4]),
     Text(String),
     Bool(bool),
+    Numbers(Vec<f32>),
 }
 
 /// The beat Bioma's processor dot keeps: it swells to 1.45 over the first
@@ -159,6 +163,14 @@ pub struct Node {
     sway: f32,
     sway_range: f32,
     sway_phase: f32,
+    /// A shader node's WGSL and its key; the numbers bound to it, the ones
+    /// drawn (easing toward them over `follow` seconds), and its clock.
+    shader: Option<(Arc<String>, u64)>,
+    values: Vec<f32>,
+    shown: Vec<f32>,
+    follow: f32,
+    clock: bool,
+    time: f32,
     /// Props set at least once: the first value is placed, never animated.
     seen: Vec<Prop>,
 }
@@ -230,6 +242,12 @@ impl Node {
             sway: 0.0,
             sway_range: 0.0,
             sway_phase: 0.0,
+            shader: None,
+            values: Vec::new(),
+            shown: Vec::new(),
+            follow: 0.0,
+            clock: false,
+            time: 0.0,
             seen: Vec::new(),
         }
     }
@@ -584,7 +602,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter => Style { flex_shrink: 0.0, ..Style::default() },
+            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader => Style { flex_shrink: 0.0, ..Style::default() },
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -724,6 +742,7 @@ impl Scene {
         let colour = |v: &Value| if let Value::Color(c) = v { Some(*c) } else { None };
         let text = |v: &Value| if let Value::Text(t) = v { Some(t.clone()) } else { None };
         let flag = |v: &Value| if let Value::Bool(b) = v { Some(*b) } else { None };
+        let numbers = |v: &Value| if let Value::Numbers(x) = v { Some(x.clone()) } else { None };
         macro_rules! take {
             ($f:expr) => {
                 match $f(&value) {
@@ -861,7 +880,33 @@ impl Scene {
             Prop::Orbit => (n.orbit, mover) = (take!(number), true),
             Prop::OrbitRadius => n.orbit_radius = take!(number),
             Prop::Icon => n.icon = Some(take!(text)),
+            Prop::Src if n.kind == Kind::Shader => {
+                let path = take!(text);
+                // Read when set: a reload sets it again, so an edited file is
+                // seen with the interface that uses it.
+                n.shader = match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&source, &mut h);
+                        Some((Arc::new(source), std::hash::Hasher::finish(&h)))
+                    }
+                    Err(e) => {
+                        log::warn!("g.shader {path}: {e}");
+                        None
+                    }
+                };
+            }
             Prop::Src => n.src = Some(take!(text)),
+            Prop::Values => {
+                n.values = take!(numbers);
+                n.values.truncate(128);
+                if n.follow <= 0.0 || n.shown.len() != n.values.len() {
+                    n.shown = n.values.clone();
+                }
+                mover = true;
+            }
+            Prop::Follow => n.follow = take!(number).max(0.0),
+            Prop::Clock => (n.clock, mover) = (take!(flag), true),
             Prop::Fit => {
                 n.fit = match take!(text).as_str() {
                     "contain" => images::Fit::Contain,
@@ -887,7 +932,8 @@ impl Scene {
                 restyle = true;
             }
         }
-        let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0 || n.kind == Kind::Emitter;
+        let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0 || n.kind == Kind::Emitter
+            || n.kind == Kind::Shader;
         if reshape {
             n.buffer = None;
             self.tree.mark_dirty(node).ok();
@@ -985,6 +1031,35 @@ impl Scene {
         for &node in &self.movers {
             let Some(n) = self.tree.get_node_context_mut(node) else { continue };
             if !n.present {
+                continue;
+            }
+            if n.kind == Kind::Shader {
+                // The drawn numbers follow the bound ones, at the display's
+                // rate while one is still on its way and not at all after:
+                // data arriving at sixty a second breathes at a hundred and
+                // twenty instead of stepping. The clock runs while asked to,
+                // and while the numbers move.
+                let mut moving = false;
+                if n.follow > 0.0 {
+                    let k = 1.0 - (-dt.min(0.05) / n.follow).exp();
+                    for (shown, wanted) in n.shown.iter_mut().zip(&n.values) {
+                        let gap = wanted - *shown;
+                        if gap.abs() > 0.002 {
+                            *shown += gap * k;
+                            moving = true;
+                        } else {
+                            *shown = *wanted;
+                        }
+                    }
+                }
+                if n.clock || moving {
+                    n.time += dt.min(0.05);
+                    moving = true;
+                }
+                if moving {
+                    motion.moving = true;
+                    self.dirty = true;
+                }
                 continue;
             }
             if n.orbit != 0.0 {
@@ -1577,6 +1652,21 @@ fn collect(
                             [0.0; 4]
                         },
                     },
+                });
+            }
+        }
+        Kind::Shader => {
+            if let Some((source, key)) = n.shader.clone() {
+                out.list.shaders.push(genoma_render::Shader {
+                    source,
+                    key,
+                    origin: [origin[0] * scale, origin[1] * scale],
+                    size: [layout.size.width, layout.size.height],
+                    scale,
+                    time: n.time,
+                    alpha,
+                    clip: out.clip,
+                    values: n.shown.clone(),
                 });
             }
         }

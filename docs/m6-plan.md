@@ -44,7 +44,7 @@ sources.
 |---|---|
 | ~~Images from files~~: `g.image` done 2026-10-29 (PNG, JPEG, WebP, SVG; cover, contain, fill; rounded; decoded off the frame). From pixels still to come | the wallpaper, media art, the theme's thumbnails; pixels for tray and notification icons |
 | ~~A text field~~: done 2026-10-29 for the vitals' filter: keys with their text and modifiers, held keys repeating; the field itself is Bioma's `components/field.luau` | the vitals' and the clock's expansions, then the launcher, settings, the lock, the greeter |
-| A fragment shader node, Bioma's four `.frag` translated to WGSL | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
+| ~~A fragment shader node~~: `g.shader` done 2026-10-29 (a WGSL `shade(p)` over a prelude, up to 128 bound numbers eased by the node at the display's rate, a clock that runs only while asked; compiled under an error scope, so a broken file draws nothing and says why). `fluid.frag` translated by hand; the lava lamp, cytoplasm and osmosis still to come | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
 | Images over the network (cover art by `https:`) | media |
 | Drag and drop | organisms' arrange mode |
