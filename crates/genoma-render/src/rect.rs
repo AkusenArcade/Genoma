@@ -27,7 +27,8 @@ pub struct Rect {
     pub rim_top: [f32; 4],
     pub rim_bottom: [f32; 4],
     /// The fill's surface as a wave: amplitude and wavelength in pixels, and
-    /// the phase (0…1) it has travelled. Zero amplitude is a flat level.
+    /// the phase (0…1) it has travelled. Zero amplitude is a flat level. The
+    /// last is 1 for a level that fills from the left.
     pub wave: [f32; 4],
     /// Only this part of the shape is drawn: start and sweep in turns,
     /// clockwise from twelve. A sweep of 1 or more is the whole shape; on a
@@ -302,7 +303,10 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         // The wave travels to the right, as Vital.qml's translation does.
         level = level + in.wave.x * sin(6.2831853 * (x / max(in.wave.y, 1.0) - in.wave.z));
     }
-    let surface = clamp(level - from_bottom + 0.5, 0.0, 1.0);
+    var surface = clamp(level - from_bottom + 0.5, 0.0, 1.0);
+    if (in.wave.w > 0.5) {
+        surface = clamp(in.shape.z * in.half.x * 2.0 - (in.local.x + in.half.x) + 0.5, 0.0, 1.0);
+    }
 
     // The part of the shape that is drawn: an angle clockwise from twelve,
     // antialiased across one pixel at both of its edges.
