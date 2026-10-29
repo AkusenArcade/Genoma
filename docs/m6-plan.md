@@ -43,7 +43,7 @@ sources.
 | Gap | First needed by |
 |---|---|
 | Images from files (PNG, JPEG, WebP) and from pixels | the wallpaper (step 4.2); media art; tray and notification pixmaps |
-| A text field (keyboard, layout through xkb, a cursor, selection) | the launcher, then settings, the lock, the greeter |
+| ~~A text field~~: done 2026-10-29 for the vitals' filter: keys with their text and modifiers, held keys repeating; the field itself is Bioma's `components/field.luau` | the vitals' and the clock's expansions, then the launcher, settings, the lock, the greeter |
 | A fragment shader node, Bioma's four `.frag` translated to WGSL | the media band (`fluid.frag`), then the lava lamp, cytoplasm, osmosis |
 | Settings controls: slider, switch, dropdown, list rows | settings |
 | Images over the network (cover art by `https:`) | media |

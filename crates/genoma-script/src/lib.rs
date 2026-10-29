@@ -40,13 +40,24 @@ use genoma_services::{
 };
 use mlua::{Function, Lua, Table, UserData, UserDataFields, Value as LuaValue};
 
+/// A key as a field reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Key {
+    pub name: String,
+    pub text: Option<String>,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
 /// Pointer input for a node, as the surface saw it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
     /// A press outside the node that is catching (an open cell).
     Outside,
-    /// A key, by its xkb name ("Escape", "Up", "Return", "a").
-    Key(String),
+    /// A key, by its xkb name ("Escape", "Up", "Return", "a"), with the text
+    /// it types and the modifiers held.
+    Key(Key),
     Hover(bool),
     Press(u32),
     Release(u32),
@@ -910,7 +921,15 @@ impl Script {
             if let Some(f) = handler {
                 let result = match &input {
                     Input::Outside => f.call::<()>(()),
-                    Input::Key(name) => f.call::<()>(name.as_str()),
+                    // on_key(name, text, { ctrl, shift, alt })
+                    Input::Key(key) => (|| {
+                        let lua = f.weak_lua().upgrade();
+                        let mods = lua.create_table()?;
+                        mods.set("ctrl", key.ctrl)?;
+                        mods.set("shift", key.shift)?;
+                        mods.set("alt", key.alt)?;
+                        f.call::<()>((key.name.as_str(), key.text.clone(), mods))
+                    })(),
                     Input::Hover(entered) => f.call::<()>(*entered),
                     Input::Press(b) | Input::Release(b) | Input::Click(b) => f.call::<()>(*b),
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),

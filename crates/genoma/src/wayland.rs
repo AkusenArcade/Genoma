@@ -136,6 +136,11 @@ pub struct App {
     handle: Option<LoopHandle<'static, App>>,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// A seat whose keyboard arrived before the loop did: the keyboard is
+    /// taken with key repeat, which needs the loop.
+    keyboard_seat: Option<wl_seat::WlSeat>,
+    /// The modifiers held now, for the keys a field reads them with.
+    modifiers: Modifiers,
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
     input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
@@ -178,6 +183,8 @@ impl App {
             handle: None,
             pointer: None,
             keyboard: None,
+            keyboard_seat: None,
+            modifiers: Modifiers::default(),
             input: None,
             outputs_changed: false,
             started: Instant::now(),
@@ -243,6 +250,23 @@ impl App {
         self.renderer = Some(renderer);
         self.fonts = Some(fonts);
         self.handle = Some(handle);
+        if let Some(seat) = self.keyboard_seat.take() {
+            self.take_keyboard(&seat);
+        }
+    }
+
+    /// The keyboard, repeating a held key at the rate the compositor says:
+    /// a held Backspace in a field deletes on.
+    fn take_keyboard(&mut self, seat: &wl_seat::WlSeat) {
+        let Some(handle) = self.handle.clone() else {
+            self.keyboard_seat = Some(seat.clone());
+            return;
+        };
+        let qh = self.qh.clone();
+        self.keyboard = self
+            .seats
+            .get_keyboard_with_repeat(&qh, seat, None, handle, Box::new(|app: &mut App, _, event| app.key(&event)))
+            .ok();
     }
 
     /// The outputs the interface asks for, by name; `[None]` for one surface
@@ -692,7 +716,12 @@ impl App {
         };
         let name = event.keysym.name().unwrap_or_default();
         let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
-        self.deliver(i, catcher, Input::Key(name));
+        // The text the key types, as the keymap and its layout make it; none
+        // while Ctrl or Alt is held, when the key is a command.
+        let m = self.modifiers;
+        let text = event.utf8.clone().filter(|t| !t.chars().any(char::is_control) && !m.ctrl && !m.alt);
+        let key = genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt };
+        self.deliver(i, catcher, Input::Key(key));
     }
 }
 
@@ -846,7 +875,8 @@ impl SeatHandler for App {
             self.pointer = self.seats.get_pointer(qh, &seat).ok();
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = self.seats.get_keyboard(qh, &seat, None).ok();
+            let _ = qh;
+            self.take_keyboard(&seat);
         }
     }
 
@@ -870,13 +900,14 @@ impl KeyboardHandler for App {
         self.key(&event);
     }
 
-    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
-        self.key(&event);
-    }
+    // Repeats arrive through the callback the keyboard was taken with.
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
 
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
 
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: RawModifiers, _: u32) {}
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, modifiers: Modifiers, _: RawModifiers, _: u32) {
+        self.modifiers = modifiers;
+    }
 }
 
 impl PointerHandler for App {
