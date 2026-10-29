@@ -328,6 +328,8 @@ impl UserData for PowerRef {
         fields.add_field_method_get("on_battery", |_, this| Ok(this.0.on_battery.get()));
         fields.add_field_method_get("profile", |_, this| Ok(this.0.profile.get()));
         fields.add_field_method_get("profiles", |_, this| Ok(this.0.profiles.get()));
+        // power.degraded: why performance is held back, or "".
+        fields.add_field_method_get("degraded", |_, this| Ok(this.0.degraded.get()));
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {

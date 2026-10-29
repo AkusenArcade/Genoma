@@ -39,6 +39,9 @@ pub struct Power {
     /// "performance", "balanced", "power-saver"; empty without the daemon.
     pub profile: Signal<String>,
     pub profiles: Signal<Vec<String>>,
+    /// Why performance is held back, as the daemon says it
+    /// ("lap-detected", "high-operator-temperature"); empty when it is not.
+    pub degraded: Signal<String>,
     bus: RefCell<Option<Bus>>,
 }
 
@@ -46,7 +49,7 @@ pub struct Power {
 pub enum Update {
     Battery(Battery),
     OnBattery(bool),
-    Profiles { active: String, offered: Vec<String> },
+    Profiles { active: String, offered: Vec<String>, degraded: String },
 }
 
 impl Default for Power {
@@ -56,6 +59,7 @@ impl Default for Power {
             on_battery: Signal::new(false),
             profile: Signal::new(String::new()),
             profiles: Signal::new(Vec::new()),
+            degraded: Signal::new(String::new()),
             bus: RefCell::new(None),
         }
     }
@@ -103,6 +107,8 @@ trait Profiles {
     fn set_active_profile(&self, profile: &str) -> zbus::Result<()>;
     #[zbus(property)]
     fn profiles(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
+    #[zbus(property)]
+    fn performance_degraded(&self) -> zbus::Result<String>;
 }
 
 fn state_name(state: u32) -> &'static str {
@@ -137,7 +143,8 @@ async fn profiles(proxy: &ProfilesProxy<'_>) -> zbus::Result<Update> {
         .into_iter()
         .filter_map(|p| p.get("Profile").and_then(|v| String::try_from(v.clone()).ok()))
         .collect();
-    Ok(Update::Profiles { active: proxy.active_profile().await?, offered })
+    let degraded = proxy.performance_degraded().await.unwrap_or_default();
+    Ok(Update::Profiles { active: proxy.active_profile().await?, offered, degraded })
 }
 
 impl Power {
@@ -145,9 +152,10 @@ impl Power {
         batch(|| match update {
             Update::Battery(b) => self.battery.set(b),
             Update::OnBattery(on) => self.on_battery.set(on),
-            Update::Profiles { active, offered } => {
+            Update::Profiles { active, offered, degraded } => {
                 self.profile.set(active);
                 self.profiles.set(offered);
+                self.degraded.set(degraded);
             }
         });
     }
