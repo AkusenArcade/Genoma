@@ -1186,6 +1186,20 @@ impl Script {
         let host = self.host.clone();
         g.set("animated", lua.create_function(move |_, v: LuaValue| values::animated(&host, v))?)?;
         g.set("json_set", lua.create_function(values::json_set)?)?;
+        // g.array(t): t, marked as a list, so that empty it is still written
+        // as [] and not as {}. The mark is a protected metatable: a marked
+        // table is copied by hand, not with table.clone.
+        g.set(
+            "array",
+            lua.create_function(|lua, t: Option<mlua::Table>| {
+                let t = match t {
+                    Some(t) => t,
+                    None => lua.create_table()?,
+                };
+                t.set_metatable(Some(mlua::LuaSerdeExt::array_metatable(lua)))?;
+                Ok(t)
+            })?,
+        )?;
         // g.effect(fn): runs it now and again whenever what it read changes;
         // stopped with the load. For what reacts rather than draws: the
         // timing set redefined when its speed changes, a theme transition
@@ -1312,7 +1326,13 @@ impl Script {
                 let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| err(format!("g.parse_json: {e}")))?;
                 // A JSON null is nil, as Luau reads absence: niri's
                 // `"id": null` is no focused window, not a truthy value.
-                let options = mlua::serde::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
+                // And a list is a plain table: mlua's marker for one is a
+                // protected metatable, which table.clone refuses. An emptied
+                // list is written back as a list by g.json_set all the same.
+                let options = mlua::serde::SerializeOptions::new()
+                    .serialize_none_to_null(false)
+                    .serialize_unit_to_null(false)
+                    .set_array_metatable(false);
                 lua.to_value_with(&value, options)
             })?,
         )?;

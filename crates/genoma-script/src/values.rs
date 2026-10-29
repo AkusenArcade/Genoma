@@ -242,10 +242,36 @@ pub fn animated(host: &HostRef, initial: LuaValue) -> mlua::Result<Animated> {
 
 // ---- g.json_set ------------------------------------------------------------
 
+/// An empty object where the old document had a list becomes an empty list,
+/// through objects by key and lists by place.
+fn keep_shape(new: &mut serde_json::Value, old: &serde_json::Value) {
+    use serde_json::Value as J;
+    match (new, old) {
+        (n @ J::Object(_), J::Array(_)) if n.as_object().is_some_and(|m| m.is_empty()) => *n = J::Array(Vec::new()),
+        (J::Object(n), J::Object(o)) => {
+            for (k, v) in n.iter_mut() {
+                if let Some(ov) = o.get(k) {
+                    keep_shape(v, ov);
+                }
+            }
+        }
+        (J::Array(n), J::Array(o)) => {
+            for (v, ov) in n.iter_mut().zip(o.iter()) {
+                keep_shape(v, ov);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `g.json_set(text, path, value)` or `g.json_set(text, { { path, value },
 /// … })`: the document with those keys set, the others where they were, as
 /// two-space JSON with a final newline (Bioma's `Config.setMany`). A key on
 /// the way that is not an object becomes one.
+///
+/// Luau has one table for both, and an empty one says nothing about which:
+/// it is written as the document already had it there, so a list emptied
+/// stays a list, however deep in the value (`g.array` marks a new one).
 pub fn json_set(lua: &Lua, (text, first, second): (Option<String>, LuaValue, LuaValue)) -> mlua::Result<String> {
     let mut doc: serde_json::Value = text
         .as_deref()
@@ -283,7 +309,12 @@ pub fn json_set(lua: &Lua, (text, first, second): (Option<String>, LuaValue, Lua
         if !node.is_object() {
             *node = serde_json::Value::Object(Default::default());
         }
-        node.as_object_mut().expect("an object").insert(keys[keys.len() - 1].to_string(), value);
+        let map = node.as_object_mut().expect("an object");
+        let mut value = value;
+        if let Some(old) = map.get(keys[keys.len() - 1]) {
+            keep_shape(&mut value, old);
+        }
+        map.insert(keys[keys.len() - 1].to_string(), value);
     }
     let mut out = serde_json::to_string_pretty(&doc).map_err(|e| err(format!("g.json_set: {e}")))?;
     out.push('\n');
