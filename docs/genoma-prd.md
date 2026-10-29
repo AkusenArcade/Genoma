@@ -477,7 +477,9 @@ it costs. Porting Bioma does not mean rewriting 39 services in Rust.
   retinting the desktop stays live.
 - **Cells open by budding** (§8.2). *Akusen, 2026-10-28:* a cell's
   expanded form buds out of its contracted one and is reabsorbed when it
-  closes. Bioma's design documents take the rule when the port starts,
+  closes. *2026-10-29:* the thread the neck narrows to stays once it has
+  parted, a 1.3 px line with a node at each end, as Bioma's threads are;
+  it is taken back first when the shape is. Bioma's design documents take the rule when the port starts,
   since Bioma on Quickshell has no smooth union to draw it with.
 - **Configuration.** Bioma keeps its two JSON layers. Genoma reads and writes
   them with `g.file`.
