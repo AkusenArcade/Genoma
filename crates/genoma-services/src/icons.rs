@@ -100,12 +100,43 @@ const SIZES: &[&str] = &[
 /// a desktop entry asks for `Alacritty`, the chosen theme draws `alacritty`,
 /// and hicolor's `Alacritty` further down the chain is not the one meant.
 /// The unthemed pixmaps are the last resort, as Qt's lookup has it.
+/// The subdirectories a theme declares (`Directories=` in its index.theme),
+/// the scalable ones first and then from the largest size down; Bioma's
+/// application sizes for a theme that declares none. A tray item's icon is
+/// a status or a symbolic one as often as an application's.
+fn subdirs(dir: &Path) -> Vec<String> {
+    let Ok(index) = fs::read_to_string(dir.join("index.theme")) else {
+        return SIZES.iter().map(|s| s.to_string()).collect();
+    };
+    let mut listed: Vec<String> = Vec::new();
+    for key in ["Directories=", "ScaledDirectories="] {
+        if let Some(line) = index.lines().find_map(|l| l.strip_prefix(key)) {
+            listed.extend(line.split(',').map(|d| d.trim().to_owned()).filter(|d| !d.is_empty()));
+        }
+    }
+    if listed.is_empty() {
+        return SIZES.iter().map(|s| s.to_string()).collect();
+    }
+    let weight = |d: &str| -> i64 {
+        if d.contains("scalable") {
+            return i64::MAX;
+        }
+        d.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<i64>().ok()).max().unwrap_or(0)
+    };
+    // Applications first among equals: a name both an app and a status
+    // icon (a tray's) is the application's.
+    listed.sort_by_key(|d| (std::cmp::Reverse(weight(d)), !d.contains("apps")));
+    listed.dedup();
+    listed
+}
+
 fn in_theme(dirs: &[PathBuf], icon: &str) -> Option<PathBuf> {
     let lower = icon.to_lowercase();
     let names: &[&str] = if lower == icon { &[icon] } else { &[icon, &lower] };
     for dir in dirs {
+        let sizes = subdirs(dir);
         for name in names {
-            for size in SIZES {
+            for size in &sizes {
                 for ext in ["svg", "png"] {
                     let p = dir.join(size).join(format!("{name}.{ext}"));
                     if p.exists() {
