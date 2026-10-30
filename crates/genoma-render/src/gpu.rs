@@ -16,6 +16,10 @@ pub(crate) struct Gpu {
     shaders: Option<shader::Pipeline>,
     text: Option<Text>,
     targets: HashMap<SurfaceId, Target>,
+    /// The last frame's wait for its buffer, and each surface's minute of
+    /// frames, render time and waiting, for the debug log.
+    waited: std::time::Duration,
+    tallies: HashMap<SurfaceId, (u64, std::time::Duration, std::time::Duration, std::time::Instant)>,
 }
 
 /// Glyphon's pieces, made once the surface format is known.
@@ -100,6 +104,8 @@ impl Gpu {
             shaders: None,
             text: None,
             targets: HashMap::new(),
+            waited: std::time::Duration::ZERO,
+            tallies: HashMap::new(),
         })
     }
 
@@ -144,6 +150,19 @@ impl Gpu {
         self.draw_inner(id, width, height, list);
         let took = started.elapsed();
         log::trace!("render {} us", took.as_micros());
+        let tally = self.tallies.entry(id).or_insert((0, Default::default(), Default::default(), std::time::Instant::now()));
+        tally.0 += 1;
+        tally.1 += took;
+        tally.2 += self.waited;
+        if tally.3.elapsed() >= std::time::Duration::from_secs(60) {
+            let (n, total, waiting, _) = *tally;
+            log::debug!(
+                "surface {id}: {n} renders, {:.2} ms each, of which {:.2} ms waiting for a buffer",
+                total.as_secs_f64() * 1000.0 / n.max(1) as f64,
+                waiting.as_secs_f64() * 1000.0 / n.max(1) as f64
+            );
+            *tally = (0, Default::default(), Default::default(), std::time::Instant::now());
+        }
         if took > std::time::Duration::from_millis(20) {
             log::warn!(
                 "surface {id}: rendered in {} ms ({} rects, {} images, {} texts)",
@@ -185,6 +204,7 @@ impl Gpu {
         let asked = std::time::Instant::now();
         let acquired = target.surface.get_current_texture();
         let waited = asked.elapsed();
+        self.waited = waited;
         if waited > std::time::Duration::from_millis(8) {
             log::warn!("surface {id}: waited {} ms for a buffer", waited.as_millis());
         }

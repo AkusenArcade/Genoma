@@ -86,6 +86,8 @@ struct Surface {
     dirty: bool,
     frame_pending: bool,
     frames: u64,
+    /// Frames and build time since the last minute's account (debug log).
+    tally: (u64, Duration, Instant),
     /// The blur and input regions last sent, as rectangles, so each is set
     /// only when it changes; the inputs `None` until the first is sent,
     /// because Wayland's default is the whole surface.
@@ -412,6 +414,7 @@ impl App {
             dirty: false,
             frame_pending: false,
             frames: 0,
+            tally: (0, Duration::ZERO, Instant::now()),
             blurred: Vec::new(),
             inputs: None,
             holes: Vec::new(),
@@ -659,6 +662,22 @@ impl App {
         }
         s.dirty = animating;
         s.frames += 1;
+        // A minute's account at debug level: how often the surface drew and
+        // what building its frames cost, so a slow drift can be read back.
+        s.tally.0 += 1;
+        s.tally.1 += built;
+        if s.tally.2.elapsed() >= Duration::from_secs(60) {
+            let (n, total, since) = s.tally;
+            log::debug!(
+                "surface {}: {} frames in {} s, build {:.2} ms each, {} animating",
+                s.id,
+                n,
+                since.elapsed().as_secs(),
+                total.as_secs_f64() * 1000.0 / n.max(1) as f64,
+                animating
+            );
+            s.tally = (0, Duration::ZERO, Instant::now());
+        }
         if s.access_checked.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
             s.access_checked = Some(Instant::now());
             let title = match &s.output {
