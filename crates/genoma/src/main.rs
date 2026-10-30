@@ -202,7 +202,14 @@ impl Sources {
                         .expect("polkit channel");
                     // The session's agent: one per session, so it fails
                     // while another (Bioma's) holds it, and says so.
-                    self.services.polkit.start(&bus, post, genoma_services::polkit::Subject::Session);
+                    // GENOMA_POLKIT_PROCESS=<pid> registers it for that one
+                    // process instead, as `pkttyagent --process` does: a
+                    // test of the interface beside the session's agent.
+                    let subject = std::env::var("GENOMA_POLKIT_PROCESS")
+                        .ok()
+                        .and_then(|pid| pid.parse().ok())
+                        .map_or(genoma_services::polkit::Subject::Session, genoma_services::polkit::Subject::Process);
+                    self.services.polkit.start(&bus, post, subject);
                 }
                 "notifications" => {
                     let Some(bus) = self.bus() else { continue };

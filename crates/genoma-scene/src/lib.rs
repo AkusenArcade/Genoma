@@ -716,6 +716,12 @@ impl Scene {
         if animate {
             let from = self.current(node, prop);
             if from.as_ref() == Some(&value) {
+                // Already there, and staying: whatever was on its way
+                // elsewhere is called off. Left running, a value sent back
+                // to where it stood before it had moved went on to the
+                // target it no longer had (an opacity 1, 0, 1 in one moment
+                // stayed at 0).
+                self.animations.retain(|a| !(a.node == node && a.prop == prop));
                 return Ok(());
             }
             if let (Some(from), Some(timing)) = (from, timing) {
