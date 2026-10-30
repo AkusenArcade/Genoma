@@ -96,6 +96,7 @@ pub enum Prop {
     Cursor,
     DecodeWidth,
     DecodeHeight,
+    Soften,
     Follow,
     Clock,
 }
@@ -219,6 +220,7 @@ pub const PROPS: &[PropInfo] = &[
     p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
     p("decode_width", Prop::DecodeWidth, Ty::Number, false, "An image decoded at this width, logical units, rather than its box's: a box narrower shows the middle of it. For a box whose size moves."),
     p("decode_height", Prop::DecodeHeight, Ty::Number, false, "An image decoded at this height, logical units."),
+    p("soften", Prop::Soften, Ty::Number, false, "An image blurred once, as it is decoded, by this radius in logical units: a backdrop behind niri's overview. Nothing is spent on it per frame; a decode smaller than the box blurs it further as it is drawn up."),
     p("raised", Prop::Raised, Ty::Bool, false, "Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it."),
     p("cursor", Prop::Cursor, Ty::Choice(&CURSORS), false, "The pointer's shape over this node and what it holds, unless a node inside names its own."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),

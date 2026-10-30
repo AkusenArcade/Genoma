@@ -74,6 +74,10 @@ pub enum Input {
     /// a field that reaches past what it holds reads the point in its own
     /// frame (the quick actions' ring, pointing by direction).
     Move(f32, f32),
+    /// An image's pixels drawn for the first time since its `src` was set:
+    /// a picture that should appear only once it is there (a wallpaper's
+    /// crossfade). Not pointer input, and never passed up to a parent.
+    Ready,
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -92,13 +96,14 @@ impl Input {
             Input::Click(..) => "on_click",
             Input::Drag(..) => "on_drag",
             Input::Move(..) => "on_move",
+            Input::Ready => "on_ready",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_wheel", "on_fling", "on_outside", "on_key"];
 
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
@@ -939,7 +944,7 @@ impl Script {
             let handler = self.handlers.borrow().get(&(target, id)).and_then(|h| h.get(name)).cloned();
             if let Some(f) = handler {
                 let result = match &input {
-                    Input::Outside => f.call::<()>(()),
+                    Input::Outside | Input::Ready => f.call::<()>(()),
                     // on_key(name, text, { ctrl, shift, alt })
                     Input::Key(key) => (|| {
                         let lua = f.weak_lua().upgrade();
@@ -965,7 +970,7 @@ impl Script {
             }
             // Hover stays with its own node: entering a child is not
             // entering every ancestor again.
-            if matches!(input, Input::Hover(_)) {
+            if matches!(input, Input::Hover(_) | Input::Ready) {
                 return;
             }
             at = scene.borrow().parent(id);
@@ -1764,7 +1769,7 @@ fn mount(
                 return Err(err(format!("{key} wants a function")));
             };
             handlers.borrow_mut().entry((target, node)).or_default().insert(name, f);
-            if !matches!(name, "on_outside" | "on_key") {
+            if !matches!(name, "on_outside" | "on_key" | "on_ready") {
                 scene.borrow_mut().set_interactive(node, true);
             }
             continue;

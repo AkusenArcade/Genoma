@@ -165,6 +165,8 @@ pub struct Node {
     cursor: u8,
     /// An image's decode size, logical units, when not its box's.
     decode: [Option<f32>; 2],
+    /// An image's blur, done once as it is decoded, logical units.
+    soften: f32,
     wave_phase: f32,
     arc: f32,
     sway: f32,
@@ -248,6 +250,7 @@ impl Node {
             raised: false,
             cursor: 0,
             decode: [None, None],
+            soften: 0.0,
             wave_phase: 0.0,
             arc: 1.0,
             sway: 0.0,
@@ -431,6 +434,10 @@ pub struct Scene {
     now: f32,
     /// The blurred shapes as last drawn.
     blur: Vec<Blur>,
+    /// Images whose pixels have been drawn since their `src` was set, and
+    /// those that got there in the last frame, for `on_ready`.
+    ready: std::collections::HashSet<NodeId>,
+    newly_ready: Vec<NodeId>,
 }
 
 /// A shape the compositor blurs behind, logical units.
@@ -463,7 +470,20 @@ impl Scene {
             epoch: Instant::now(),
             now: 0.0,
             blur: Vec::new(),
+            ready: Default::default(),
+            newly_ready: Vec::new(),
         }
+    }
+
+    /// How soon to look again for an image still being decoded, if one is.
+    pub fn images_pending(&self) -> Option<std::time::Duration> {
+        self.images.pending().then_some(images::BEAT)
+    }
+
+    /// The images drawn for the first time since their `src` was set, once:
+    /// what `on_ready` is told.
+    pub fn take_ready(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.newly_ready)
     }
 
     pub fn root(&self) -> NodeId {
@@ -982,6 +1002,7 @@ impl Scene {
             }
             Prop::DecodeWidth => n.decode[0] = Some(take!(number)).filter(|v| *v > 0.0),
             Prop::DecodeHeight => n.decode[1] = Some(take!(number)).filter(|v| *v > 0.0),
+            Prop::Soften => n.soften = take!(number).max(0.0),
             Prop::Arc => n.arc = take!(number),
             Prop::Angle => n.angle = take!(number).rem_euclid(1.0),
             Prop::Sway => (n.sway, mover) = (take!(number).max(0.0), true),
@@ -1005,6 +1026,10 @@ impl Scene {
             if moves {
                 self.movers.push(node);
             }
+        }
+        // A new picture is not ready until it is drawn.
+        if prop == Prop::Src {
+            self.ready.remove(&node);
         }
         self.dirty = true;
         Ok(())
@@ -1232,9 +1257,15 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false };
+        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
+        for id in std::mem::take(&mut out.drawn_images) {
+            if self.ready.insert(id) {
+                log::debug!("image {id:?} drawn for the first time");
+                self.newly_ready.push(id);
+            }
+        }
         let upper = out.upper;
         let has_upper = !(upper.rects.is_empty() && upper.images.is_empty() && upper.shaders.is_empty()
             && upper.emitters.is_empty() && upper.texts.is_empty());
@@ -1350,6 +1381,8 @@ struct Out<'a> {
     /// What is raised, gathered apart and put after the rest at the end.
     upper: DrawList,
     raised: bool,
+    /// The images drawn this frame.
+    drawn_images: Vec<NodeId>,
 }
 
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -1830,7 +1863,10 @@ fn collect_node(
             let dh = n.decode[1].map_or(h, |d| (d * scale).round() as u32).max(1);
             if let (Some(source), true) = (n.src.clone(), w > 0 && h > 0) {
                 let radius = n.radius.unwrap_or(0.0) * scale;
-                if let Some((key, data)) = out.images.get(&source, dw, dh, n.fit, 0.0) {
+                // The blur's radius in the decoded picture's own pixels.
+                let soften = n.soften * scale * dw as f32 / w.max(1) as f32;
+                if let Some((key, data)) = out.images.get(&source, dw, dh, n.fit, 0.0, soften) {
+                    out.drawn_images.push(node);
                     let part = |shown: u32, decoded: u32| {
                         if shown >= decoded {
                             (0.0, 1.0)

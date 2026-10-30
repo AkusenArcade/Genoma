@@ -51,6 +51,7 @@ sources.
 | ~~A raised layer~~: `raised` done 2026-10-29 (drawn after the whole surface, text included, its shape cutting what is under it first; hit first) | the theme cell's lists over its capsules, then every dropdown in settings |
 | ~~A pointer that drags, and its shape~~: done 2026-10-29: `on_drag(x, y)` to the node the press landed on while the button is held; `cursor` on a node and what it holds (`wp-cursor-shape`); a surface `above_zones`, its origin the output's; `p:signal(n)` on a process | the utility's selection rectangle, its recorder and dictation's |
 | ~~Where the pointer is~~: done 2026-10-30: `on_move(x, y)` to the node under the pointer as it enters a surface and as it moves, local to whichever node handles it (entering included, so a surface that starts taking input under a still pointer learns where it is) | the quick actions' ring, summoned at the pointer and pointed by direction |
+| ~~A picture blurred, and told when it is there~~: done 2026-10-30: `soften` on an image (blurred once as it is decoded, nothing per frame) and `on_ready` (its pixels drawn for the first time since `src` was set) | the wallpaper's backdrop behind niri's overview, and its crossfade |
 | Drag and drop | organisms' arrange mode (on `on_drag`) |
 
 ## Steps, in dependency order

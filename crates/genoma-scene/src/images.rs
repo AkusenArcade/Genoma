@@ -45,6 +45,7 @@ struct Request {
     height: u32,
     fit: Fit,
     radius: f32,
+    soften: f32,
 }
 
 /// The requests waiting, newest last, and how many threads take them.
@@ -70,11 +71,12 @@ pub const BEAT: Duration = Duration::from_millis(16);
 
 impl Images {
     /// The pixels of `source` fitted to `width` × `height` physical pixels
-    /// with corners of `radius`, premultiplied RGBA, or `None` while they
-    /// are being made (or when they cannot be).
-    pub fn get(&mut self, source: &str, width: u32, height: u32, fit: Fit, radius: f32) -> Option<(u64, Arc<Vec<u8>>)> {
+    /// with corners of `radius`, blurred by `soften` of those pixels,
+    /// premultiplied RGBA, or `None` while they are being made (or when they
+    /// cannot be).
+    pub fn get(&mut self, source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: f32) -> Option<(u64, Arc<Vec<u8>>)> {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        ("image", source, width, height, fit, (radius * 4.0).round() as i32).hash(&mut h);
+        ("image", source, width, height, fit, (radius * 4.0).round() as i32, (soften * 4.0).round() as i32).hash(&mut h);
         let key = h.finish();
         let frame = self.frame;
         if let Some((entry, used)) = self.cache.get_mut(&key) {
@@ -85,7 +87,7 @@ impl Images {
             };
         }
         self.cache.insert(key, (Entry::Pending, frame));
-        let request = Request { key, source: source.to_owned(), width, height, fit, radius };
+        let request = Request { key, source: source.to_owned(), width, height, fit, radius, soften };
         let mut waiting = self.queue.waiting.lock().unwrap();
         waiting.0.push_back(request);
         // A thread more while there are fewer than WORKERS; each takes
@@ -104,7 +106,8 @@ impl Images {
                         }
                     }
                 };
-                let pixels = decode(&next.source, next.width, next.height, next.fit, next.radius).map(Arc::new);
+                let pixels = decode(&next.source, next.width, next.height, next.fit, next.radius, next.soften).map(Arc::new);
+                log::debug!("g.image {} decoded at {}x{}", next.source, next.width, next.height);
                 if pixels.is_none() {
                     log::warn!("g.image {}: could not be read", next.source);
                 }
@@ -150,7 +153,7 @@ impl Images {
     }
 }
 
-fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32) -> Option<Vec<u8>> {
+fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: f32) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -161,6 +164,11 @@ fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32) -> Optio
         image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.into_rgba8()
     };
     let mut out = fitted(&image, width, height, fit);
+    // Once, here, off the frame: a backdrop costs its decode and nothing
+    // after.
+    if soften >= 0.5 {
+        out = image::imageops::fast_blur(&out, soften);
+    }
     round(&mut out, width, height, radius);
     premultiply(&mut out);
     Some(out.into_raw())

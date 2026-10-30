@@ -587,6 +587,15 @@ impl App {
         s.scene.borrow_mut().layout(spans.then_some(s.logical.0 as f32), None);
         let list = s.scene.borrow_mut().draw_list(s.scale as f32);
         let animating = motion.moving;
+        // An image asked for by this very frame is decoding now, and the
+        // beat that looks for it again has to be set here: `advance` ran
+        // before the frame asked. Without it a picture that nothing else
+        // redrew stayed undrawn (a wallpaper's next picture, on a still
+        // desktop).
+        let mut motion = motion;
+        if motion.wake.is_none() {
+            motion.wake = s.scene.borrow().images_pending();
+        }
 
         // The blur region follows the shapes, and is part of this commit.
         let mut shapes = Vec::new();
@@ -715,6 +724,13 @@ impl App {
                     TimeoutAction::Drop
                 })
                 .ok();
+        }
+
+        // Images drawn for the first time: told, once each, after the frame
+        // that shows them (a wallpaper fades in only once it is there).
+        let ready = self.surfaces[i].scene.borrow_mut().take_ready();
+        for node in ready {
+            self.deliver(i, node, Input::Ready);
         }
 
         // What this surface takes moved, so a surface catching on the same
