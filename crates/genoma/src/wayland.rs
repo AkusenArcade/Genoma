@@ -980,6 +980,15 @@ impl PointerHandler for App {
                 self.cursor_serial = serial;
                 self.cursor_shape = None;
             }
+            // Where it is, to what it is over: on entering too, since a
+            // surface that starts taking input under a pointer that has not
+            // moved is told where that pointer is only then (summoning a
+            // cell at the pointer).
+            if matches!(event.kind, K::Enter { .. } | K::Motion { .. }) {
+                if let Some(node) = hit {
+                    self.deliver(i, node, Input::Move(x, y));
+                }
+            }
             if !matches!(event.kind, K::Leave { .. }) {
                 let wanted = hit.map_or(genoma_scene::CURSORS[0], |h| scene.borrow().cursor(h));
                 self.set_cursor(wanted);

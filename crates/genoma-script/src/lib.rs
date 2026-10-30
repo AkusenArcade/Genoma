@@ -69,6 +69,11 @@ pub enum Input {
     /// landed on, logical units from its top-left corner wherever the
     /// pointer has gone since: a rectangle being drawn.
     Drag(f32, f32),
+    /// Where the pointer is over the node, entering it or moving on it: in
+    /// surface coordinates here, made local to whichever node handles it, so
+    /// a field that reaches past what it holds reads the point in its own
+    /// frame (the quick actions' ring, pointing by direction).
+    Move(f32, f32),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -86,13 +91,14 @@ impl Input {
             Input::Release(..) => "on_release",
             Input::Click(..) => "on_click",
             Input::Drag(..) => "on_drag",
+            Input::Move(..) => "on_move",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_wheel", "on_fling", "on_outside", "on_key"];
 
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
@@ -946,6 +952,10 @@ impl Script {
                     Input::Hover(entered) => f.call::<()>(*entered),
                     Input::Press(b, x, y) | Input::Release(b, x, y) | Input::Click(b, x, y) => f.call::<()>((*b, *x, *y)),
                     Input::Drag(x, y) => f.call::<()>((*x, *y)),
+                    Input::Move(x, y) => {
+                        let (lx, ly) = scene.borrow().local(id, *x, *y);
+                        f.call::<()>((lx, ly))
+                    }
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                 };
                 if let Err(e) = result {
