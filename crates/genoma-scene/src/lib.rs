@@ -101,6 +101,12 @@ pub struct Node {
     font_size: f32,
     font: Option<String>,
     tabular: bool,
+    /// Characters counted from 1 drawn in `mark_color`, and the fade the
+    /// buffer was shaped at: a marked glyph carries its own colour, which
+    /// the text's alpha does not reach, so the shape follows the fade.
+    marks: Vec<f32>,
+    mark_color: [f32; 4],
+    marks_alpha: f32,
     max_width: Option<f32>,
     buffer: Option<Arc<ct::Buffer>>,
     /// Beats a minute, and where in the current beat the node is (0…1).
@@ -203,6 +209,9 @@ impl Node {
             font_size: 14.0,
             font: None,
             tabular: false,
+            marks: Vec::new(),
+            mark_color: [1.0; 4],
+            marks_alpha: 1.0,
             max_width: None,
             buffer: None,
             pulse: 0.0,
@@ -961,6 +970,14 @@ impl Scene {
             Prop::FontSize => (n.font_size, reshape) = (take!(number), true),
             Prop::Font => (n.font, reshape) = (Some(take!(text)), true),
             Prop::Tabular => (n.tabular, reshape) = (take!(flag), true),
+            Prop::Marks => {
+                let marks = take!(numbers);
+                if n.marks == marks {
+                    return Ok(());
+                }
+                (n.marks, reshape) = (marks, true);
+            }
+            Prop::MarkColor => (n.mark_color, reshape) = (take!(colour), true),
             Prop::Pulse => (n.pulse, mover) = (take!(number).max(0.0), true),
             Prop::Orbit => (n.orbit, mover) = (take!(number), true),
             Prop::OrbitRadius => n.orbit_radius = take!(number),
@@ -1381,7 +1398,29 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         });
     }
     buffer.set_size(n.max_width, None);
-    buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, None);
+    if n.marks.is_empty() {
+        buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, None);
+    } else {
+        let c = n.mark_color;
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let lit = attrs.clone().color(ct::Color::rgba(byte(c[0]), byte(c[1]), byte(c[2]), byte(c[3] * n.marks_alpha)));
+        let marked: std::collections::HashSet<usize> = n.marks.iter().map(|m| *m as usize).collect();
+        // Runs of marked and unmarked characters, as byte ranges.
+        let mut spans: Vec<(&str, ct::Attrs)> = Vec::new();
+        let (mut start, mut was) = (0, None);
+        for (i, (at, _)) in n.text.char_indices().enumerate() {
+            let is = marked.contains(&(i + 1));
+            if was.is_some_and(|w| w != is) {
+                spans.push((&n.text[start..at], if was == Some(true) { lit.clone() } else { attrs.clone() }));
+                start = at;
+            }
+            was = Some(is);
+        }
+        if start < n.text.len() {
+            spans.push((&n.text[start..], if was == Some(true) { lit.clone() } else { attrs.clone() }));
+        }
+        buffer.set_rich_text(spans, &attrs, ct::Shaping::Advanced, None);
+    }
     buffer.shape_until_scroll(fonts, false);
     let buffer = Arc::new(buffer);
     n.buffer = Some(buffer.clone());
@@ -1921,6 +1960,13 @@ fn collect_node(
             }
         }
         Kind::Text => {
+            if !n.marks.is_empty() {
+                let a = (alpha * 32.0).round() / 32.0;
+                if n.marks_alpha != a {
+                    n.marks_alpha = a;
+                    n.buffer = None;
+                }
+            }
             let buffer = shape(fonts, n);
             let at = [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale];
             if out.transform == Rect::IDENTITY {
