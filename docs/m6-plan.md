@@ -140,20 +140,22 @@ Time, Calendar, Proxy reading, Apps) are done: Bioma's `genoma/PORT.md`.
 
 ### 4. Cells, in Bioma's build order
 
-1. [ ] Window title, workspaces, vitals, clock: M2's membrane, moved over and
+1. [x] Window title, workspaces, vitals, clock: M2's membrane, moved over and
        brought to today's QML.
-2. [ ] Identity (PRD phase 3): media (the band's shader), theme and the
+2. [x] Identity (PRD phase 3): media (the band's shader), theme and the
        wallpaper with its overview backdrop, utility.
-3. [ ] Volume, connectivity, session, dock, tray.
-4. [ ] The rest: actions, clipboard, downloads, drives, emoji, keyboard,
+3. [x] Volume, connectivity, session, dock, tray.
+4. [x] The rest: actions, clipboard, downloads, drives, emoji, keyboard,
        performance, polkit, privacy, system, timer.
-5. [ ] Notifications, last.
-6. [ ] Settings, then the launcher.
+5. [x] Notifications, last.
+6. [x] Settings, then the launcher (and the setup), 2026-11-02.
 
 ### 5. The organisms
 
-- [ ] The organisms, and their arrange mode (not in the PRD; built after
-      it, on the wallpaper's layer).
+- [x] The organisms, and their arrange mode (not in the PRD; built after
+      it, on the wallpaper's layer): all seventeen, 2026-11-02, and what
+      they asked of the toolkit (tree order, gradient and lit text, runs,
+      fades, shadows, stops, idle; Bioma's genoma/PORT.md).
 
 ### 6. Lock and greeter
 
