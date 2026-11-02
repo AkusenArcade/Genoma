@@ -62,6 +62,27 @@ impl Glyphs {
         if let Some((c, height)) = lit {
             (c[0], c[1], c[2], height.to_bits()).hash(&mut h);
         }
+        // Struck stretches, physical pixels from the origin rounded down:
+        // x0, x1, y, thickness, and their own colour if they have one.
+        let (fx, fy) = (origin[0] - origin[0].floor(), origin[1] - origin[1].floor());
+        let mut strikes: Vec<(i32, i32, i32, i32, Option<[u8; 3]>)> = Vec::new();
+        for run in buffer.layout_runs() {
+            for span in run.decorations.iter().filter(|s| s.data.text_decoration.strikethrough) {
+                let glyphs = &run.glyphs[span.glyph_range.clone()];
+                let x0 = glyphs.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+                let x1 = glyphs.iter().map(|g| g.x + g.w).fold(f32::NEG_INFINITY, f32::max);
+                if x1 <= x0 {
+                    continue;
+                }
+                let m = &span.data.strikethrough_metrics;
+                let thick = (m.thickness * span.font_size * scale).max(1.0).round() as i32;
+                let y = ((run.line_y - m.offset * span.font_size) * scale + fy).round() as i32;
+                let own = span.color_opt.map(|c| [c.r(), c.g(), c.b()]);
+                let s = ((x0 * scale + fx).round() as i32, (x1 * scale + fx).round() as i32, y, thick, own);
+                s.hash(&mut h);
+                strikes.push(s);
+            }
+        }
         for run in buffer.layout_runs() {
             let baseline = (run.line_y * scale).round() as i32;
             for glyph in run.glyphs {
@@ -131,6 +152,19 @@ impl Glyphs {
                     for k in 0..4 {
                         below[k] = (texel[k] + below[k] as u32 * keep / 255).min(255) as u8;
                     }
+                }
+            }
+        }
+        // The strikes over the glyphs, inside the raster's bounds.
+        for (sx0, sx1, sy, thick, own) in strikes {
+            for y in sy..sy + thick {
+                if y < y0 || y >= y1 {
+                    continue;
+                }
+                let c = own.map_or_else(|| row_colour(y), |c| [c[0] as u32, c[1] as u32, c[2] as u32]);
+                for x in sx0.max(x0)..sx1.min(x1) {
+                    let at = (((y - y0) * width as i32 + x - x0) * 4) as usize;
+                    pixels[at..at + 4].copy_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, 255]);
                 }
             }
         }
