@@ -166,7 +166,7 @@ pub const PROPS: &[PropInfo] = &[
     p("orbit_radius", Prop::OrbitRadius, Ty::Number, false, "Radius of the orbit, logical units."),
     p("icon", Prop::Icon, Ty::Text, false, "An icon's name in the icon directories, or a file's absolute path."),
     p("src", Prop::Src, Ty::Text, false, "An image's file: PNG, JPEG, WebP or SVG, an absolute path. Decoded off the frame; nothing is drawn until it is ready. A shader's WGSL file, read when set."),
-    p("values", Prop::Values, Ty::Numbers, false, "A shader's numbers, up to 128: what its `value(i)` reads."),
+    p("values", Prop::Values, Ty::Numbers, false, "A shader's numbers, up to 1024: what its `value(i)` reads."),
     p("follow", Prop::Follow, Ty::Number, false, "Seconds a shader's numbers take to ease most of the way to new values (an exponential's time constant); 0 is at once."),
     p("clock", Prop::Clock, Ty::Bool, false, "While true a shader's `shader.time` runs, a frame every refresh; it also runs while its numbers ease. Bind it to the value that moves it."),
     p("fit", Prop::Fit, Ty::Choice(&["cover", "contain", "fill"]), false, "How an image fills its box: cover crops it about its centre, contain shows it whole, fill stretches it."),

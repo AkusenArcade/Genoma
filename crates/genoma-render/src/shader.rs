@@ -1,5 +1,5 @@
 //! Shader nodes (`g.shader`): a rectangle whose every pixel is a function
-//! the interface writes in WGSL, fed by up to 128 numbers it binds. What a
+//! the interface writes in WGSL, fed by up to 1024 numbers it binds. What a
 //! distance field of rects cannot say, a field of its own can: Bioma's audio
 //! band melts its drops together, and shakes a membrane.
 //!
@@ -41,7 +41,7 @@ pub struct Shader {
     pub values: Vec<f32>,
 }
 
-pub const VALUES: usize = 128;
+pub const VALUES: usize = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -57,9 +57,9 @@ struct Uniforms {
     values: [[f32; 4]; VALUES / 4],
 }
 
-/// Uniforms are bound at offsets of this many bytes, the largest alignment
-/// any device asks for.
-const STRIDE: u64 = 768;
+/// Uniforms are bound at offsets of this many bytes: their size rounded up
+/// to 256, the largest alignment any device asks for.
+const STRIDE: u64 = ((std::mem::size_of::<Uniforms>() as u64 + 255) / 256) * 256;
 
 const PRELUDE: &str = r#"
 struct Shader {
@@ -70,12 +70,12 @@ struct Shader {
     scale: f32,
     time: f32,
     alpha: f32,
-    values: array<vec4<f32>, 32>,
+    values: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> shader: Shader;
 
 fn value(i: i32) -> f32 {
-    if (i < 0 || i >= 128) { return 0.0; }
+    if (i < 0 || i >= 1024) { return 0.0; }
     return shader.values[i / 4][i % 4];
 }
 

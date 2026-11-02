@@ -1012,7 +1012,7 @@ impl Scene {
             Prop::Src => n.src = Some(take!(text)),
             Prop::Values => {
                 n.values = take!(numbers);
-                n.values.truncate(128);
+                n.values.truncate(1024);
                 if n.follow <= 0.0 || n.shown.len() != n.values.len() {
                     n.shown = n.values.clone();
                 }
