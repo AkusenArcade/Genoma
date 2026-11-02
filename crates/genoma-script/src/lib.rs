@@ -20,7 +20,7 @@ mod values;
 pub mod io;
 
 use genoma_core::{
-    reactive::{Effect, Scope, Signal, detached, on_cleanup, untracked},
+    reactive::{Effect, Scope, Signal, current_owner, detached, on_cleanup, owned_by, untracked},
     timing::{self, Curve, Timing},
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
@@ -890,6 +890,10 @@ pub struct Script {
     /// loads.
     dbus: Rc<RefCell<Option<Rc<dbus::Dbus>>>>,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
+    /// The load's own scope, which owns every module: a module is evaluated
+    /// once per load and cached, so what it creates must live as long as the
+    /// load, wherever it was first required from.
+    module_owner: Rc<std::cell::Cell<Option<usize>>>,
     services: Services,
     wanted: Rc<RefCell<Vec<&'static str>>>,
     handlers: Handlers,
@@ -925,6 +929,7 @@ impl Script {
             host,
             dbus: Rc::default(),
             states: Rc::default(),
+            module_owner: Rc::default(),
             services,
             wanted: Rc::default(),
             handlers: Rc::default(),
@@ -1028,7 +1033,9 @@ impl Script {
         // if the load fails or when the next one is mounted.
         // One g.surface, or a list of them: a shell has several surfaces on
         // each output (a membrane on each edge, the floats, the wallpaper).
+        let module_owner = self.module_owner.clone();
         let (scope, result) = Scope::new(|| -> Result<(Vec<Table>, Vec<SurfaceSpec>), String> {
+            module_owner.set(current_owner());
             let returned: Table =
                 lua.load(&source).set_name(format!("@{}", path.display())).eval().map_err(|e| e.to_string())?;
             let is_surface = |t: &Table| t.get::<Option<bool>>("__surface").ok().flatten() == Some(true);
@@ -1536,6 +1543,7 @@ impl Script {
         let dir = self.dir.clone();
         let services = self.services.clone();
         let wanted = self.wanted.clone();
+        let module_owner = self.module_owner.clone();
         let cache: Table = lua.create_table()?;
         let require = lua.create_function(move |lua, name: String| -> mlua::Result<LuaValue> {
             if let Some(v) = cache.get::<Option<LuaValue>>(name.as_str())? {
@@ -1589,7 +1597,7 @@ impl Script {
                     let path = dir.join(format!("{relative}.luau"));
                     let source = std::fs::read_to_string(&path)
                         .map_err(|e| err(format!("{}: {e}", path.display())))?;
-                    lua.load(&source).set_name(format!("@{}", path.display())).eval()?
+                    owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
             };
             cache.set(name.as_str(), value.clone())?;

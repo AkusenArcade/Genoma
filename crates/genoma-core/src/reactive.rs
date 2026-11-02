@@ -471,6 +471,22 @@ pub fn batch<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// The owner what is created now would go to.
+pub fn current_owner() -> Option<usize> {
+    with(|rt| rt.owner)
+}
+
+/// Runs `f` untracked, with `owner` owning what it creates: a module loaded
+/// from inside some passing computed belongs to the load that will keep it,
+/// not to the computed, whose next run would dispose the module's state
+/// while the module itself stayed cached.
+pub fn owned_by<R>(owner: Option<usize>, f: impl FnOnce() -> R) -> R {
+    let previous = with(|rt| std::mem::replace(&mut rt.owner, owner));
+    let result = untracked(f);
+    with(|rt| rt.owner = previous);
+    result
+}
+
 /// Runs `f` with no owner: what it creates outlives every scope, until
 /// disposed by hand. State that must survive a reload is made this way.
 pub fn detached<R>(f: impl FnOnce() -> R) -> R {
