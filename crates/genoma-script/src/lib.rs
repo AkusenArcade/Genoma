@@ -903,6 +903,9 @@ pub struct Script {
     /// table it returned, and the scope of what its top-level code started.
     pending: Option<(Lua, Vec<Table>, Scope)>,
     dir: PathBuf,
+    /// The file the interface starts from: `shell.luau`, or another entry
+    /// point of the same interface (Bioma's greeter).
+    entry: String,
     scope: Option<Scope>,
     /// What the mounted load's top-level code started (processes, files,
     /// sockets, timers): stopped when the next load is mounted.
@@ -946,6 +949,7 @@ impl Script {
             lua: Lua::new(),
             pending: None,
             dir: dir.to_owned(),
+            entry: "shell.luau".into(),
             scope: None,
             io_scope: None,
             host,
@@ -1041,7 +1045,13 @@ impl Script {
         self.wanted.borrow().contains(&service)
     }
 
-    /// Evaluates `shell.luau` and returns where its surfaces go. Nothing is
+    /// Starts from `entry` instead of `shell.luau`: another entry point of
+    /// the same interface, its modules shared.
+    pub fn set_entry(&mut self, entry: &str) {
+        self.entry = entry.to_owned();
+    }
+
+    /// Evaluates the entry (`shell.luau`) and returns where its surfaces go. Nothing is
     /// mounted until [`Script::mount`]: the runtime first makes a surface for
     /// each output the description asks for.
     pub fn evaluate(&mut self) -> Result<Vec<SurfaceSpec>, String> {
@@ -1049,7 +1059,7 @@ impl Script {
         // nothing of the old chunks survives but the `g.state` signals.
         let lua = Lua::new();
         self.install(&lua).map_err(|e| e.to_string())?;
-        let path = self.dir.join("shell.luau");
+        let path = self.dir.join(&self.entry);
         let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         // What the top-level code starts belongs to this load, and is stopped
         // if the load fails or when the next one is mounted.
@@ -1067,7 +1077,7 @@ impl Script {
                 returned.sequence_values::<Table>().collect::<mlua::Result<_>>().map_err(|e| e.to_string())?
             };
             if surfaces.iter().any(|t| !is_surface(t)) {
-                return Err("shell.luau must return g.surface { … }, or a list of them".into());
+                return Err(format!("{} must return g.surface {{ … }}, or a list of them", self.entry));
             }
             let specs = surfaces.iter().map(surface_spec).collect::<mlua::Result<Vec<_>>>().map_err(|e| e.to_string())?;
             Ok((surfaces, specs))
@@ -1392,6 +1402,16 @@ impl Script {
                     Err(e) => return Err(mlua::Error::runtime(e)),
                 };
                 Ok(host.measure_wrapped(&text, t.get("size")?, &style, t.get("width")?, &runs))
+            })?,
+        )?;
+        // g.quit(code): the interface is done and the process ends, with that
+        // exit status (0 by default): a greeter once the session it started
+        // has taken over. The compositor takes its surfaces down.
+        g.set(
+            "quit",
+            lua.create_function(|_, code: Option<i32>| -> mlua::Result<()> {
+                log::info!("quit, as the interface asked");
+                std::process::exit(code.unwrap_or(0))
             })?,
         )?;
         // g.dir: the interface's directory.

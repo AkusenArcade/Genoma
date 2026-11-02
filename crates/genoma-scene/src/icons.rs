@@ -14,7 +14,7 @@ use resvg::{tiny_skia, usvg};
 #[derive(Default)]
 pub struct Icons {
     pub dirs: Vec<PathBuf>,
-    cache: HashMap<u64, Option<Arc<Vec<u8>>>>,
+    pub(crate) cache: HashMap<u64, Option<Arc<Vec<u8>>>>,
 }
 
 fn hex(c: [f32; 4]) -> String {

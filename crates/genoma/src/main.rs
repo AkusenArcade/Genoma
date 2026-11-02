@@ -1,6 +1,8 @@
 //! The Genoma runtime (PRD §4):
 //!
-//!     genoma <interface directory>     run the interface
+//!     genoma <interface directory> [entry]
+//!                                      run the interface, from `shell.luau`
+//!                                      or another entry point in it
 //!     genoma probe                     print every service as it changes, no UI
 //!     genoma types                     print the Luau definitions of the nodes
 //!     genoma ipc <target> <function> …  call into the running interface
@@ -52,7 +54,7 @@ fn main() {
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         Some("polkit-test") => polkit_test(),
         Some("ipc") => ipc::call(std::env::args().skip(2).collect()),
-        other => run(PathBuf::from(other.unwrap_or("examples/clock"))),
+        other => run(PathBuf::from(other.unwrap_or("examples/clock")), std::env::args().nth(2)),
     }
 }
 
@@ -605,7 +607,7 @@ fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> 
     Ok(())
 }
 
-fn run(dir: PathBuf) {
+fn run(dir: PathBuf, entry: Option<String>) {
     let dir = dir.canonicalize().unwrap_or_else(|e| fail(&format!("{}: {e}", dir.display())));
     let (mut app, queue) = wayland::App::connect();
     let pci = app.main_device_pci();
@@ -624,8 +626,11 @@ fn run(dir: PathBuf) {
     let (services, niri_stream) = services();
     let host: genoma_script::io::HostRef = Rc::new(LoopHost(handle.clone(), fonts.clone()));
     let script = Rc::new(RefCell::new(Script::new(&dir, services.clone(), host)));
+    if let Some(entry) = &entry {
+        script.borrow_mut().set_entry(entry);
+    }
     load(&script, &mut app).unwrap_or_else(|e| fail(&e));
-    log::info!("loaded {}", dir.join("shell.luau").display());
+    log::info!("loaded {}", dir.join(entry.as_deref().unwrap_or("shell.luau")).display());
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
     let services_toplevels = services.toplevels.clone();

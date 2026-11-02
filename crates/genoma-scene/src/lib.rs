@@ -540,7 +540,12 @@ impl Scene {
 
     /// Where icon names are looked up, first match wins.
     pub fn set_icon_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
-        self.icons.dirs = dirs;
+        // A name not found in the old places may be in the new ones: what
+        // was rasterised, or found missing, is asked again.
+        if self.icons.dirs != dirs {
+            self.icons.dirs = dirs;
+            self.icons.cache.clear();
+        }
         self.dirty = true;
     }
 
