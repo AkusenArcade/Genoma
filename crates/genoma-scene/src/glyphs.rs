@@ -38,6 +38,9 @@ impl Glyphs {
     /// pixels, so the raster has the same subpixel placement and the switch
     /// back to glyphon at rest does not move a glyph; `colour` is straight
     /// RGB, its alpha left to the image so a fade does not rasterise again.
+    /// `lit` is a gradient from `colour` at the top of the text's box to this
+    /// colour at its bottom, and the box's height, physical pixels.
+    #[allow(clippy::too_many_arguments)]
     pub fn raster(
         &mut self,
         fonts: &mut ct::FontSystem,
@@ -46,12 +49,17 @@ impl Glyphs {
         origin: [f32; 2],
         scale: f32,
         colour: [f32; 4],
+        lit: Option<([f32; 4], f32)>,
     ) -> Option<Raster> {
         let rgb = colour.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let lit = lit.map(|(c, h)| (c.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8), h.max(1.0)));
         let mut placed = Vec::new();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         "text".hash(&mut h);
         (rgb[0], rgb[1], rgb[2]).hash(&mut h);
+        if let Some((c, height)) = lit {
+            (c[0], c[1], c[2], height.to_bits()).hash(&mut h);
+        }
         for run in buffer.layout_runs() {
             let baseline = (run.line_y * scale).round() as i32;
             for glyph in run.glyphs {
@@ -80,9 +88,22 @@ impl Glyphs {
         let y1 = images.iter().map(|(_, y, i)| y + i.placement.height as i32).max()?;
         let (width, height) = ((x1 - x0) as u32, (y1 - y0) as u32);
         let mut pixels = vec![0u8; (width * height * 4) as usize];
+        // The colour of each row: the text's, or its light at that height in
+        // the box (which starts at the origin, the raster's rows from y0).
+        let top = origin[1] - origin[1].floor();
+        let row_colour = |y: i32| -> [u32; 3] {
+            match lit {
+                None => [rgb[0] as u32, rgb[1] as u32, rgb[2] as u32],
+                Some((bottom, height)) => {
+                    let t = ((y as f32 + 0.5 - top) / height).clamp(0.0, 1.0);
+                    std::array::from_fn(|k| (rgb[k] as f32 + (bottom[k] as f32 - rgb[k] as f32) * t).round() as u32)
+                }
+            }
+        };
         for (gx, gy, image) in &images {
             let (w, hh) = (image.placement.width as i32, image.placement.height as i32);
             for row in 0..hh {
+                let rgb = row_colour(gy + row);
                 for col in 0..w {
                     let i = (row * w + col) as usize;
                     // A mask's coverage takes the text's colour; a colour glyph
@@ -98,7 +119,7 @@ impl Glyphs {
                                 ct::SwashContent::Mask => image.data[i],
                                 _ => image.data[i * 4 + 1],
                             } as u32;
-                            [rgb[0] as u32 * a / 255, rgb[1] as u32 * a / 255, rgb[2] as u32 * a / 255, a]
+                            [rgb[0] * a / 255, rgb[1] * a / 255, rgb[2] * a / 255, a]
                         }
                     };
                     let at = (((gy - y0 + row) * width as i32 + gx - x0 + col) * 4) as usize;

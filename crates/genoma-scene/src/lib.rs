@@ -97,6 +97,7 @@ pub struct Node {
     rim_bottom: [f32; 4],
     level: f32,
     color: [f32; 4],
+    color_bottom: [f32; 4],
     text: String,
     font_size: f32,
     font: Option<String>,
@@ -207,6 +208,7 @@ impl Node {
             rim_bottom: [0.0; 4],
             level: 1.0,
             color: [1.0; 4],
+            color_bottom: [0.0; 4],
             text: String::new(),
             font_size: 14.0,
             font: None,
@@ -823,6 +825,7 @@ impl Scene {
             Prop::RimTop => Value::Color(n.rim_top),
             Prop::RimBottom => Value::Color(n.rim_bottom),
             Prop::Color => Value::Color(n.color),
+            Prop::ColorBottom => Value::Color(n.color_bottom),
             _ => return None,
         })
     }
@@ -962,6 +965,7 @@ impl Scene {
             Prop::RimTop => n.rim_top = take!(colour),
             Prop::RimBottom => n.rim_bottom = take!(colour),
             Prop::Color => n.color = take!(colour),
+            Prop::ColorBottom => n.color_bottom = take!(colour),
             Prop::Text => {
                 let t = take!(text);
                 if n.text == t {
@@ -1983,14 +1987,16 @@ fn collect_node(
             }
             let buffer = shape(fonts, n);
             let at = [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale];
-            if out.transform == Rect::IDENTITY {
-                let size = [
-                    (layout.size.width - layout.padding.left - layout.padding.right) * scale,
-                    (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
-                ];
+            // Lit by a gradient: rasterised with it, as tilted text is.
+            let lit = n.color_bottom[3] > 0.0;
+            let size = [
+                (layout.size.width - layout.padding.left - layout.padding.right) * scale,
+                (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
+            ];
+            if out.transform == Rect::IDENTITY && !lit {
                 out.list.push_text(Text { buffer, origin: at, scale, color: fade(n.color), clip: out.clip }, size);
-            } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color) {
-                // Tilted: through the subtree's matrix as an image.
+            } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color, lit.then_some((n.color_bottom, size[1]))) {
+                // Tilted or lit: as an image, through the subtree's matrix.
                 out.list.push_image(genoma_render::Image {
                     key: r.key,
                     pixels: r.pixels,
