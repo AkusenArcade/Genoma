@@ -67,6 +67,7 @@ pub enum Value {
     Bool(bool),
     Numbers(Vec<f32>),
     Runs(Vec<TextRun>),
+    Stops(Vec<(f32, [f32; 4])>),
 }
 
 /// A stretch of a text with a style of its own: characters `from` to `to`,
@@ -147,6 +148,7 @@ pub struct Node {
     hollow: bool,
     blur: bool,
     fill_bottom: [f32; 4],
+    fill_stops: Vec<(f32, [f32; 4])>,
     arc_rate: f32,
     offset: [f32; 2],
     /// Takes pointer input: it is hit-tested and belongs to the input region.
@@ -257,6 +259,7 @@ impl Node {
             hollow: false,
             blur: false,
             fill_bottom: [0.0; 4],
+            fill_stops: Vec::new(),
             arc_rate: 0.0,
             offset: [0.0; 2],
             interactive: false,
@@ -870,6 +873,7 @@ impl Scene {
         let flag = |v: &Value| if let Value::Bool(b) = v { Some(*b) } else { None };
         let numbers = |v: &Value| if let Value::Numbers(x) = v { Some(x.clone()) } else { None };
         let runs = |v: &Value| if let Value::Runs(x) = v { Some(x.clone()) } else { None };
+        let stops = |v: &Value| if let Value::Stops(x) = v { Some(x.clone()) } else { None };
         macro_rules! take {
             ($f:expr) => {
                 match $f(&value) {
@@ -938,6 +942,7 @@ impl Scene {
             Prop::Level => n.level = take!(number).clamp(0.0, 1.0),
             Prop::Fill => n.fill = take!(colour),
             Prop::FillBottom => n.fill_bottom = take!(colour),
+            Prop::FillStops => n.fill_stops = take!(stops),
             Prop::ArcRate => (n.arc_rate, mover) = (take!(number).max(0.0), true),
             Prop::Opacity => n.opacity = take!(number).clamp(0.0, 1.0),
             Prop::Attach => {
@@ -1841,6 +1846,7 @@ fn collect_node(
                     wave: [0.0; 4],
                     arc: Rect::WHOLE,
                     fill_to: [0.0; 4],
+                    stops: Rect::NO_STOPS,
                     clip: out.clip,
                     path: [0.0; 4],
                     path_end: [0.0; 4],
@@ -1869,6 +1875,7 @@ fn collect_node(
                     ],
                     arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
                     fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
+                    stops: Rect::stops(&n.fill_stops.iter().map(|(at, c)| (*at, fade(*c))).collect::<Vec<_>>()),
                     clip: out.clip,
                     path: [0.0; 4],
                     path_end: [0.0; 4],
@@ -1902,6 +1909,7 @@ fn collect_node(
                         wave: [0.0; 4],
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
+                        stops: Rect::NO_STOPS,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],
@@ -1941,6 +1949,7 @@ fn collect_node(
                 wave: [0.0; 4],
                 arc: Rect::WHOLE,
                 fill_to: [0.0; 4],
+                stops: Rect::NO_STOPS,
                 clip: out.clip,
                 path: [a[0], a[1], b[0], b[1]],
                 path_end: [c[0], c[1], width, g],
@@ -1970,6 +1979,7 @@ fn collect_node(
                         wave: [0.0; 4],
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
+                        stops: Rect::NO_STOPS,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],
@@ -2167,6 +2177,7 @@ fn collect_node(
                         wave: [0.0; 4],
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
+                        stops: Rect::NO_STOPS,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],

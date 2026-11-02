@@ -48,7 +48,8 @@ pub struct Rect {
     pub path_end: [f32; 4],
     /// Faded toward a clip's foot: the bottom edge where nothing is left
     /// and how far above it the fade begins, physical pixels. A zero span
-    /// is no fade.
+    /// is no fade. The third is the GPU's own (the fill's stops, by index);
+    /// the fourth is unused.
     pub fade: [f32; 4],
     /// Budding (PRD §8.2): the parent's box, its centre relative to this
     /// one's and its half size, physical pixels; then the parent's radius,
@@ -56,6 +57,12 @@ pub struct Rect {
     /// smooth union of the two, without the parent's own interior.
     pub bud: [f32; 4],
     pub bud_shape: [f32; 4],
+    /// The fill as a gradient of up to six stops, along the same direction
+    /// as `fill_to`: the first two rows are the positions (0…1, in order),
+    /// the last of the eight slots the count; then each stop's colour. A
+    /// count of 0 is no stops. Not an attribute: the stops go to the GPU
+    /// once each, as the matrices do.
+    pub stops: [[f32; 4]; 8],
     /// Depth (PRD §5.5): a 4×4 matrix, by rows, from the surface's physical
     /// pixels to projected ones with w for the perspective. The identity is
     /// a flat shape.
@@ -71,15 +78,19 @@ pub struct Rect {
 struct GpuRect([f32; GpuRect::LEN]);
 
 impl GpuRect {
-    const LEN: usize = std::mem::size_of::<Rect>() / 4 - 16;
+    const LEN: usize = std::mem::size_of::<Rect>() / 4 - 16 - 32;
     /// `bud_shape.z`, the last vector before the matrix.
     const TRANSFORM: usize = Self::LEN - 2;
 
-    fn new(rect: &Rect, transform: u32) -> GpuRect {
+    /// `fade.z`.
+    const STOPS: usize = std::mem::offset_of!(Rect, fade) / 4 + 2;
+
+    fn new(rect: &Rect, transform: u32, stops: u32) -> GpuRect {
         let all: &[f32] = bytemuck::cast_slice(std::slice::from_ref(rect));
         let mut body = [0.0; Self::LEN];
         body.copy_from_slice(&all[..Self::LEN]);
         body[Self::TRANSFORM] = transform as f32;
+        body[Self::STOPS] = stops as f32;
         GpuRect(body)
     }
 }
@@ -89,6 +100,19 @@ impl Rect {
     pub const IDENTITY: [[f32; 4]; 4] =
         [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     pub const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
+    pub const NO_STOPS: [[f32; 4]; 8] = [[0.0; 4]; 8];
+
+    /// Up to six stops, (position, colour), positions in order.
+    pub fn stops(list: &[(f32, [f32; 4])]) -> [[f32; 4]; 8] {
+        let mut out = Self::NO_STOPS;
+        let n = list.len().min(6);
+        for (i, (at, colour)) in list.iter().take(n).enumerate() {
+            out[i / 4][i % 4] = *at;
+            out[2 + i] = *colour;
+        }
+        out[1][3] = n as f32;
+        out
+    }
 }
 
 #[repr(C)]
@@ -106,6 +130,10 @@ pub(crate) struct Pipeline {
     globals: wgpu::Buffer,
     transforms: wgpu::Buffer,
     transform_capacity: usize,
+    gradients: wgpu::Buffer,
+    gradient_capacity: usize,
+    last_gradients: Vec<[[f32; 4]; 8]>,
+    stop_sets: Vec<[[f32; 4]; 8]>,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -126,6 +154,23 @@ struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 // By rows on the CPU, so as WGSL's columns each is the transpose: `p * m`
 // is the matrix applied to p.
 @group(0) @binding(1) var<storage, read> transforms: array<mat4x4<f32>>;
+// Each distinct set of fill stops once, the first none (Rect::stops).
+struct Stops { at: array<vec4<f32>, 2>, colour: array<vec4<f32>, 6> };
+@group(0) @binding(2) var<storage, read> gradients: array<Stops>;
+
+fn along_stops(s: Stops, t: f32) -> vec4<f32> {
+    let n = i32(s.at[1].w + 0.5);
+    var p = s.at[0].x;
+    if (t <= p) { return s.colour[0]; }
+    for (var i = 1; i < n; i++) {
+        let q = s.at[i / 4][i % 4];
+        if (t <= q) {
+            return mix(s.colour[i - 1], s.colour[i], (t - p) / max(q - p, 1e-5));
+        }
+        p = q;
+    }
+    return s.colour[max(n - 1, 0)];
+}
 
 struct Instance {
     @location(0) origin: vec2<f32>,
@@ -365,11 +410,13 @@ fn body(in: Varyings) -> vec4<f32> {
     }
 
     var fill = in.fill;
-    if (in.fill_to.a > 0.0) {
-        var along_fill = height / max(in.half.y * 2.0, 1.0);
-        if ((flags & 2u) != 0u) {
-            along_fill = (in.local.x + in.half.x) / max(in.half.x * 2.0, 1.0);
-        }
+    var along_fill = height / max(in.half.y * 2.0, 1.0);
+    if ((flags & 2u) != 0u) {
+        along_fill = (in.local.x + in.half.x) / max(in.half.x * 2.0, 1.0);
+    }
+    if (in.fade.z > 0.5) {
+        fill = along_stops(gradients[u32(in.fade.z + 0.5)], clamp(along_fill, 0.0, 1.0));
+    } else if (in.fill_to.a > 0.0) {
         fill = mix(in.fill, in.fill_to, clamp(along_fill, 0.0, 1.0));
     }
     // Dashes along the rim: the distance travelled round the outline from
@@ -435,6 +482,16 @@ impl Pipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -445,7 +502,9 @@ impl Pipeline {
         });
         let transform_capacity = 4;
         let transforms = Self::transform_buffer(device, transform_capacity);
-        let bind_group = Self::bind_group(device, &layout, &globals, &transforms);
+        let gradient_capacity = 2;
+        let gradients = Self::gradient_buffer(device, gradient_capacity);
+        let bind_group = Self::bind_group(device, &layout, &globals, &transforms, &gradients);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rect"),
             bind_group_layouts: &[Some(&layout)],
@@ -506,6 +565,10 @@ impl Pipeline {
             globals,
             transforms,
             transform_capacity,
+            gradients,
+            gradient_capacity,
+            last_gradients: Vec::new(),
+            stop_sets: Vec::new(),
             bind_group,
             instances,
             capacity,
@@ -527,11 +590,21 @@ impl Pipeline {
         })
     }
 
+    fn gradient_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rect gradients"),
+            size: (capacity * std::mem::size_of::<[[f32; 4]; 8]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     fn bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         globals: &wgpu::Buffer,
         transforms: &wgpu::Buffer,
+        gradients: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rect globals"),
@@ -539,6 +612,7 @@ impl Pipeline {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: transforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: gradients.as_entire_binding() },
             ],
         })
     }
@@ -572,6 +646,9 @@ impl Pipeline {
         // one per tilted subtree, so a linear search is the cheap one.
         self.matrices.clear();
         self.matrices.push(Rect::IDENTITY);
+        // And each distinct set of stops, none first.
+        self.stop_sets.clear();
+        self.stop_sets.push(Rect::NO_STOPS);
         self.gpu_rects.clear();
         for r in rects {
             let index = match self.matrices.iter().position(|m| *m == r.transform) {
@@ -581,13 +658,38 @@ impl Pipeline {
                     self.matrices.len() - 1
                 }
             };
-            self.gpu_rects.push(GpuRect::new(r, index as u32));
+            let stops = if r.stops[1][3] < 0.5 {
+                0
+            } else {
+                match self.stop_sets.iter().position(|s| *s == r.stops) {
+                    Some(i) => i,
+                    None => {
+                        self.stop_sets.push(r.stops);
+                        self.stop_sets.len() - 1
+                    }
+                }
+            };
+            self.gpu_rects.push(GpuRect::new(r, index as u32, stops as u32));
         }
+        let mut rebind = false;
         if self.matrices.len() > self.transform_capacity {
             self.transform_capacity = self.matrices.len().next_power_of_two();
             self.transforms = Self::transform_buffer(device, self.transform_capacity);
-            self.bind_group = Self::bind_group(device, &self.layout, &self.globals, &self.transforms);
             self.last_transforms.clear();
+            rebind = true;
+        }
+        if self.stop_sets.len() > self.gradient_capacity {
+            self.gradient_capacity = self.stop_sets.len().next_power_of_two();
+            self.gradients = Self::gradient_buffer(device, self.gradient_capacity);
+            self.last_gradients.clear();
+            rebind = true;
+        }
+        if rebind {
+            self.bind_group = Self::bind_group(device, &self.layout, &self.globals, &self.transforms, &self.gradients);
+        }
+        if self.stop_sets != self.last_gradients {
+            queue.write_buffer(&self.gradients, 0, bytemuck::cast_slice(&self.stop_sets));
+            self.last_gradients.clone_from(&self.stop_sets);
         }
         if self.matrices != self.last_transforms {
             queue.write_buffer(&self.transforms, 0, bytemuck::cast_slice(&self.matrices));

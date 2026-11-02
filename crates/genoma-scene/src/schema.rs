@@ -58,6 +58,7 @@ pub enum Prop {
     SwayRange,
     Overlay,
     FillBottom,
+    FillStops,
     ArcRate,
     PaddingLeft,
     PaddingRight,
@@ -122,6 +123,8 @@ pub enum Ty {
     Numbers,
     /// Stretches of a text with a style of their own (`TextRun`).
     Runs,
+    /// A gradient's stops, `{ { number, string } }`.
+    Stops,
     Choice(&'static [&'static str]),
 }
 
@@ -196,6 +199,7 @@ pub const PROPS: &[PropInfo] = &[
     p("angle", Prop::Angle, Ty::Number, false, "Turns clockwise from twelve: the node's place on its orbit radius."),
     p("sway", Prop::Sway, Ty::Number, false, "Seconds for one sway, there and back. 0 is still."),
     p("sway_range", Prop::SwayRange, Ty::Number, false, "How far the sway travels, logical units."),
+    p("fill_stops", Prop::FillStops, Ty::Stops, false, "The fill as a gradient of up to six stops, `{ position, colour }` with positions from 0 at the top to 1 at the bottom (across, with `fill_across`), in order. It takes the place of `fill` and `fill_bottom`."),
     p("fill_bottom", Prop::FillBottom, Ty::Color, true, "With it, the fill runs from `fill` at the top to this at the bottom."),
     p("fill_across", Prop::FillAcross, Ty::Bool, false, "The fill's gradient runs from `fill` at the left edge to `fill_bottom` at the right: a progress line."),
     p("arc_rate", Prop::ArcRate, Ty::Number, false, "Turns a second the arc grows by between the values it is set to: a trail that keeps up with a continuous hand."),
@@ -272,6 +276,7 @@ pub fn luau_definitions() -> String {
             Ty::Color | Ty::Text => "string".to_string(),
             Ty::Bool => "boolean".to_string(),
             Ty::Numbers => "{ number }".to_string(),
+            Ty::Stops => "{ { any } }".to_string(),
             Ty::Runs => "{ { from: number, to: number, weight: number?, italic: boolean?, font: string?, size: number?, color: string?, strike: boolean? } }".to_string(),
             Ty::Choice(options) => options.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(" | "),
         };

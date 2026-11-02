@@ -1766,6 +1766,21 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
             LuaValue::Nil => Ok(Value::Numbers(Vec::new())),
             _ => Err(wrong("a list of numbers")),
         },
+        Ty::Stops => match v {
+            LuaValue::Table(t) => {
+                let mut stops = Vec::new();
+                for stop in t.sequence_values::<Table>() {
+                    let s = stop.map_err(|_| wrong("a list of { position, colour }"))?;
+                    let at: f64 = s.get(1).map_err(|_| wrong("a stop's position, a number"))?;
+                    let c: String = s.get(2).map_err(|_| wrong("a stop's colour, \"#rrggbb\""))?;
+                    let c = color(&c).ok_or_else(|| wrong("a stop's colour, \"#rrggbb\""))?;
+                    stops.push((at as f32, c));
+                }
+                Ok(Value::Stops(stops))
+            }
+            LuaValue::Nil => Ok(Value::Stops(Vec::new())),
+            _ => Err(wrong("a list of { position, colour }")),
+        },
         Ty::Runs => match v {
             LuaValue::Table(t) => {
                 let mut runs = Vec::new();
