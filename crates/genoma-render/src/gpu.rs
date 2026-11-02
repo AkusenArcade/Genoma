@@ -35,6 +35,7 @@ struct Text {
 struct Target {
     surface: wgpu::Surface<'static>,
     format: wgpu::TextureFormat,
+    present_mode: wgpu::PresentMode,
     size: Option<(u32, u32)>,
     viewport: Option<glyphon::Viewport>,
 }
@@ -137,7 +138,19 @@ impl Gpu {
             .copied()
             .find(|f| matches!(f, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
             .unwrap_or(caps.formats[0]);
-        self.targets.insert(id, Target { surface, format, size: None, viewport: None });
+        // Mailbox: the frame callback paces the frames (one per callback),
+        // and the compositor takes the latest whose drawing is done. Fifo
+        // made Mesa hold each frame until the GPU had finished it, so with a
+        // game filling the GPU an opening queued its frames one behind the
+        // other: the compositor's blur at once, the capsules 5 s later, at
+        // 0.3 s with Mailbox on the same load (2026-11-02).
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            log::warn!("surface {id}: no mailbox presentation; frames wait in fifo behind the GPU");
+            wgpu::PresentMode::Fifo
+        };
+        self.targets.insert(id, Target { surface, format, present_mode, size: None, viewport: None });
         Ok(())
     }
 
@@ -187,8 +200,7 @@ impl Gpu {
                     format: target.format,
                     width,
                     height,
-                    // Fifo: one frame per frame callback, never ahead of it.
-                    present_mode: wgpu::PresentMode::Fifo,
+                    present_mode: target.present_mode,
                     desired_maximum_frame_latency: 1,
                     alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
                     view_formats: vec![],
