@@ -114,6 +114,9 @@ pub struct Node {
     level: f32,
     color: [f32; 4],
     color_bottom: [f32; 4],
+    shadow: [f32; 4],
+    shadow_blur: f32,
+    shadow_y: f32,
     text: String,
     font_size: f32,
     font: Option<String>,
@@ -227,6 +230,9 @@ impl Node {
             level: 1.0,
             color: [1.0; 4],
             color_bottom: [0.0; 4],
+            shadow: [0.0; 4],
+            shadow_blur: 0.0,
+            shadow_y: 0.0,
             text: String::new(),
             font_size: 14.0,
             font: None,
@@ -846,6 +852,7 @@ impl Scene {
             Prop::RimBottom => Value::Color(n.rim_bottom),
             Prop::Color => Value::Color(n.color),
             Prop::ColorBottom => Value::Color(n.color_bottom),
+            Prop::Shadow => Value::Color(n.shadow),
             _ => return None,
         })
     }
@@ -988,6 +995,9 @@ impl Scene {
             Prop::RimBottom => n.rim_bottom = take!(colour),
             Prop::Color => n.color = take!(colour),
             Prop::ColorBottom => n.color_bottom = take!(colour),
+            Prop::Shadow => n.shadow = take!(colour),
+            Prop::ShadowBlur => n.shadow_blur = take!(number),
+            Prop::ShadowY => n.shadow_y = take!(number),
             Prop::Text => {
                 let t = take!(text);
                 if n.text == t {
@@ -2098,6 +2108,25 @@ fn collect_node(
                 (layout.size.width - layout.padding.left - layout.padding.right) * scale,
                 (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
             ];
+            // The shadow first, under the glyphs.
+            if n.shadow[3] > 0.0
+                && let Some(r) = out.glyphs.shadow(fonts, n.uid, &buffer, scale, n.shadow, n.shadow_blur * scale)
+            {
+                out.list.push_image(genoma_render::Image {
+                    key: r.key,
+                    pixels: r.pixels,
+                    width: r.width,
+                    height: r.height,
+                    origin: [at[0].round() + r.offset[0] as f32, (at[1] + n.shadow_y * scale).round() + r.offset[1] as f32],
+                    size: [r.width as f32, r.height as f32],
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    radius: 0.0,
+                    alpha,
+                    clip: out.clip,
+                    fade: out.fade_of(),
+                    transform: out.transform,
+                });
+            }
             // Reaching into a clip's fade: glyphon cannot fade it, an image can.
             let fading = out.fade[1] > 0.0 && at[1] + size[1] + 4.0 * scale > out.fade[0] - out.fade[1];
             if out.transform == Rect::IDENTITY && !lit && !fading {
