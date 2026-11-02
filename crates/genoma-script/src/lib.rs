@@ -48,6 +48,11 @@ pub struct Key {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    /// The logo key (Super), niri's Mod.
+    pub logo: bool,
+    /// The xkb keycode: where the key is, whatever the layout and Shift
+    /// make of it (Qt's nativeScanCode).
+    pub code: u32,
 }
 
 /// Pointer input for a node, as the surface saw it.
@@ -946,13 +951,15 @@ impl Script {
             if let Some(f) = handler {
                 let result = match &input {
                     Input::Outside | Input::Ready => f.call::<()>(()),
-                    // on_key(name, text, { ctrl, shift, alt })
+                    // on_key(name, text, { ctrl, shift, alt, logo, code })
                     Input::Key(key) => (|| {
                         let lua = f.weak_lua().upgrade();
                         let mods = lua.create_table()?;
                         mods.set("ctrl", key.ctrl)?;
                         mods.set("shift", key.shift)?;
                         mods.set("alt", key.alt)?;
+                        mods.set("logo", key.logo)?;
+                        mods.set("code", key.code)?;
                         f.call::<()>((key.name.as_str(), key.text.clone(), mods))
                     })(),
                     Input::Hover(entered) => f.call::<()>(*entered),

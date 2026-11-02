@@ -43,6 +43,10 @@ use smithay_client_toolkit::{
                     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
                 },
                 cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
+                keyboard_shortcuts_inhibit::zv1::client::{
+                    zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
+                    zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+                },
                 linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
                 viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
             },
@@ -96,6 +100,8 @@ struct Surface {
     /// What is cut out of a catching surface's input: the other surfaces'
     /// inputs on its output, as last sent.
     holes: Vec<[i32; 4]>,
+    /// The compositor's shortcuts standing aside for this surface.
+    inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
     /// Whether the surface last asked for the keyboard.
     keyboard: bool,
     hovered: Option<NodeId>,
@@ -147,6 +153,11 @@ pub struct App {
     /// compositor in the user's cursor theme. The device is the pointer's.
     cursor_shapes: Option<CursorShapeManager>,
     cursor_device: Option<WpCursorShapeDeviceV1>,
+    /// `keyboard-shortcuts-inhibit`: the compositor's shortcuts stand aside
+    /// while a node asks it (a field recording a key combination). The seat
+    /// is the keyboard's.
+    shortcuts_inhibit: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+    seat: Option<wl_seat::WlSeat>,
     /// The serial of the pointer's last entry, which a shape is set with,
     /// and the shape set since: none until one is.
     cursor_serial: u32,
@@ -199,6 +210,8 @@ impl App {
             handle: None,
             pointer: None,
             cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
+            shortcuts_inhibit: globals.bind(&qh, 1..=1, Ignore).ok(),
+            seat: None,
             cursor_device: None,
             cursor_serial: 0,
             cursor_shape: None,
@@ -283,6 +296,7 @@ impl App {
             return;
         };
         let qh = self.qh.clone();
+        self.seat = Some(seat.clone());
         self.keyboard = self
             .seats
             .get_keyboard_with_repeat(&qh, seat, None, handle, Box::new(|app: &mut App, _, event| app.key(&event)))
@@ -429,6 +443,7 @@ impl App {
             blurred: Vec::new(),
             inputs: None,
             holes: Vec::new(),
+            inhibitor: None,
             keyboard: false,
             hovered: None,
             pressed: None,
@@ -667,6 +682,16 @@ impl App {
             });
             s.keyboard = catching;
         }
+        // The compositor's shortcuts stand aside while a catching surface's
+        // node asks it, and come back as soon as it no longer does.
+        let inhibit = catching && s.scene.borrow().inhibits_shortcuts();
+        if inhibit != s.inhibitor.is_some() {
+            if let Some(inhibitor) = s.inhibitor.take() {
+                inhibitor.destroy();
+            } else if let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit, &self.seat) {
+                s.inhibitor = Some(manager.inhibit_shortcuts(&surface, seat, qh, Ignore));
+            }
+        }
         // The scene's own record of this change is consumed by this frame.
         s.scene.borrow_mut().take_dirty();
 
@@ -788,7 +813,7 @@ impl App {
         // while Ctrl or Alt is held, when the key is a command.
         let m = self.modifiers;
         let text = event.utf8.clone().filter(|t| !t.chars().any(char::is_control) && !m.ctrl && !m.alt);
-        let key = genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt };
+        let key = genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt, logo: m.logo, code: event.raw_code + 8 };
         self.deliver(i, catcher, Input::Key(key));
     }
 }

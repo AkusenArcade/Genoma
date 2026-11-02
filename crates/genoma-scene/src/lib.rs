@@ -125,6 +125,8 @@ pub struct Node {
     opacity: f32,
     attach: u8,
     catch: bool,
+    /// The compositor's shortcuts stand aside while this node is there.
+    inhibit_shortcuts: bool,
     growth: f32,
     reach: f32,
     clip: bool,
@@ -222,6 +224,7 @@ impl Node {
             opacity: 1.0,
             attach: 0,
             catch: false,
+            inhibit_shortcuts: false,
             growth: 1.0,
             reach: 1.0,
             clip: false,
@@ -564,6 +567,13 @@ impl Scene {
         found
     }
 
+    /// Whether a node asks the compositor's shortcuts to stand aside.
+    pub fn inhibits_shortcuts(&self) -> bool {
+        let mut found = false;
+        self.walk(self.root, &mut |_, n| found |= n.inhibit_shortcuts);
+        found
+    }
+
     /// Whether a transition is in flight: an expansion still closing keeps
     /// its surface until it has.
     pub fn transitioning(&self) -> bool {
@@ -897,6 +907,7 @@ impl Scene {
                 }
             }
             Prop::Catch => n.catch = take!(flag),
+            Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
             Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::Clip => n.clip = take!(flag),

@@ -94,6 +94,7 @@ pub enum Prop {
     FillAcross,
     Raised,
     Cursor,
+    InhibitShortcuts,
     DecodeWidth,
     DecodeHeight,
     Soften,
@@ -223,6 +224,7 @@ pub const PROPS: &[PropInfo] = &[
     p("soften", Prop::Soften, Ty::Number, false, "An image blurred once, as it is decoded, by this radius in logical units: a backdrop behind niri's overview. Nothing is spent on it per frame; a decode smaller than the box blurs it further as it is drawn up."),
     p("raised", Prop::Raised, Ty::Bool, false, "Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it."),
     p("cursor", Prop::Cursor, Ty::Choice(&CURSORS), false, "The pointer's shape over this node and what it holds, unless a node inside names its own."),
+    p("inhibit_shortcuts", Prop::InhibitShortcuts, Ty::Bool, false, "While true on a catching surface, the compositor's own shortcuts stand aside and their keys reach on_key: a field recording a key combination."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];
 
