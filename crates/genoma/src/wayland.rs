@@ -36,6 +36,10 @@ use smithay_client_toolkit::{
             ext::{
                 background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
                 foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+                idle_notify::v1::client::{
+                    ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+                    ext_idle_notifier_v1::ExtIdleNotifierV1,
+                },
             },
             wp::{
                 fractional_scale::v1::client::{
@@ -181,6 +185,11 @@ pub struct App {
     /// `@genoma/toplevels`, and the service it fills.
     toplevel_list: Option<ForeignToplevelList>,
     toplevels: Option<std::rc::Rc<genoma_services::toplevels::Toplevels>>,
+    /// `ext-idle-notify`, bound once an interface requires `@genoma/idle`;
+    /// the service it sets, and the notification asked for with its seconds.
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle: Option<std::rc::Rc<genoma_services::idle::Idle>>,
+    idle_notification: Option<(ExtIdleNotificationV1, u32)>,
 }
 
 impl App {
@@ -223,6 +232,9 @@ impl App {
             started: Instant::now(),
             toplevel_list: None,
             toplevels: None,
+            idle_notifier: None,
+            idle: None,
+            idle_notification: None,
             globals,
         };
         // The compositor's main device, before any GPU is opened: rendering
@@ -261,6 +273,35 @@ impl App {
         toplevels.available.set(offered);
         self.toplevel_list = Some(list);
         self.toplevels = Some(toplevels);
+    }
+
+    pub fn start_idle(&mut self, idle: std::rc::Rc<genoma_services::idle::Idle>) {
+        if self.idle.is_some() {
+            return;
+        }
+        self.idle_notifier = self.globals.bind(&self.qh, 1..=1, Ignore).ok();
+        idle.available.set(self.idle_notifier.is_some());
+        self.idle = Some(idle);
+    }
+
+    /// A notification for the seconds the interface asks, asked again when
+    /// they change: the compositor counts from the moment it is made.
+    fn sync_idle(&mut self) {
+        let (Some(notifier), Some(idle)) = (&self.idle_notifier, &self.idle) else { return };
+        let wanted = idle.timeout.get_untracked().unwrap_or(0);
+        if self.idle_notification.as_ref().map(|(_, s)| *s) == Some(wanted) {
+            return;
+        }
+        if let Some((old, _)) = self.idle_notification.take() {
+            old.destroy();
+        }
+        idle.idle.set(false);
+        if wanted == 0 {
+            return;
+        }
+        let Some(seat) = self.seats.seats().next() else { return };
+        let notification = notifier.get_idle_notification(wanted.saturating_mul(1000), &seat, &self.qh, IdleData);
+        self.idle_notification = Some((notification, wanted));
     }
 
     fn publish_toplevels(&mut self) {
@@ -545,6 +586,7 @@ impl App {
     /// out and asks for a frame. This is the only place a frame is asked for,
     /// apart from motion in flight.
     pub fn after_events(&mut self) {
+        self.sync_idle();
         for i in 0..self.surfaces.len() {
             let changed = self.surfaces[i].scene.borrow_mut().take_dirty();
             let s = &self.surfaces[i];
@@ -870,6 +912,20 @@ struct Ignore;
 
 impl<I: Proxy> Dispatch2<I, App> for Ignore {
     fn event(&self, _: &mut App, _: &I, _: I::Event, _: &Connection, _: &QueueHandle<App>) {}
+}
+
+/// An idle notification: idle once the compositor says so, back on input.
+struct IdleData;
+
+impl Dispatch2<ExtIdleNotificationV1, App> for IdleData {
+    fn event(&self, app: &mut App, _: &ExtIdleNotificationV1, event: ext_idle_notification_v1::Event, _: &Connection, _: &QueueHandle<App>) {
+        let Some(idle) = &app.idle else { return };
+        match event {
+            ext_idle_notification_v1::Event::Idled => idle.idle.set(true),
+            ext_idle_notification_v1::Event::Resumed => idle.idle.set(false),
+            _ => {}
+        }
+    }
 }
 
 /// A surface's fractional scale object, carrying the surface's id.

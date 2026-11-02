@@ -12,6 +12,7 @@ pub mod bluetooth;
 pub mod bus;
 pub mod clock;
 pub mod icons;
+pub mod idle;
 pub mod media;
 pub mod network;
 pub mod notifications;

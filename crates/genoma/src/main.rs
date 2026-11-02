@@ -70,7 +70,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -629,12 +629,16 @@ fn run(dir: PathBuf) {
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
     let services_toplevels = services.toplevels.clone();
+    let services_idle = services.idle.clone();
     let sources = Rc::new(RefCell::new(Sources { services, niri_stream, bus: None, started: Vec::new() }));
     sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
     // On the Wayland connection, so started here rather than among the
     // sources.
     if script.borrow().wants("toplevels") {
         app.start_toplevels(services_toplevels.clone());
+    }
+    if script.borrow().wants("idle") {
+        app.start_idle(services_idle.clone());
     }
 
     // Hot reload: a save in the directory, settled for a moment because an
@@ -672,6 +676,9 @@ fn run(dir: PathBuf) {
                             sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
                             if script.borrow().wants("toplevels") {
                                 app.start_toplevels(sources.borrow().services.toplevels.clone());
+                            }
+                            if script.borrow().wants("idle") {
+                                app.start_idle(sources.borrow().services.idle.clone());
                             }
                         }
                         Err(e) => log::error!("reload failed, the last interface stays: {e}"),
