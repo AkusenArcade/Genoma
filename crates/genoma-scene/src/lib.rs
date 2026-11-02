@@ -156,6 +156,7 @@ pub struct Node {
     growth: f32,
     reach: f32,
     clip: bool,
+    fade_bottom: f32,
     scroll_y: f32,
     dash: [f32; 2],
     italic: bool,
@@ -260,6 +261,7 @@ impl Node {
             growth: 1.0,
             reach: 1.0,
             clip: false,
+            fade_bottom: 0.0,
             scroll_y: 0.0,
             dash: [0.0; 2],
             italic: false,
@@ -948,6 +950,7 @@ impl Scene {
             Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::Clip => n.clip = take!(flag),
+            Prop::FadeBottom => n.fade_bottom = take!(number),
             Prop::ScrollY => n.scroll_y = take!(number),
             Prop::Dash => n.dash[0] = take!(number).max(0.0),
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
@@ -1334,7 +1337,7 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new() };
+        let mut out = Out { list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new() };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
@@ -1532,6 +1535,9 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
 
 struct Out<'a> {
     list: &'a mut DrawList,
+    /// The fade toward the foot of the nearest clip that fades, physical
+    /// pixels: where nothing is left and how far above it it begins.
+    fade: [f32; 2],
     /// The depth in force, physical pixels to projected (by rows).
     transform: [[f32; 4]; 4],
     /// The particles' clock, as the last step left it.
@@ -1552,6 +1558,12 @@ struct Out<'a> {
     raised: bool,
     /// The images drawn this frame.
     drawn_images: Vec<NodeId>,
+}
+
+impl Out<'_> {
+    fn fade_of(&self) -> [f32; 4] {
+        [self.fade[0], self.fade[1], 0.0, 0.0]
+    }
 }
 
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -1824,6 +1836,7 @@ fn collect_node(
                     path_end: [0.0; 4],
                     bud,
                     bud_shape,
+                    fade: out.fade_of(),
                     transform: out.transform,
                 });
             }
@@ -1851,6 +1864,7 @@ fn collect_node(
                     path_end: [0.0; 4],
                     bud,
                     bud_shape,
+                    fade: out.fade_of(),
                     transform: out.transform,
                 });
             }
@@ -1883,6 +1897,7 @@ fn collect_node(
                         path_end: [0.0; 4],
                         bud: [0.0; 4],
                         bud_shape: [0.0; 4],
+                        fade: out.fade_of(),
                         transform: out.transform,
                     });
                 }
@@ -1921,6 +1936,7 @@ fn collect_node(
                 path_end: [c[0], c[1], width, g],
                 bud: [0.0; 4],
                 bud_shape: [0.0; 4],
+                fade: out.fade_of(),
                 transform: out.transform,
             });
             // The nodes: at the start, and at the tip as it grows.
@@ -1949,6 +1965,7 @@ fn collect_node(
                         path_end: [0.0; 4],
                         bud: [0.0; 4],
                         bud_shape: [0.0; 4],
+                        fade: out.fade_of(),
                         transform: out.transform,
                     });
                 }
@@ -1994,6 +2011,7 @@ fn collect_node(
                     time: n.time,
                     alpha,
                     clip: out.clip,
+                    fade: out.fade_of(),
                     values: n.shown.clone(),
                 });
             }
@@ -2017,6 +2035,7 @@ fn collect_node(
                         radius: 0.0,
                         alpha,
                         clip: out.clip,
+                        fade: out.fade_of(),
                         transform: out.transform,
                     });
                 }
@@ -2057,6 +2076,7 @@ fn collect_node(
                         radius,
                         alpha,
                         clip: out.clip,
+                        fade: out.fade_of(),
                         transform: out.transform,
                     });
                 }
@@ -2078,7 +2098,9 @@ fn collect_node(
                 (layout.size.width - layout.padding.left - layout.padding.right) * scale,
                 (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
             ];
-            if out.transform == Rect::IDENTITY && !lit {
+            // Reaching into a clip's fade: glyphon cannot fade it, an image can.
+            let fading = out.fade[1] > 0.0 && at[1] + size[1] + 4.0 * scale > out.fade[0] - out.fade[1];
+            if out.transform == Rect::IDENTITY && !lit && !fading {
                 // Struck through: glyphon draws no decoration, so each line
                 // goes over the text as a shape of its own.
                 let mut strikes = Vec::new();
@@ -2121,11 +2143,13 @@ fn collect_node(
                         path_end: [0.0; 4],
                         bud: [0.0; 4],
                         bud_shape: [0.0; 4],
+                        fade: out.fade_of(),
                         transform: out.transform,
                     });
                 }
             } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color, lit.then_some((n.color_bottom, size[1]))) {
-                // Tilted or lit: as an image, through the subtree's matrix.
+                // Tilted, lit or fading: as an image, through the subtree's
+                // matrix.
                 out.list.push_image(genoma_render::Image {
                     key: r.key,
                     pixels: r.pixels,
@@ -2137,6 +2161,7 @@ fn collect_node(
                     radius: 0.0,
                     alpha: alpha * n.color[3],
                     clip: out.clip,
+                    fade: out.fade_of(),
                     transform: out.transform,
                 });
             }
@@ -2145,8 +2170,9 @@ fn collect_node(
     }
     // A clipping node narrows the clip for everything inside it, and a
     // scrolled one moves its children up.
-    let (clip, scroll) = tree.get_node_context(node).map_or((false, 0.0), |n| (n.clip, n.scroll_y));
+    let (clip, scroll, fade) = tree.get_node_context(node).map_or((false, 0.0, 0.0), |n| (n.clip, n.scroll_y, n.fade_bottom));
     let saved = out.clip;
+    let saved_fade = out.fade;
     let saved_parent = out.parent_shape;
     if let Some(shape) = out.shape_here.take() {
         out.parent_shape = Some(shape);
@@ -2154,11 +2180,15 @@ fn collect_node(
     if clip {
         let c = [own[0] * scale, own[1] * scale, (own[0] + own[2]) * scale, (own[1] + own[3]) * scale];
         out.clip = [saved[0].max(c[0]), saved[1].max(c[1]), saved[2].min(c[2]), saved[3].min(c[3])];
+        if fade > 0.0 {
+            out.fade = [c[3], fade * scale];
+        }
     }
     for child in tree.children(node).unwrap_or_default() {
         collect(tree, fonts, child, [own[0], own[1] - scroll, own[2], own[3]], alpha, scale, out);
     }
     out.clip = saved;
+    out.fade = saved_fade;
     out.parent_shape = saved_parent;
     out.transform = saved_transform;
 }

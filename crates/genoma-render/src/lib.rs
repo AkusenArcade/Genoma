@@ -95,6 +95,8 @@ pub struct Image {
     pub alpha: f32,
     /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
     pub clip: [f32; 4],
+    /// Faded toward a clip's foot, as a rect's (see [`Rect::fade`]).
+    pub fade: [f32; 4],
     /// Depth, as a rect's (see [`Rect::transform`]).
     pub transform: [[f32; 4]; 4],
 }
@@ -367,6 +369,7 @@ mod tests {
             radius: 0.0,
             alpha: 1.0,
             clip: Rect::NO_CLIP,
+            fade: [0.0; 4],
             transform: Rect::IDENTITY,
         }
     }

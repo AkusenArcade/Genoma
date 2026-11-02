@@ -11,7 +11,7 @@ use bytemuck::{Pod, Zeroable};
 struct Quad {
     origin: [f32; 2],
     size: [f32; 2],
-    /// Alpha, then the corners' radius.
+    /// Alpha, the corners' radius, then the fade toward a clip's foot.
     alpha: [f32; 4],
     clip: [f32; 4],
     uv: [f32; 4],
@@ -31,6 +31,7 @@ struct Varyings {
     @location(2) clip: vec4<f32>,
     @location(3) local: vec2<f32>,
     @location(4) shape: vec3<f32>,
+    @location(5) fade: vec2<f32>,
 };
 
 @vertex
@@ -49,6 +50,7 @@ fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @locat
     out.clip = clip;
     out.local = corner * size;
     out.shape = vec3<f32>(size, alpha.y);
+    out.fade = alpha.zw;
     return out;
 }
 
@@ -67,6 +69,9 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
         let q = abs(in.local - half) - (half - vec2<f32>(r));
         let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
         cover = clamp(0.5 - d, 0.0, 1.0);
+    }
+    if (in.fade.y > 0.0) {
+        cover *= clamp((in.fade.x - p.y) / in.fade.y, 0.0, 1.0);
     }
     return textureSample(image, smp, in.uv) * in.alpha * cover;
 }
@@ -277,7 +282,7 @@ impl Pipeline {
             quads.push(Quad {
                 origin: image.origin,
                 size: image.size,
-                alpha: [image.alpha, image.radius, 0.0, 0.0],
+                alpha: [image.alpha, image.radius, image.fade[0], image.fade[1]],
                 clip: image.clip,
                 uv: image.uv,
                 m: image.transform,

@@ -37,6 +37,8 @@ pub struct Shader {
     pub alpha: f32,
     /// x0, y0, x1, y1, physical pixels.
     pub clip: [f32; 4],
+    /// Faded toward a clip's foot, as a rect's.
+    pub fade: [f32; 4],
     /// At most [`VALUES`]; the rest read 0.
     pub values: Vec<f32>,
 }
@@ -53,7 +55,9 @@ struct Uniforms {
     scale: f32,
     time: f32,
     alpha: f32,
-    _pad: [f32; 3],
+    fade_end: f32,
+    fade_span: f32,
+    _pad: f32,
     values: [[f32; 4]; VALUES / 4],
 }
 
@@ -70,6 +74,8 @@ struct Shader {
     scale: f32,
     time: f32,
     alpha: f32,
+    fade_end: f32,
+    fade_span: f32,
     values: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> shader: Shader;
@@ -95,7 +101,11 @@ fn genoma_fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (q.x < c.x || q.y < c.y || q.x >= c.z || q.y >= c.w) {
         discard;
     }
-    return colour * shader.alpha;
+    var fade = 1.0;
+    if (shader.fade_span > 0.0) {
+        fade = clamp((shader.fade_end - q.y) / shader.fade_span, 0.0, 1.0);
+    }
+    return colour * shader.alpha * fade;
 }
 "#;
 
@@ -248,7 +258,9 @@ impl Pipeline {
                 scale: s.scale,
                 time: s.time,
                 alpha: s.alpha,
-                _pad: [0.0; 3],
+                fade_end: s.fade[0],
+                fade_span: s.fade[1],
+                _pad: 0.0,
                 values,
             };
             let at = i * STRIDE as usize;

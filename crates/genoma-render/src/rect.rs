@@ -46,6 +46,10 @@ pub struct Rect {
     /// of it is drawn (0…1).
     pub path: [f32; 4],
     pub path_end: [f32; 4],
+    /// Faded toward a clip's foot: the bottom edge where nothing is left
+    /// and how far above it the fade begins, physical pixels. A zero span
+    /// is no fade.
+    pub fade: [f32; 4],
     /// Budding (PRD §8.2): the parent's box, its centre relative to this
     /// one's and its half size, physical pixels; then the parent's radius,
     /// and the smoothness of the union (0 is no bud). The shape drawn is the
@@ -136,6 +140,7 @@ struct Instance {
     @location(9) clip: vec4<f32>,
     @location(10) path: vec4<f32>,
     @location(11) path_end: vec4<f32>,
+    @location(14) fade: vec4<f32>,
     @location(12) bud: vec4<f32>,
     @location(13) bud_shape: vec4<f32>,
 };
@@ -156,6 +161,7 @@ struct Varyings {
     @location(11) path_end: vec4<f32>,
     @location(12) bud: vec4<f32>,
     @location(13) bud_shape: vec4<f32>,
+    @location(14) fade: vec4<f32>,
 };
 
 @vertex
@@ -196,6 +202,7 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.path_end = instance.path_end;
     out.bud = instance.bud;
     out.bud_shape = instance.bud_shape;
+    out.fade = instance.fade;
     return out;
 }
 
@@ -292,8 +299,7 @@ fn rounded_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-@fragment
-fn fs(in: Varyings) -> @location(0) vec4<f32> {
+fn body(in: Varyings) -> vec4<f32> {
     // How many local pixels one screen pixel spans: 1 when flat, more or
     // less under depth. Taken before any branch, where derivatives are
     // defined.
@@ -387,6 +393,17 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     // Premultiplied out: the surface is composited as premultiplied alpha.
     return vec4<f32>(rim_colour.rgb * rim_alpha + fill.rgb * fill_alpha, rim_alpha + fill_alpha);
 }
+
+// Toward a clip's foot, everything fades: alpha and colour, premultiplied.
+fn faded(colour: vec4<f32>, y: f32, fade: vec4<f32>) -> vec4<f32> {
+    if (fade.y <= 0.0) { return colour; }
+    return colour * clamp((fade.x - y) / fade.y, 0.0, 1.0);
+}
+
+@fragment
+fn fs(in: Varyings) -> @location(0) vec4<f32> {
+    return faded(body(in), in.position.y, in.fade);
+}
 "#;
 
 impl Pipeline {
@@ -448,7 +465,7 @@ impl Pipeline {
                         0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
                         3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
                         6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4,
-                        10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
+                        10 => Float32x4, 11 => Float32x4, 14 => Float32x4, 12 => Float32x4, 13 => Float32x4,
                     ],
                 })],
             },
