@@ -131,6 +131,7 @@ pub struct Node {
     marks_alpha: f32,
     /// 0 start, 1 centre, 2 end: where a line sits within `max_width`.
     text_align: u8,
+    ellipsize: u8,
     max_width: Option<f32>,
     buffer: Option<Arc<ct::Buffer>>,
     /// Beats a minute, and where in the current beat the node is (0…1).
@@ -244,6 +245,7 @@ impl Node {
             mark_color: [1.0; 4],
             marks_alpha: 1.0,
             text_align: 0,
+            ellipsize: 0,
             max_width: None,
             buffer: None,
             pulse: 0.0,
@@ -1029,6 +1031,14 @@ impl Scene {
                 }
                 (n.runs, reshape) = (runs, true);
             }
+            Prop::Ellipsize => {
+                n.ellipsize = match take!(text).as_str() {
+                    "middle" => 1,
+                    "start" => 2,
+                    _ => 0,
+                };
+                reshape = true;
+            }
             Prop::TextAlign => {
                 n.text_align = match take!(text).as_str() {
                     "center" => 1,
@@ -1525,9 +1535,12 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         buffer.set_ellipsize(ct::Ellipsize::None);
     } else {
         buffer.set_wrap(ct::Wrap::None);
-        buffer.set_ellipsize(match n.max_width {
-            Some(_) => ct::Ellipsize::End(ct::EllipsizeHeightLimit::Lines(1)),
-            None => ct::Ellipsize::None,
+        let one = ct::EllipsizeHeightLimit::Lines(1);
+        buffer.set_ellipsize(match (n.max_width, n.ellipsize) {
+            (None, _) => ct::Ellipsize::None,
+            (Some(_), 1) => ct::Ellipsize::Middle(one),
+            (Some(_), 2) => ct::Ellipsize::Start(one),
+            (Some(_), _) => ct::Ellipsize::End(one),
         });
     }
     buffer.set_size(n.max_width, None);
@@ -2236,6 +2249,23 @@ fn collect_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_cut_in_the_middle_keeps_both_ends() {
+        let mut fonts = ct::FontSystem::new();
+        let mut n = Node::new(Kind::Text, Role::None);
+        n.text = "a-very-long-file-name-that-will-never-fit-in-the-row.pdf".into();
+        n.font_size = 14.0;
+        n.max_width = Some(120.0);
+        n.ellipsize = 1;
+        let buffer = shape(&mut fonts, &mut n);
+        let run = buffer.layout_runs().next().expect("one line");
+        let glyphs: Vec<_> = run.glyphs.iter().collect();
+        assert!(glyphs.iter().any(|g| g.start == 0), "the start is kept");
+        assert!(glyphs.iter().any(|g| g.end == n.text.len()), "the extension is kept");
+        assert!(run.line_w <= 121.0, "it fits: {}", run.line_w);
+        assert!(glyphs.len() < n.text.len(), "something was cut");
+    }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {
         let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
