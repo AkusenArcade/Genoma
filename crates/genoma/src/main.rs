@@ -317,6 +317,11 @@ impl genoma_script::io::Host for LoopHost {
         let mut fonts = self.1.lock().unwrap();
         genoma_scene::measure_text(&mut fonts, text, size, style)
     }
+
+    fn measure_wrapped(&self, text: &str, size: f32, style: &genoma_scene::TextStyle<'_>, width: f32) -> f32 {
+        let mut fonts = self.1.lock().unwrap();
+        genoma_scene::measure_wrapped(&mut fonts, text, size, style, width)
+    }
 }
 
 /// `genoma pam [service] [directory]`: one authentication of the current

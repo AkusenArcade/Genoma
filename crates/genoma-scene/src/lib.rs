@@ -1326,6 +1326,19 @@ pub fn measure_text(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &T
     buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
 }
 
+/// How tall `text` is set in `style` at `size` and wrapped within `width`,
+/// logical units, as a text node with `wrap` and that `max_width` draws it:
+/// what a shape that grows to hold a sentence needs before drawing it.
+pub fn measure_wrapped(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &TextStyle<'_>, width: f32) -> f32 {
+    let line = (size * 1.2).ceil();
+    let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(size, line));
+    buffer.set_wrap(ct::Wrap::WordOrGlyph);
+    buffer.set_size(Some(width.max(1.0)), None);
+    buffer.set_text(text, &style.attrs(), ct::Shaping::Advanced, None);
+    buffer.shape_until_scroll(fonts, false);
+    buffer.layout_runs().count().max(1) as f32 * line
+}
+
 fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     if let Some(buffer) = &n.buffer {
         return buffer.clone();

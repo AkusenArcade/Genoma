@@ -1334,6 +1334,25 @@ impl Script {
                 Ok(host.measure(&text, t.get("size")?, &style))
             })?,
         )?;
+        // g.text_height { text, font, size, weight, italic, tabular, tracking,
+        // width }: logical units, as the text would be drawn wrapped within
+        // `width` (a text node with `wrap` and that `max_width`).
+        let host = self.host.clone();
+        g.set(
+            "text_height",
+            lua.create_function(move |_, t: Table| {
+                let text: String = t.get("text")?;
+                let font: Option<String> = t.get("font")?;
+                let style = genoma_scene::TextStyle {
+                    font: font.as_deref(),
+                    italic: t.get::<Option<bool>>("italic")?.unwrap_or(false),
+                    tabular: t.get::<Option<bool>>("tabular")?.unwrap_or(false),
+                    weight: t.get::<Option<f64>>("weight")?.map(|w| w.clamp(100.0, 900.0) as u16),
+                    tracking: t.get::<Option<f32>>("tracking")?.unwrap_or(0.0),
+                };
+                Ok(host.measure_wrapped(&text, t.get("size")?, &style, t.get("width")?))
+            })?,
+        )?;
         // g.dir: the interface's directory.
         g.set("dir", self.dir.display().to_string())?;
         // g.parse_json(text) → the value; g.to_json(value, pretty) → text.
