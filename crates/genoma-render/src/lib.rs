@@ -99,26 +99,31 @@ pub struct Image {
     pub transform: [[f32; 4]; 4],
 }
 
-/// What one surface shows, in drawing order: every rect, then every image,
-/// then every shader node, the particles, and every text; then the same
-/// again for what is raised over all of it (a list a dropdown opened). Each
-/// kind's items are the base layer's then the raised one's, `base` saying
-/// where the base ends; none is all base.
+/// What one surface shows, in layers drawn one after the other. Inside a
+/// layer every rect is drawn, then every image, every shader node, the
+/// particles and every text: one draw call per kind. A shape that comes
+/// later in the tree than something of a later kind it overlaps starts a
+/// new layer, so it lies over it (a scrim over a picture); shapes that do
+/// not overlap stay batched whatever their order. What is raised over all
+/// of it (a list a dropdown opened) is a layer of its own, last.
 #[derive(Default)]
 pub struct DrawList {
-    pub base: Option<Layer>,
+    /// Where each layer but the last ends.
+    pub breaks: Vec<Layer>,
     pub rects: Vec<Rect>,
     pub images: Vec<Image>,
     pub shaders: Vec<Shader>,
     pub texts: Vec<Text>,
-    /// Drawn over the rects and images, under the text.
     pub emitters: Vec<Emitter>,
+    /// What the current layer holds that is drawn over its rects: the kind's
+    /// rank and its bounds, physical pixels.
+    over: Vec<(u8, [f32; 4])>,
 }
 
 /// A surface the render thread knows, named by the main thread.
 pub type SurfaceId = u32;
 
-/// How many of each kind the base layer has: the rest are raised.
+/// How many of each kind there are up to a layer's end.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Layer {
     pub rects: usize,
@@ -126,6 +131,26 @@ pub struct Layer {
     pub shaders: usize,
     pub emitters: usize,
     pub texts: usize,
+}
+
+impl Layer {
+    fn total(&self) -> usize {
+        self.rects + self.images + self.shaders + self.emitters + self.texts
+    }
+}
+
+/// What an item covers, clipped: everything its clip allows when it is
+/// tilted (`anywhere`), as its own corners no longer say where it lands.
+fn bounds(origin: [f32; 2], size: [f32; 2], clip: [f32; 4], anywhere: bool) -> [f32; 4] {
+    if anywhere {
+        return clip;
+    }
+    [
+        origin[0].max(clip[0]),
+        origin[1].max(clip[1]),
+        (origin[0] + size[0]).min(clip[2]),
+        (origin[1] + size[1]).min(clip[3]),
+    ]
 }
 
 impl DrawList {
@@ -138,6 +163,94 @@ impl DrawList {
             emitters: self.emitters.len(),
             texts: self.texts.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mark().total() == 0
+    }
+
+    /// Ends the current layer: what is pushed after this is drawn over all
+    /// of it.
+    pub fn split(&mut self) {
+        let mark = self.mark();
+        if self.breaks.last().is_none_or(|b| b.total() < mark.total()) && mark.total() > 0 {
+            self.breaks.push(mark);
+        }
+        self.over.clear();
+    }
+
+    /// Where an item of kind `rank` (rects 0, images 1, shaders 2, particles
+    /// 3, text 4) covering `bounds` goes: a new layer when the current one
+    /// already holds something of a later kind under it.
+    fn order(&mut self, rank: u8, bounds: [f32; 4]) {
+        let under = |b: &[f32; 4]| b[0] < bounds[2] && bounds[0] < b[2] && b[1] < bounds[3] && bounds[1] < b[3];
+        if self.over.iter().any(|(r, b)| *r > rank && under(b)) {
+            self.split();
+        }
+        if rank > 0 {
+            self.over.push((rank, bounds));
+        }
+    }
+
+    pub fn push_rect(&mut self, r: Rect) {
+        self.order(0, bounds(r.origin, r.size, r.clip, r.transform != Rect::IDENTITY));
+        self.rects.push(r);
+    }
+
+    pub fn push_image(&mut self, i: Image) {
+        self.order(1, bounds(i.origin, i.size, i.clip, i.transform != Rect::IDENTITY));
+        self.images.push(i);
+    }
+
+    pub fn push_shader(&mut self, s: Shader) {
+        let size = [s.size[0] * s.scale, s.size[1] * s.scale];
+        self.order(2, bounds(s.origin, size, s.clip, false));
+        self.shaders.push(s);
+    }
+
+    /// Particles go anywhere their emitter throws them: they count as
+    /// covering all of their clip.
+    pub fn push_emitter(&mut self, e: Emitter) {
+        self.order(3, bounds([0.0; 2], [0.0; 2], e.params.clip, true));
+        self.emitters.push(e);
+    }
+
+    /// `size` is the laid-out text's, physical pixels.
+    pub fn push_text(&mut self, t: Text, size: [f32; 2]) {
+        // Glyphs reach past the line box: italics, accents, descenders.
+        let slack = 4.0 * t.scale;
+        let origin = [t.origin[0] - slack, t.origin[1] - slack];
+        let size = [size[0] + slack * 2.0, size[1] + slack * 2.0];
+        self.order(4, bounds(origin, size, t.clip, false));
+        self.texts.push(t);
+    }
+
+    /// `other`'s layers after all of these.
+    pub fn append(&mut self, other: DrawList) {
+        self.split();
+        let base = self.mark();
+        for b in other.breaks {
+            self.breaks.push(Layer {
+                rects: base.rects + b.rects,
+                images: base.images + b.images,
+                shaders: base.shaders + b.shaders,
+                emitters: base.emitters + b.emitters,
+                texts: base.texts + b.texts,
+            });
+        }
+        self.rects.extend(other.rects);
+        self.images.extend(other.images);
+        self.shaders.extend(other.shaders);
+        self.emitters.extend(other.emitters);
+        self.texts.extend(other.texts);
+        self.over = other.over;
+    }
+
+    /// Each layer's start and end, in drawing order.
+    pub fn layers(&self) -> impl Iterator<Item = (Layer, Layer)> + '_ {
+        let ends = self.breaks.iter().copied().chain(std::iter::once(self.mark()));
+        let starts = std::iter::once(Layer::default()).chain(self.breaks.iter().copied());
+        starts.zip(ends)
     }
 }
 
@@ -231,5 +344,60 @@ pub(crate) fn raw_handles(
     wgpu::SurfaceTargetUnsafe::RawHandle {
         raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display))),
         raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f32) -> Rect {
+        Rect { origin: [x, 0.0], size: [10.0, 10.0], clip: Rect::NO_CLIP, transform: Rect::IDENTITY, ..bytemuck::Zeroable::zeroed() }
+    }
+
+    fn image(x: f32) -> Image {
+        Image {
+            key: 0,
+            pixels: Arc::new(Vec::new()),
+            width: 1,
+            height: 1,
+            origin: [x, 0.0],
+            size: [10.0, 10.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            radius: 0.0,
+            alpha: 1.0,
+            clip: Rect::NO_CLIP,
+            transform: Rect::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn a_shape_over_a_picture_starts_a_layer() {
+        let mut list = DrawList::default();
+        list.push_image(image(0.0));
+        list.push_rect(rect(5.0));
+        assert_eq!(list.layers().count(), 2);
+    }
+
+    #[test]
+    fn shapes_beside_each_other_stay_batched() {
+        let mut list = DrawList::default();
+        for i in 0..4 {
+            list.push_rect(rect(i as f32 * 20.0));
+            list.push_image(image(i as f32 * 20.0));
+        }
+        assert_eq!(list.layers().count(), 1);
+    }
+
+    #[test]
+    fn what_is_raised_comes_last() {
+        let mut list = DrawList::default();
+        list.push_rect(rect(0.0));
+        let mut upper = DrawList::default();
+        upper.push_rect(rect(100.0));
+        list.append(upper);
+        let layers: Vec<_> = list.layers().collect();
+        assert_eq!(layers.len(), 2);
+        assert_eq!((layers[1].0.rects, layers[1].1.rects), (1, 2));
     }
 }

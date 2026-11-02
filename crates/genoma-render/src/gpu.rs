@@ -25,9 +25,9 @@ pub(crate) struct Gpu {
 /// Glyphon's pieces, made once the surface format is known.
 struct Text {
     atlas: glyphon::TextAtlas,
-    renderer: glyphon::TextRenderer,
-    /// The raised layer's, drawn after the base layer's shapes and text.
-    raised: glyphon::TextRenderer,
+    /// One per layer that has text, kept between frames: each draws only
+    /// its own layer's.
+    renderers: Vec<glyphon::TextRenderer>,
     swash: glyphon::SwashCache,
     cache: glyphon::Cache,
 }
@@ -244,37 +244,37 @@ impl Gpu {
         let text = self.text.get_or_insert_with(|| {
             let cache = glyphon::Cache::new(&self.device);
             // Web: sRGB-encoded colours in a linear target, as the rects.
-            let mut atlas = glyphon::TextAtlas::with_color_mode(
+            let atlas = glyphon::TextAtlas::with_color_mode(
                 &self.device,
                 &self.queue,
                 &cache,
                 format,
                 glyphon::ColorMode::Web,
             );
-            let renderer = glyphon::TextRenderer::new(
-                &mut atlas,
-                &self.device,
-                wgpu::MultisampleState::default(),
-                None,
-            );
-            let raised = glyphon::TextRenderer::new(
-                &mut atlas,
-                &self.device,
-                wgpu::MultisampleState::default(),
-                None,
-            );
-            Text { atlas, renderer, raised, swash: glyphon::SwashCache::new(), cache }
+            Text { atlas, renderers: Vec::new(), swash: glyphon::SwashCache::new(), cache }
         });
         let viewport = target
             .viewport
             .get_or_insert_with(|| glyphon::Viewport::new(&self.device, &text.cache));
         viewport.update(&self.queue, glyphon::Resolution { width, height });
-        let base = list.base.unwrap_or_else(|| list.mark());
+        let layers: Vec<(Layer, Layer)> = list.layers().collect();
         let mut fonts = self.fonts.lock().unwrap();
-        for (renderer, texts) in [(&mut text.renderer, &list.texts[..base.texts]), (&mut text.raised, &list.texts[base.texts..])] {
+        let mut used = 0;
+        for (from, to) in &layers {
+            let texts = &list.texts[from.texts..to.texts];
             if texts.is_empty() {
                 continue;
             }
+            if text.renderers.len() <= used {
+                text.renderers.push(glyphon::TextRenderer::new(
+                    &mut text.atlas,
+                    &self.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ));
+            }
+            let renderer = &mut text.renderers[used];
+            used += 1;
             let areas = texts.iter().map(|t| glyphon::TextArea {
                 buffer: &t.buffer,
                 left: t.origin[0],
@@ -323,16 +323,18 @@ impl Gpu {
                 })],
                 ..Default::default()
             });
-            // The base layer, then what is raised over it, each whole: the
-            // raised one's shapes cut what lies under them first.
-            let ends = list.mark();
-            for (from, to, raised) in [(Layer::default(), base, false), (base, ends, true)] {
+            // Layer by layer, each whole: a later layer's shapes lie over
+            // everything an earlier one drew, and a raised one's cut what
+            // lies under them first.
+            let mut used = 0;
+            for (from, to) in &layers {
                 rects.draw(&mut pass, from.rects as u32..to.rects as u32);
                 images.draw(&mut pass, from.images..to.images);
                 shaders.draw(&mut pass, from.shaders..to.shaders);
                 particles.draw(&mut pass, from.emitters..to.emitters);
                 if to.texts > from.texts {
-                    let renderer = if raised { &text.raised } else { &text.renderer };
+                    let renderer = &text.renderers[used];
+                    used += 1;
                     if let Err(e) = renderer.render(&text.atlas, viewport, &mut pass) {
                         log::warn!("text: {e}");
                     }

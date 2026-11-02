@@ -1314,15 +1314,8 @@ impl Scene {
             }
         }
         let upper = out.upper;
-        let has_upper = !(upper.rects.is_empty() && upper.images.is_empty() && upper.shaders.is_empty()
-            && upper.emitters.is_empty() && upper.texts.is_empty());
-        if has_upper {
-            list.base = Some(list.mark());
-            list.rects.extend(upper.rects);
-            list.images.extend(upper.images);
-            list.shaders.extend(upper.shaders);
-            list.emitters.extend(upper.emitters);
-            list.texts.extend(upper.texts);
+        if !upper.is_empty() {
+            list.append(upper);
         }
         self.images.sweep();
         list
@@ -1724,7 +1717,7 @@ fn collect_node(
             // its glass then shows the compositor's blur of what is behind
             // the surface, not the shell's own shapes through it.
             if !nothing && n.raised {
-                out.list.rects.push(Rect {
+                out.list.push_rect(Rect {
                     origin: [x * scale, y * scale],
                     size,
                     radius,
@@ -1746,7 +1739,7 @@ fn collect_node(
                 });
             }
             if !nothing {
-                out.list.rects.push(Rect {
+                out.list.push_rect(Rect {
                     origin: [x * scale, y * scale],
                     size,
                     radius,
@@ -1783,7 +1776,7 @@ fn collect_node(
                         continue;
                     }
                     let cs = [l.size.width * scale, l.size.height * scale];
-                    out.list.rects.push(Rect {
+                    out.list.push_rect(Rect {
                         origin: [(origin[0] + l.location.x) * scale, (origin[1] + l.location.y) * scale],
                         size: cs,
                         radius: c.radius.map_or(cs[1] / 2.0, |r| r * scale).min(cs[0].min(cs[1]) / 2.0),
@@ -1821,7 +1814,7 @@ fn collect_node(
             let stroke = n.stroke.unwrap_or(1.3);
             let width = if n.crisp { (stroke * scale).round().max(1.0) } else { stroke * scale };
             let g = n.growth.clamp(0.0, 1.0);
-            out.list.rects.push(Rect {
+            out.list.push_rect(Rect {
                 origin: [bx * scale, by * scale],
                 size: [bw * scale, bh * scale],
                 radius: 0.0,
@@ -1849,7 +1842,7 @@ fn collect_node(
                 };
                 let d = n.node_size * scale;
                 for p in [point(0.0), point(g)] {
-                    out.list.rects.push(Rect {
+                    out.list.push_rect(Rect {
                         origin: [(origin[0] + p[0]) * scale - d / 2.0, (origin[1] + p[1]) * scale - d / 2.0],
                         size: [d, d],
                         radius: d / 2.0,
@@ -1876,7 +1869,7 @@ fn collect_node(
             let e = &n.emit;
             if !e.births.is_empty() {
                 let to = if e.target { [n.path[4], n.path[5]] } else { [0.0, 0.0] };
-                out.list.emitters.push(genoma_render::Emitter {
+                out.list.push_emitter(genoma_render::Emitter {
                     key: n.uid,
                     generation: e.generation,
                     births: Arc::new(e.births.clone()),
@@ -1903,7 +1896,7 @@ fn collect_node(
         }
         Kind::Shader => {
             if let Some((source, key)) = n.shader.clone() {
-                out.list.shaders.push(genoma_render::Shader {
+                out.list.push_shader(genoma_render::Shader {
                     source,
                     key,
                     origin: [origin[0] * scale, origin[1] * scale],
@@ -1924,7 +1917,7 @@ fn collect_node(
                     _ => None,
                 };
                 if let Some((key, data)) = out.icons.raster(&source, n.color, gradient, pixels) {
-                    out.list.images.push(genoma_render::Image {
+                    out.list.push_image(genoma_render::Image {
                         key,
                         pixels: data,
                         width: pixels,
@@ -1964,7 +1957,7 @@ fn collect_node(
                     };
                     let (u0, u1) = part(w, dw);
                     let (v0, v1) = part(h, dh);
-                    out.list.images.push(genoma_render::Image {
+                    out.list.push_image(genoma_render::Image {
                         key,
                         pixels: data,
                         width: dw,
@@ -1991,10 +1984,14 @@ fn collect_node(
             let buffer = shape(fonts, n);
             let at = [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale];
             if out.transform == Rect::IDENTITY {
-                out.list.texts.push(Text { buffer, origin: at, scale, color: fade(n.color), clip: out.clip });
+                let size = [
+                    (layout.size.width - layout.padding.left - layout.padding.right) * scale,
+                    (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
+                ];
+                out.list.push_text(Text { buffer, origin: at, scale, color: fade(n.color), clip: out.clip }, size);
             } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color) {
                 // Tilted: through the subtree's matrix as an image.
-                out.list.images.push(genoma_render::Image {
+                out.list.push_image(genoma_render::Image {
                     key: r.key,
                     pixels: r.pixels,
                     width: r.width,
