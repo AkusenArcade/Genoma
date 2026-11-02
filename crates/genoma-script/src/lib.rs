@@ -698,7 +698,7 @@ fn menu_table(lua: &Lua, e: &MenuEntry) -> mlua::Result<Table> {
 impl UserData for TrayRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         // tray.items → { { key, id, title, status, category, icon_name,
-        // icon_theme_path, attention_icon_name, has_pixmap, tooltip_title,
+        // icon_theme_path, attention_icon_name, has_pixmap, pixmap, tooltip_title,
         // tooltip_description, only_menu, has_menu }, … }
         fields.add_field_method_get("items", |lua, this| {
             let list = lua.create_table()?;
@@ -713,6 +713,7 @@ impl UserData for TrayRef {
                 t.set("icon_theme_path", it.icon_theme_path)?;
                 t.set("attention_icon_name", it.attention_icon_name)?;
                 t.set("has_pixmap", it.has_pixmap)?;
+                t.set("pixmap", it.pixmap)?;
                 t.set("tooltip_title", it.tooltip_title)?;
                 t.set("tooltip_description", it.tooltip_description)?;
                 t.set("only_menu", it.only_menu)?;

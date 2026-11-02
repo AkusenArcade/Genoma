@@ -45,6 +45,9 @@ pub struct Item {
     pub attention_icon_name: String,
     /// Whether it sends its icon as pixels rather than a name.
     pub has_pixmap: bool,
+    /// Those pixels as a PNG file, or empty: the largest size sent, written
+    /// once under `$XDG_RUNTIME_DIR/genoma/tray/`, named by its content.
+    pub pixmap: String,
     pub tooltip_title: String,
     pub tooltip_description: String,
     /// The primary action is the menu: `activate` must not be called.
@@ -231,10 +234,12 @@ async fn read_item(conn: &zbus::Connection, key: &str) -> zbus::Result<Item> {
         .and_then(|v| <(String, Vec<(i32, i32, Vec<u8>)>, String, String)>::try_from(v.clone()).ok())
         .map(|(_, _, t, d)| (t, d))
         .unwrap_or_default();
-    let has_pixmap = all
+    let pixmaps = all
         .get("IconPixmap")
         .and_then(|v| Vec::<(i32, i32, Vec<u8>)>::try_from(v.clone()).ok())
-        .is_some_and(|p| !p.is_empty());
+        .unwrap_or_default();
+    let has_pixmap = !pixmaps.is_empty();
+    let pixmap = pixmap_file(pixmaps).unwrap_or_default();
     Ok(Item {
         key: key.to_owned(),
         id: text(&all, "Id"),
@@ -245,6 +250,7 @@ async fn read_item(conn: &zbus::Connection, key: &str) -> zbus::Result<Item> {
         icon_theme_path: text(&all, "IconThemePath"),
         attention_icon_name: text(&all, "AttentionIconName"),
         has_pixmap,
+        pixmap,
         tooltip_title,
         tooltip_description,
         only_menu: all.get("ItemIsMenu").and_then(|v| bool::try_from(v.clone()).ok()).unwrap_or(false),
@@ -254,6 +260,36 @@ async fn read_item(conn: &zbus::Connection, key: &str) -> zbus::Result<Item> {
             .map(|p| p.as_str().to_owned())
             .unwrap_or_default(),
     })
+}
+
+/// The largest of an item's pixmaps as a PNG, written if not there yet.
+/// The pixels are ARGB32 in network order, as StatusNotifierItem sends them.
+fn pixmap_file(pixmaps: Vec<(i32, i32, Vec<u8>)>) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let (w, h, argb) = pixmaps
+        .into_iter()
+        .filter(|(w, h, data)| *w > 0 && *h > 0 && data.len() == (*w as usize) * (*h as usize) * 4)
+        .max_by_key(|(w, h, _)| w * h)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (w, h, &argb).hash(&mut hasher);
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("genoma/tray");
+    let path = dir.join(format!("{:016x}.png", hasher.finish()));
+    if !path.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        let rgba: Vec<u8> = argb.chunks_exact(4).flat_map(|p| [p[1], p[2], p[3], p[0]]).collect();
+        let file = std::fs::File::create(&path).ok()?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if encoder.write_header().and_then(|mut writer| writer.write_image_data(&rgba)).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    }
+    Some(path.to_string_lossy().into_owned())
 }
 
 type Layout = (i32, HashMap<String, OwnedVariant>, Vec<OwnedVariant>);

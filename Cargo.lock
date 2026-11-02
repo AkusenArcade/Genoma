@@ -1063,6 +1063,7 @@ dependencies = [
  "libc",
  "log",
  "pipewire",
+ "png",
  "serde_json",
  "zbus 6.1.0",
  "zruntime",
