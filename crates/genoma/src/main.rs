@@ -677,7 +677,7 @@ fn run(dir: PathBuf) {
         .run(None, &mut app, |app| {
             if app.take_outputs_changed() {
                 match load(&script, app) {
-                    Ok(()) => log::info!("outputs changed: surfaces fitted"),
+                    Ok(()) => log::info!("outputs or areas changed: surfaces fitted"),
                     Err(e) => log::error!("outputs changed, reload failed: {e}"),
                 }
             }

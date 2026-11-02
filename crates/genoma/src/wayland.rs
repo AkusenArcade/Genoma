@@ -106,6 +106,11 @@ struct Surface {
     tall: bool,
     /// The output's logical size.
     output_size: Option<(u32, u32)>,
+    /// What the compositor gave a full surface, when that is less than its
+    /// output: other surfaces' zones are kept clear of it.
+    area: Option<(u32, u32)>,
+    /// The size the surface's tree was built for.
+    built: Option<(u32, u32)>,
     /// The timer that wakes the surface for the next beat, if one is set.
     wake: Option<RegistrationToken>,
     /// The surface as assistive technology sees it, checked at most every
@@ -357,7 +362,13 @@ impl App {
         for i in 0..self.surfaces.len() {
             self.place(i);
         }
-        self.surfaces.iter().map(|s| (s.spec, s.output.clone(), s.scene.clone(), s.output_size)).collect()
+        self.surfaces
+            .iter_mut()
+            .map(|s| {
+                s.built = s.area.or(s.output_size);
+                (s.spec, s.output.clone(), s.scene.clone(), s.built)
+            })
+            .collect()
     }
 
     /// Measures and places every surface again: called once their trees are
@@ -424,6 +435,8 @@ impl App {
             strokes: Vec::new(),
             tall: false,
             output_size,
+            area: None,
+            built: None,
             wake: None,
             access: crate::access::Access::new(),
             access_checked: None,
@@ -908,9 +921,19 @@ impl LayerShellHandler for App {
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         let Some(i) = self.by_wl(layer.wl_surface()) else { return };
+        let full = self.specs.get(self.surfaces[i].spec).is_some_and(|spec| spec.full);
         let s = &mut self.surfaces[i];
         let (w, h) = configure.new_size;
         s.logical = if w > 0 && h > 0 { (w, h) } else { s.wanted };
+        // A full surface's tree is built for its output, but the compositor
+        // keeps it clear of other surfaces' zones: a bottom membrane under
+        // another shell's top bar got 56 px less, and its band was laid out
+        // below the surface's end, out of sight. Built again for the size
+        // given; the next configure gives the same and nothing follows.
+        if full && w > 0 && h > 0 && s.built.is_some() && s.built != Some((w, h)) {
+            s.area = Some((w, h));
+            self.outputs_changed = true;
+        }
         s.configured = true;
         // A configure must be answered with a buffer, frame callback or not.
         s.frame_pending = false;
