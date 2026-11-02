@@ -543,8 +543,11 @@ impl Scene {
         }
     }
 
-    /// The node's parent, for an event that bubbles up.
+    /// The node's parent, for an event that bubbles up; none for a node
+    /// no longer in the tree: the pointer may still name one that a
+    /// change of the list it was in took away.
     pub fn parent(&self, node: NodeId) -> Option<NodeId> {
+        self.tree.get_node_context(node)?;
         self.tree.parent(node)
     }
 
@@ -588,7 +591,7 @@ impl Scene {
                 Some(n) if n.cursor != 0 => return schema::CURSORS[n.cursor as usize],
                 _ => {}
             }
-            match self.tree.parent(node) {
+            match self.parent(node) {
                 Some(p) => node = p,
                 None => return schema::CURSORS[0],
             }
@@ -601,7 +604,7 @@ impl Scene {
             if node == ancestor {
                 return true;
             }
-            match self.tree.parent(node) {
+            match self.parent(node) {
                 Some(p) => node = p,
                 None => return false,
             }
