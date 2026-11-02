@@ -1078,14 +1078,18 @@ impl PointerHandler for App {
                     }
                 }
                 K::Release { button, .. } => {
-                    if let Some(node) = hit {
+                    // The node pressed hears its release wherever the pointer
+                    // is let go: a drag that ends over another node ends for
+                    // the one that began it, as a pointer grab does. It is a
+                    // click only let go over the node pressed.
+                    let pressed = self.surfaces[i].pressed.take();
+                    if let Some(node) = pressed.or(hit) {
                         let (lx, ly) = scene.borrow().local(node, x, y);
                         self.deliver(i, node, Input::Release(button, lx, ly));
-                        if self.surfaces[i].pressed == Some(node) {
+                        if pressed.is_some() && pressed == hit {
                             self.deliver(i, node, Input::Click(button, lx, ly));
                         }
                     }
-                    self.surfaces[i].pressed = None;
                 }
                 K::Axis { horizontal, vertical, source, .. } => {
                     let Some(node) = hit else { continue };
