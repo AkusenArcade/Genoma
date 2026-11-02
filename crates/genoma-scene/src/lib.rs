@@ -107,6 +107,8 @@ pub struct Node {
     marks: Vec<f32>,
     mark_color: [f32; 4],
     marks_alpha: f32,
+    /// 0 start, 1 centre, 2 end: where a line sits within `max_width`.
+    text_align: u8,
     max_width: Option<f32>,
     buffer: Option<Arc<ct::Buffer>>,
     /// Beats a minute, and where in the current beat the node is (0…1).
@@ -212,6 +214,7 @@ impl Node {
             marks: Vec::new(),
             mark_color: [1.0; 4],
             marks_alpha: 1.0,
+            text_align: 0,
             max_width: None,
             buffer: None,
             pulse: 0.0,
@@ -978,6 +981,14 @@ impl Scene {
                 (n.marks, reshape) = (marks, true);
             }
             Prop::MarkColor => (n.mark_color, reshape) = (take!(colour), true),
+            Prop::TextAlign => {
+                n.text_align = match take!(text).as_str() {
+                    "center" => 1,
+                    "end" => 2,
+                    _ => 0,
+                };
+                reshape = true;
+            }
             Prop::Pulse => (n.pulse, mover) = (take!(number).max(0.0), true),
             Prop::Orbit => (n.orbit, mover) = (take!(number), true),
             Prop::OrbitRadius => n.orbit_radius = take!(number),
@@ -1270,6 +1281,11 @@ impl Scene {
                         w = w.max(run.line_w);
                         h += run.line_height;
                     }
+                    // Aligned lines are placed within the whole width, so the
+                    // node takes it.
+                    if n.text_align != 0 {
+                        w = n.max_width.unwrap_or(w);
+                    }
                     Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h.ceil()) }
                 }
                 _ => Size::ZERO,
@@ -1398,8 +1414,13 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         });
     }
     buffer.set_size(n.max_width, None);
+    let align = match n.text_align {
+        1 => Some(ct::Align::Center),
+        2 => Some(ct::Align::End),
+        _ => None,
+    };
     if n.marks.is_empty() {
-        buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, None);
+        buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, align);
     } else {
         let c = n.mark_color;
         let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -1419,7 +1440,7 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         if start < n.text.len() {
             spans.push((&n.text[start..], if was == Some(true) { lit.clone() } else { attrs.clone() }));
         }
-        buffer.set_rich_text(spans, &attrs, ct::Shaping::Advanced, None);
+        buffer.set_rich_text(spans, &attrs, ct::Shaping::Advanced, align);
     }
     buffer.shape_until_scroll(fonts, false);
     let buffer = Arc::new(buffer);
