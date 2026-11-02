@@ -50,7 +50,14 @@ pub trait Host {
     /// How wide `text` is set in `style` at `size`, logical units.
     fn measure(&self, text: &str, size: f32, style: &genoma_scene::TextStyle<'_>) -> f32;
     /// How tall `text` is, wrapped within `width`, logical units.
-    fn measure_wrapped(&self, text: &str, size: f32, style: &genoma_scene::TextStyle<'_>, width: f32) -> f32;
+    fn measure_wrapped(
+        &self,
+        text: &str,
+        size: f32,
+        style: &genoma_scene::TextStyle<'_>,
+        width: f32,
+        runs: &[genoma_scene::TextRun],
+    ) -> f32;
 }
 
 pub type HostRef = Rc<dyn Host>;

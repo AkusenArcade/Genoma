@@ -1349,8 +1349,8 @@ impl Script {
             })?,
         )?;
         // g.text_height { text, font, size, weight, italic, tabular, tracking,
-        // width }: logical units, as the text would be drawn wrapped within
-        // `width` (a text node with `wrap` and that `max_width`).
+        // width, runs }: logical units, as the text would be drawn wrapped
+        // within `width` (a text node with `wrap` and that `max_width`).
         let host = self.host.clone();
         g.set(
             "text_height",
@@ -1364,7 +1364,12 @@ impl Script {
                     weight: t.get::<Option<f64>>("weight")?.map(|w| w.clamp(100.0, 900.0) as u16),
                     tracking: t.get::<Option<f32>>("tracking")?.unwrap_or(0.0),
                 };
-                Ok(host.measure_wrapped(&text, t.get("size")?, &style, t.get("width")?))
+                let runs = match convert(genoma_scene::Prop::Runs, &t.get::<LuaValue>("runs")?) {
+                    Ok(genoma_scene::Value::Runs(runs)) => runs,
+                    Ok(_) => Vec::new(),
+                    Err(e) => return Err(mlua::Error::runtime(e)),
+                };
+                Ok(host.measure_wrapped(&text, t.get("size")?, &style, t.get("width")?, &runs))
             })?,
         )?;
         // g.dir: the interface's directory.
@@ -1736,6 +1741,47 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
                 .map_err(|_| wrong("a list of numbers")),
             LuaValue::Nil => Ok(Value::Numbers(Vec::new())),
             _ => Err(wrong("a list of numbers")),
+        },
+        Ty::Runs => match v {
+            LuaValue::Table(t) => {
+                let mut runs = Vec::new();
+                for run in t.sequence_values::<Table>() {
+                    let r = run.map_err(|_| wrong("a list of runs"))?;
+                    let get = |k: &str| r.get::<LuaValue>(k).map_err(|_| wrong("a list of runs"));
+                    let number = |k: &str| -> Result<Option<f64>, String> {
+                        Ok(match get(k)? {
+                            LuaValue::Integer(i) => Some(i as f64),
+                            LuaValue::Number(n) => Some(n),
+                            _ => None,
+                        })
+                    };
+                    let (Some(from), Some(to)) = (number("from")?, number("to")?) else {
+                        return Err(wrong("runs with `from` and `to`"));
+                    };
+                    runs.push(genoma_scene::TextRun {
+                        from: from.max(0.0) as usize,
+                        to: to.max(0.0) as usize,
+                        weight: number("weight")?.map(|w| w as u16),
+                        italic: match get("italic")? {
+                            LuaValue::Boolean(b) => Some(b),
+                            _ => None,
+                        },
+                        font: match get("font")? {
+                            LuaValue::String(s) => Some(s.to_string_lossy()),
+                            _ => None,
+                        },
+                        size: number("size")?.map(|s| s as f32),
+                        color: match get("color")? {
+                            LuaValue::String(s) => Some(color(&s.to_string_lossy()).ok_or_else(|| wrong("a run colour, \"#rrggbb\""))?),
+                            _ => None,
+                        },
+                        strike: matches!(get("strike")?, LuaValue::Boolean(true)),
+                    });
+                }
+                Ok(Value::Runs(runs))
+            }
+            LuaValue::Nil => Ok(Value::Runs(Vec::new())),
+            _ => Err(wrong("a list of runs")),
         },
         Ty::Choice(options) => match v {
             LuaValue::String(s) if options.contains(&s.to_string_lossy().as_str()) => {

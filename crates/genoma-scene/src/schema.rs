@@ -28,6 +28,7 @@ pub enum Prop {
     Font,
     Tabular,
     Marks,
+    Runs,
     MarkColor,
     ColorBottom,
     TextAlign,
@@ -115,6 +116,8 @@ pub enum Ty {
     Bool,
     /// A list of numbers, `{ number }`.
     Numbers,
+    /// Stretches of a text with a style of their own (`TextRun`).
+    Runs,
     Choice(&'static [&'static str]),
 }
 
@@ -159,6 +162,7 @@ pub const PROPS: &[PropInfo] = &[
     p("tabular", Prop::Tabular, Ty::Bool, false, "Figures of equal width, where the font has them."),
     p("marks", Prop::Marks, Ty::Numbers, false, "Characters of the text, counted from 1, drawn in `mark_color`: the letters a search matched."),
     p("mark_color", Prop::MarkColor, Ty::Color, false, "The colour of the characters `marks` names."),
+    p("runs", Prop::Runs, Ty::Runs, false, "Stretches of the text set apart, characters counted from 1, `to` included: each may set its own weight, italic, font, size (on the text's lines), colour, or strike it through. The words a line makes bold, italic or code."),
     p("text_align", Prop::TextAlign, Ty::Choice(&["start", "center", "end"]), false, "Where each line of a text sits within its `max_width`: a paragraph centred under a title."),
     p("color", Prop::Color, Ty::Color, true, "Text colour."),
     p("color_bottom", Prop::ColorBottom, Ty::Color, true, "With it, the text is lit from `color` at the top of its box to this at the bottom: a gradient the glyphs reveal, the same for a short figure and a long one."),
@@ -260,6 +264,7 @@ pub fn luau_definitions() -> String {
             Ty::Color | Ty::Text => "string".to_string(),
             Ty::Bool => "boolean".to_string(),
             Ty::Numbers => "{ number }".to_string(),
+            Ty::Runs => "{ { from: number, to: number, weight: number?, italic: boolean?, font: string?, size: number?, color: string?, strike: boolean? } }".to_string(),
             Ty::Choice(options) => options.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(" | "),
         };
         let ty = if ty.contains('|') { format!("({ty})") } else { ty };

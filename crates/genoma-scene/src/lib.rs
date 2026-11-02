@@ -66,6 +66,22 @@ pub enum Value {
     Text(String),
     Bool(bool),
     Numbers(Vec<f32>),
+    Runs(Vec<TextRun>),
+}
+
+/// A stretch of a text with a style of its own: characters `from` to `to`,
+/// counted from 1, both included. What it leaves unset is the text's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextRun {
+    pub from: usize,
+    pub to: usize,
+    pub weight: Option<u16>,
+    pub italic: Option<bool>,
+    pub font: Option<String>,
+    /// Its own size, on the text's lines: the line height stays the text's.
+    pub size: Option<f32>,
+    pub color: Option<[f32; 4]>,
+    pub strike: bool,
 }
 
 /// The beat Bioma's processor dot keeps: it swells to 1.45 over the first
@@ -106,6 +122,7 @@ pub struct Node {
     /// buffer was shaped at: a marked glyph carries its own colour, which
     /// the text's alpha does not reach, so the shape follows the fade.
     marks: Vec<f32>,
+    runs: Vec<TextRun>,
     mark_color: [f32; 4],
     marks_alpha: f32,
     /// 0 start, 1 centre, 2 end: where a line sits within `max_width`.
@@ -214,6 +231,7 @@ impl Node {
             font: None,
             tabular: false,
             marks: Vec::new(),
+            runs: Vec::new(),
             mark_color: [1.0; 4],
             marks_alpha: 1.0,
             text_align: 0,
@@ -842,6 +860,7 @@ impl Scene {
         let text = |v: &Value| if let Value::Text(t) = v { Some(t.clone()) } else { None };
         let flag = |v: &Value| if let Value::Bool(b) = v { Some(*b) } else { None };
         let numbers = |v: &Value| if let Value::Numbers(x) = v { Some(x.clone()) } else { None };
+        let runs = |v: &Value| if let Value::Runs(x) = v { Some(x.clone()) } else { None };
         macro_rules! take {
             ($f:expr) => {
                 match $f(&value) {
@@ -985,6 +1004,13 @@ impl Scene {
                 (n.marks, reshape) = (marks, true);
             }
             Prop::MarkColor => (n.mark_color, reshape) = (take!(colour), true),
+            Prop::Runs => {
+                let runs = take!(runs);
+                if n.runs == runs {
+                    return Ok(());
+                }
+                (n.runs, reshape) = (runs, true);
+            }
             Prop::TextAlign => {
                 n.text_align = match take!(text).as_str() {
                     "center" => 1,
@@ -1373,14 +1399,90 @@ pub fn measure_text(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &T
 /// How tall `text` is set in `style` at `size` and wrapped within `width`,
 /// logical units, as a text node with `wrap` and that `max_width` draws it:
 /// what a shape that grows to hold a sentence needs before drawing it.
-pub fn measure_wrapped(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &TextStyle<'_>, width: f32) -> f32 {
+pub fn measure_wrapped(
+    fonts: &mut ct::FontSystem,
+    text: &str,
+    size: f32,
+    style: &TextStyle<'_>,
+    width: f32,
+    runs: &[TextRun],
+) -> f32 {
     let line = (size * 1.2).ceil();
     let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(size, line));
     buffer.set_wrap(ct::Wrap::WordOrGlyph);
     buffer.set_size(Some(width.max(1.0)), None);
-    buffer.set_text(text, &style.attrs(), ct::Shaping::Advanced, None);
+    let attrs = style.attrs();
+    if runs.is_empty() {
+        buffer.set_text(text, &attrs, ct::Shaping::Advanced, None);
+    } else {
+        buffer.set_rich_text(spans(text, &attrs, line, runs, &[], [0.0; 4], 1.0), &attrs, ct::Shaping::Advanced, None);
+    }
     buffer.shape_until_scroll(fonts, false);
     buffer.layout_runs().count().max(1) as f32 * line
+}
+
+/// A text cut where its attributes change: each character takes the text's,
+/// then every run over it, then a mark's colour (`marks`, counted from 1).
+/// A colour of its own is drawn into the glyphs, so it fades by `alpha`;
+/// a size of its own keeps the text's `line` height.
+#[allow(clippy::too_many_arguments)]
+fn spans<'a>(
+    text: &'a str,
+    attrs: &ct::Attrs<'a>,
+    line: f32,
+    runs: &'a [TextRun],
+    marks: &[f32],
+    mark_color: [f32; 4],
+    alpha: f32,
+) -> Vec<(&'a str, ct::Attrs<'a>)> {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let colour = |c: [f32; 4]| ct::Color::rgba(byte(c[0]), byte(c[1]), byte(c[2]), byte(c[3] * alpha));
+    let marked: std::collections::HashSet<usize> = marks.iter().map(|m| *m as usize).collect();
+    let at = |i: usize| {
+        let mut a = attrs.clone();
+        for r in runs.iter().filter(|r| r.from <= i && i <= r.to) {
+            if let Some(w) = r.weight {
+                a = a.weight(ct::Weight(w));
+            }
+            if let Some(it) = r.italic {
+                a = a.style(if it { ct::Style::Italic } else { ct::Style::Normal });
+            }
+            if let Some(f) = &r.font {
+                a = a.family(ct::Family::Name(f));
+            }
+            if let Some(size) = r.size {
+                a = a.metrics(ct::Metrics::new(size, line));
+            }
+            if let Some(c) = r.color {
+                a = a.color(colour(c));
+            }
+            if r.strike {
+                a = a.strikethrough();
+            }
+        }
+        if marked.contains(&i) {
+            a = a.color(colour(mark_color));
+        }
+        a
+    };
+    let mut out: Vec<(&str, ct::Attrs)> = Vec::new();
+    let (mut start, mut was): (usize, Option<ct::Attrs>) = (0, None);
+    for (i, (byte_at, _)) in text.char_indices().enumerate() {
+        let is = at(i + 1);
+        match was.take() {
+            Some(w) if w != is => {
+                out.push((&text[start..byte_at], w));
+                start = byte_at;
+                was = Some(is);
+            }
+            Some(w) => was = Some(w),
+            None => was = Some(is),
+        }
+    }
+    if let Some(w) = was {
+        out.push((&text[start..], w));
+    }
+    out
 }
 
 fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
@@ -1416,27 +1518,10 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         2 => Some(ct::Align::End),
         _ => None,
     };
-    if n.marks.is_empty() {
+    if n.marks.is_empty() && n.runs.is_empty() {
         buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, align);
     } else {
-        let c = n.mark_color;
-        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let lit = attrs.clone().color(ct::Color::rgba(byte(c[0]), byte(c[1]), byte(c[2]), byte(c[3] * n.marks_alpha)));
-        let marked: std::collections::HashSet<usize> = n.marks.iter().map(|m| *m as usize).collect();
-        // Runs of marked and unmarked characters, as byte ranges.
-        let mut spans: Vec<(&str, ct::Attrs)> = Vec::new();
-        let (mut start, mut was) = (0, None);
-        for (i, (at, _)) in n.text.char_indices().enumerate() {
-            let is = marked.contains(&(i + 1));
-            if was.is_some_and(|w| w != is) {
-                spans.push((&n.text[start..at], if was == Some(true) { lit.clone() } else { attrs.clone() }));
-                start = at;
-            }
-            was = Some(is);
-        }
-        if start < n.text.len() {
-            spans.push((&n.text[start..], if was == Some(true) { lit.clone() } else { attrs.clone() }));
-        }
+        let spans = spans(&n.text, &attrs, metrics.line_height, &n.runs, &n.marks, n.mark_color, n.marks_alpha);
         buffer.set_rich_text(spans, &attrs, ct::Shaping::Advanced, align);
     }
     buffer.shape_until_scroll(fonts, false);
@@ -1978,7 +2063,7 @@ fn collect_node(
             }
         }
         Kind::Text => {
-            if !n.marks.is_empty() {
+            if !n.marks.is_empty() || n.runs.iter().any(|r| r.color.is_some()) {
                 let a = (alpha * 32.0).round() / 32.0;
                 if n.marks_alpha != a {
                     n.marks_alpha = a;
@@ -1994,7 +2079,51 @@ fn collect_node(
                 (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
             ];
             if out.transform == Rect::IDENTITY && !lit {
+                // Struck through: glyphon draws no decoration, so each line
+                // goes over the text as a shape of its own.
+                let mut strikes = Vec::new();
+                if n.runs.iter().any(|r| r.strike) {
+                    for run in buffer.layout_runs() {
+                        for span in run.decorations.iter().filter(|s| s.data.text_decoration.strikethrough) {
+                            let glyphs = &run.glyphs[span.glyph_range.clone()];
+                            let x0 = glyphs.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+                            let x1 = glyphs.iter().map(|g| g.x + g.w).fold(f32::NEG_INFINITY, f32::max);
+                            if x1 <= x0 {
+                                continue;
+                            }
+                            let m = &span.data.strikethrough_metrics;
+                            let thick = (m.thickness * span.font_size * scale).max(1.0).round();
+                            let y = (run.line_y - m.offset * span.font_size) * scale;
+                            let c = span.color_opt.map_or(n.color, |c| {
+                                [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, c.a() as f32 / 255.0]
+                            });
+                            strikes.push(([at[0] + x0 * scale, (at[1] + y).round()], [(x1 - x0) * scale, thick], c));
+                        }
+                    }
+                }
                 out.list.push_text(Text { buffer, origin: at, scale, color: fade(n.color), clip: out.clip }, size);
+                for (origin, size, c) in strikes {
+                    out.list.push_rect(Rect {
+                        origin,
+                        size,
+                        radius: 0.0,
+                        rim: 0.0,
+                        level: 1.0,
+                        cut: 0.0,
+                        fill: fade(c),
+                        rim_top: [0.0; 4],
+                        rim_bottom: [0.0; 4],
+                        wave: [0.0; 4],
+                        arc: Rect::WHOLE,
+                        fill_to: [0.0; 4],
+                        clip: out.clip,
+                        path: [0.0; 4],
+                        path_end: [0.0; 4],
+                        bud: [0.0; 4],
+                        bud_shape: [0.0; 4],
+                        transform: out.transform,
+                    });
+                }
             } else if let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color, lit.then_some((n.color_bottom, size[1]))) {
                 // Tilted or lit: as an image, through the subtree's matrix.
                 out.list.push_image(genoma_render::Image {
