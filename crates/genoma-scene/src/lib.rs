@@ -175,6 +175,7 @@ pub struct Node {
     path: [f32; 6],
     node_size: f32,
     bud: f32,
+    halo: f32,
     /// A key no other node in the process has: emitters are kept on the
     /// shared GPU by it.
     uid: u64,
@@ -283,6 +284,7 @@ impl Node {
             path: [0.0; 6],
             node_size: 0.0,
             bud: 0.0,
+            halo: 0.0,
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             emit: Emit::default(),
             turn: [0.0; 3],
@@ -851,6 +853,7 @@ impl Scene {
             Prop::ToX => Value::Number(n.path[4]),
             Prop::ToY => Value::Number(n.path[5]),
             Prop::Bud => Value::Number(n.bud),
+            Prop::Halo => Value::Number(n.halo),
             Prop::RotateX => Value::Number(n.turn[0]),
             Prop::RotateY => Value::Number(n.turn[1]),
             Prop::Depth => Value::Number(n.turn[2]),
@@ -986,6 +989,7 @@ impl Scene {
             Prop::ToY => (n.path[5], n.emit.target) = (take!(number), true),
             Prop::NodeSize => n.node_size = take!(number).max(0.0),
             Prop::Bud => n.bud = take!(number).max(0.0),
+            Prop::Halo => n.halo = take!(number).max(0.0),
             Prop::Rate => (n.emit.rate, mover) = (take!(number).max(0.0), true),
             Prop::Lifetime => n.emit.lifetime = take!(number).max(0.05),
             Prop::Speed => n.emit.speed = take!(number),
@@ -1908,7 +1912,35 @@ fn collect_node(
                     transform: out.transform,
                 });
             }
-            if !nothing {
+            // A halo: the shape's own outline, blurred outward in its fill,
+            // and nothing else of it.
+            if !nothing && n.halo > 0.0 {
+                // Out to its spread (a quarter) and its blur past it.
+                let reach = n.halo * scale;
+                let extent = reach * 1.25;
+                out.list.push_rect(Rect {
+                    origin: [x * scale - extent, y * scale - extent],
+                    size: [size[0] + extent * 2.0, size[1] + extent * 2.0],
+                    radius,
+                    rim: reach,
+                    level: 1.0,
+                    cut: 3.0,
+                    fill: fade(n.fill),
+                    rim_top: [0.0; 4],
+                    rim_bottom: [0.0; 4],
+                    wave: [0.0; 4],
+                    arc: Rect::WHOLE,
+                    fill_to: [0.0; 4],
+                    stops: Rect::NO_STOPS,
+                    clip: out.clip,
+                    path: [0.0; 4],
+                    path_end: [0.0; 4],
+                    bud: [0.0; 4],
+                    bud_shape: [0.0; 4],
+                    fade: out.fade_of(),
+                    transform: out.transform,
+                });
+            } else if !nothing {
                 out.list.push_rect(Rect {
                     origin: [x * scale, y * scale],
                     size,

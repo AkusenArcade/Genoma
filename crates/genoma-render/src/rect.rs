@@ -21,7 +21,9 @@ pub struct Rect {
     pub level: f32,
     /// What the shape is: 0 a rounded rectangle; 1 a cut, which erases what
     /// is under it (a tissue's band where its cells are, so glass never
-    /// sits on glass); 2 a thread along `path`.
+    /// sits on glass); 2 a thread along `path`; 3 a halo, the rectangle
+    /// 1.25 × `rim` in from the quad's edge, grown by a quarter of `rim` and
+    /// blurred over `rim` on both sides of that edge.
     pub cut: f32,
     pub fill: [f32; 4],
     pub rim_top: [f32; 4],
@@ -352,6 +354,23 @@ fn body(in: Varyings) -> vec4<f32> {
     let p = in.position.xy;
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
+    }
+    // A halo, as Qt's RectangularShadow draws one (Membrane.qml: blur the
+    // reach, spread a quarter of it): the shape grown by the spread is half
+    // covered at its edge, whole a blur inside it and gone a blur outside.
+    // The quad is the shape grown by spread and blur. Whole up to a quarter
+    // of the reach and gone at it was twice as dark round every tissue
+    // (Akusen, 2026-11-03).
+    if (in.shape.w > 2.5) {
+        let blur = max(in.shape.y, 1.0);
+        let spread = blur * 0.25;
+        let shape = max(in.half - vec2<f32>(blur + spread), vec2<f32>(0.0));
+        let d = rounded_box(in.local, shape, in.shape.x) - spread;
+        // Qt blurs in two dimensions, and round a band as thin as its blur
+        // the tail falls faster than one edge's would: measured against
+        // Bioma's Quickshell halo, the coverage to the power 1.25.
+        let cover = pow(1.0 - smoothstep(-blur, blur, d), 1.25) * in.fill.a;
+        return vec4<f32>(in.fill.rgb * cover, cover);
     }
     // A thread: a band along its Bézier, as far as it has grown.
     if (in.shape.w > 1.5) {
