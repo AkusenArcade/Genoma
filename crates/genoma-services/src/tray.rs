@@ -362,8 +362,27 @@ impl Tray {
             let mut stream = MessageStream::for_match_rule(rule, &conn, None).await?;
             let host = format!("org.kde.StatusNotifierHost-{}", std::process::id());
             conn.request_name(host.as_str()).await?;
+            // Another's watcher, held by a shell that may be on its way out
+            // (the switch from Bioma on Quickshell): once it goes, Genoma
+            // serves the watcher, and the items register with it again.
+            if !serving {
+                let (conn, post, host, waiter) = (conn.clone(), post.clone(), host.clone(), thread.clone());
+                thread.spawn("tray watcher takeover", async move {
+                    bus::until_free(&conn, WATCHER).await?;
+                    if serve_watcher(&waiter, &conn).await? {
+                        let _ = post.send(Update::Watcher(true));
+                        let watcher = zbus::Proxy::new(&conn, WATCHER, WATCHER_PATH, WATCHER).await?;
+                        watcher.call_method("RegisterStatusNotifierHost", &(host.as_str(),)).await?;
+                    }
+                    Ok(())
+                });
+            }
             let watcher = zbus::Proxy::new(&conn, WATCHER, WATCHER_PATH, WATCHER).await?;
-            watcher.call_method("RegisterStatusNotifierHost", &(host.as_str(),)).await?;
+            // A watcher on its way out may not answer: the items come
+            // through the takeover above.
+            if let Err(e) = watcher.call_method("RegisterStatusNotifierHost", &(host.as_str(),)).await {
+                log::warn!("tray: the watcher did not take the host: {e}");
+            }
             let listed: Vec<String> = watcher.get_property("RegisteredStatusNotifierItems").await.unwrap_or_default();
             // An item's signals come from its unique name.
             let mut owners: HashMap<String, Vec<String>> = HashMap::new();

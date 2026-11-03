@@ -218,19 +218,21 @@ impl Notifications {
                 let conn = bus::session().await?;
                 let server = Server { post: post.clone(), next: Arc::new(AtomicU32::new(1)), open };
                 conn.object_server().at(PATH, server).await?;
-                // No queue: while another server holds the name, Genoma
-                // does not wait in line to take it later.
-                let reply = conn.request_name_with_flags(NAME, RequestNameFlags::DO_NOT_QUEUE).await;
-                let owned = matches!(
-                    reply,
-                    Ok(zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner)
-                );
-                if !owned {
-                    // Nothing served under a name another holds.
-                    let _ = conn.object_server().remove::<Server, _>(PATH).await;
-                    return Err(zbus::Error::Failure("another notification server owns the session's name".into()));
+                // No queue: while another server holds the name, Genoma says
+                // so and serves nothing; when that one lets it go (a shell
+                // on its way out), Genoma takes it.
+                loop {
+                    let reply = conn.request_name_with_flags(NAME, RequestNameFlags::DO_NOT_QUEUE).await;
+                    let owned = matches!(
+                        reply,
+                        Ok(zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner)
+                    );
+                    if owned {
+                        return Ok(());
+                    }
+                    let _ = post.send(Update::Serving(Err("another notification server owns the session's name".into())));
+                    bus::until_free(&conn, NAME).await?;
                 }
-                Ok(())
             }
             .await;
             let _ = post.send(Update::Serving(result.map_err(|e| e.to_string())));

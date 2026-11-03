@@ -84,3 +84,22 @@ pub async fn system() -> zbus::Result<zbus::Connection> {
 pub async fn session() -> zbus::Result<zbus::Connection> {
     SESSION.get_or_try_init(zbus::Connection::session).await.cloned()
 }
+
+/// Returns once `name` has no owner on `conn`'s bus: at once when it has
+/// none now, else when its owner lets it go. For a name a session has one
+/// owner of, held by another shell that is on its way out (the switch from
+/// Bioma on Quickshell): taken when it is free, not given up for good.
+pub async fn until_free(conn: &zbus::Connection, name: &str) -> zbus::Result<()> {
+    use futures_util::StreamExt;
+    let dbus = zbus::fdo::DBusProxy::new(conn).await?;
+    let mut changes = dbus.receive_name_owner_changed_with_args(&[(0, name)]).await?;
+    if !dbus.name_has_owner(zbus::names::BusName::try_from(name)?).await? {
+        return Ok(());
+    }
+    while let Some(change) = changes.next().await {
+        if change.args()?.new_owner().is_none() {
+            return Ok(());
+        }
+    }
+    Err(zbus::Error::Failure(format!("{name}: the bus stopped saying who owns it")))
+}
