@@ -159,7 +159,7 @@ Time, Calendar, Proxy reading, Apps) are done: Bioma's `genoma/PORT.md`.
 
 ### 6. Lock and greeter
 
-- [ ] The lock screen on `g.pam`, as a separate process with its guard and
+- [x] The lock screen on `g.pam`, as a separate process with its guard and
       its hyprlock fallback, as now.
 - [x] The greeter on `g.greetd`, with agreety as its fallback.
 
@@ -177,8 +177,8 @@ covered, `finished` when it refused or ended it. A lock surface's first
 frame waits for its pictures (at most 750 ms), so the compositor keeps the
 desktop on screen until the lock is whole rather than showing it with its
 pictures missing. Bioma's `genoma/lock.luau` on it was checked in a nested
-niri (Bioma's `genoma/PORT.md`); the box stays open until it has run on
-Akusen's session with his password.
+niri (Bioma's `genoma/PORT.md`), then on Akusen's session the same
+morning: Mod+Alt+L, his password, unlocked, LockedHint cleared.
 
 ### 7. The switch
 
