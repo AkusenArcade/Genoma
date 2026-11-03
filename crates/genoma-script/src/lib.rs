@@ -669,17 +669,24 @@ impl UserData for IdleRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         // Whether the compositor offers ext-idle-notify.
         fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
-        // No input for the asked seconds, and nothing inhibiting idle.
-        fields.add_field_method_get("idle", |_, this| Ok(this.0.idle.get()));
+        // No input for the seconds `after` asked, and nothing inhibiting idle.
+        fields.add_field_method_get("idle", |_, this| Ok(this.0.is_idle(genoma_services::idle::DEFAULT)));
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // idle:after(seconds): idle is declared after that long without
         // input; 0 stops asking.
         methods.add_method("after", |_, this, seconds: f64| {
-            this.0.timeout.set(seconds.max(0.0).round() as u32);
+            this.0.set_timeout(genoma_services::idle::DEFAULT, seconds.max(0.0).round() as u32);
             Ok(())
         });
+        // idle:watch(name, seconds): a timeout of its own, beside the others;
+        // 0 stops asking. idle:is_idle(name) says whether it has passed.
+        methods.add_method("watch", |_, this, (name, seconds): (String, f64)| {
+            this.0.set_timeout(&name, seconds.max(0.0).round() as u32);
+            Ok(())
+        });
+        methods.add_method("is_idle", |_, this, name: String| Ok(this.0.is_idle(&name)));
     }
 }
 

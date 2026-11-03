@@ -224,7 +224,7 @@ pub struct App {
     /// the service it sets, and the notification asked for with its seconds.
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle: Option<std::rc::Rc<genoma_services::idle::Idle>>,
-    idle_notification: Option<(ExtIdleNotificationV1, u32)>,
+    idle_notifications: std::collections::HashMap<String, (ExtIdleNotificationV1, u32)>,
     /// `ext-session-lock`, bound once an interface requires `@genoma/lock`;
     /// the service it sets, and the lock while one is asked for or held.
     lock_state: Option<SessionLockState>,
@@ -274,7 +274,7 @@ impl App {
             toplevels: None,
             idle_notifier: None,
             idle: None,
-            idle_notification: None,
+            idle_notifications: std::collections::HashMap::new(),
             lock_state: None,
             lock: None,
             session_lock: None,
@@ -392,21 +392,31 @@ impl App {
     /// they change: the compositor counts from the moment it is made.
     fn sync_idle(&mut self) {
         let (Some(notifier), Some(idle)) = (&self.idle_notifier, &self.idle) else { return };
-        let wanted = idle.timeout.get_untracked().unwrap_or(0);
-        if self.idle_notification.as_ref().map(|(_, s)| *s) == Some(wanted) {
-            return;
-        }
-        if let Some((old, _)) = self.idle_notification.take() {
-            old.destroy();
-        }
-        idle.idle.set(false);
-        if wanted == 0 {
-            return;
+        let wanted = idle.timeouts.get_untracked().unwrap_or_default();
+        // Gone, or asked for another length: let go, and not idle any more.
+        let stale: Vec<String> = self
+            .idle_notifications
+            .iter()
+            .filter(|(name, (_, s))| wanted.get(*name) != Some(s))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            if let Some((old, _)) = self.idle_notifications.remove(&name) {
+                old.destroy();
+            }
+            idle.set_idle(&name, false);
         }
         let Some(seat) = self.seats.seats().next() else { return };
-        let notification = notifier.get_idle_notification(wanted.saturating_mul(1000), &seat, &self.qh, IdleData);
-        self.idle_notification = Some((notification, wanted));
+        for (name, seconds) in wanted {
+            if self.idle_notifications.contains_key(&name) {
+                continue;
+            }
+            let data = IdleData(name.clone());
+            let notification = notifier.get_idle_notification(seconds.saturating_mul(1000), &seat, &self.qh, data);
+            self.idle_notifications.insert(name, (notification, seconds));
+        }
     }
+
 
     fn publish_toplevels(&mut self) {
         let (Some(list), Some(toplevels)) = (&self.toplevel_list, &self.toplevels) else { return };
@@ -1067,15 +1077,16 @@ impl<I: Proxy> Dispatch2<I, App> for Ignore {
     fn event(&self, _: &mut App, _: &I, _: I::Event, _: &Connection, _: &QueueHandle<App>) {}
 }
 
-/// An idle notification: idle once the compositor says so, back on input.
-struct IdleData;
+/// An idle notification, by the name it was asked for under: idle once the
+/// compositor says so, back on input.
+struct IdleData(String);
 
 impl Dispatch2<ExtIdleNotificationV1, App> for IdleData {
     fn event(&self, app: &mut App, _: &ExtIdleNotificationV1, event: ext_idle_notification_v1::Event, _: &Connection, _: &QueueHandle<App>) {
         let Some(idle) = &app.idle else { return };
         match event {
-            ext_idle_notification_v1::Event::Idled => idle.idle.set(true),
-            ext_idle_notification_v1::Event::Resumed => idle.idle.set(false),
+            ext_idle_notification_v1::Event::Idled => idle.set_idle(&self.0, true),
+            ext_idle_notification_v1::Event::Resumed => idle.set_idle(&self.0, false),
             _ => {}
         }
     }
