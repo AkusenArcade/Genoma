@@ -182,8 +182,45 @@ morning: Mod+Alt+L, his password, unlocked, LockedHint cleared.
 
 ### 7. The switch
 
-- [ ] Genoma public and packaged; `bioma-shell` starting Bioma on Genoma;
-      the person's `override.json` read unchanged.
+*Akusen, 2026-11-03:* the effects first, then the package. Everything
+Quickshell still does on Genoma's behalf moves to Genoma behind one key, a
+top-level `"runtime": "genoma"` in the override, with which `scripts/bioma`
+starts Genoma alone; he lives on it for a few days with Quickshell off, and
+only then is Genoma packaged. The Quickshell version then leaves the
+package and is kept in a backup folder of Bioma's repository. Genoma goes
+to the AUR as `genoma`, built from tags; `bioma-shell` depends on a
+precise version.
+
+**7a. Genoma alone** (Bioma's `genoma/PORT.md` keeps the detail):
+- [ ] The key: `scripts/bioma` starts Genoma, and Genoma draws every block
+      whatever its own `runtime`; Quickshell, if started anyway, draws
+      nothing.
+- [ ] One way in from outside: `scripts/ipc <target> <function> …`, sent
+      to whichever runtime runs; the keybinds template, `scripts/key` and
+      the session's scripts go through it; Genoma answers every target
+      Quickshell's `shell.qml` answers (cell, capture, actions,
+      performance, audio, brightness, media, timer, sounds, …).
+- [ ] The names a session has one owner of: notifications, the polkit
+      agent, the tray's watcher.
+- [ ] The look acting on the desktop: matugen and the templates, gsettings
+      (icons, cursors, the proxy), the cursor theme's slots, niri's blur.
+- [ ] The Locker: logind's Lock, the idle lock, the lock before sleep and
+      its inhibitor, suspending after idle.
+- [ ] The greeter's sync, the clipboard's history, the sounds played,
+      the power profile following the mains, the only printer made the
+      default.
+- [ ] What settings and the setup ask of Quickshell now (`monitors`,
+      `organisms`, `keybinds`, `niri`, `looks`, `presets`, `actions`,
+      `setup`), done by Genoma itself.
+- [ ] The OSD (volume, brightness, keyboard layout), and brightness.
+- [ ] His few days on it, Quickshell off; the cost measured whole, beside
+      Quickshell's.
+
+**7b. The package:**
+- [ ] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
+      starting Bioma on Genoma, depending on it; the person's
+      `override.json` read unchanged; the Quickshell version moved to a
+      backup folder and left out.
 - [ ] The laptop: the measurements M0 to M2 left pending, and the hardware
       checks M5 left (battery, Wi-Fi join, Bluetooth pairing).
 
