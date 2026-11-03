@@ -14,6 +14,7 @@ use std::{
 };
 
 mod auth;
+mod profile;
 pub mod dbus;
 mod greetd;
 mod values;
@@ -1316,7 +1317,7 @@ impl Script {
             "effect",
             lua.create_function(|_, f: Function| {
                 Effect::new(move || {
-                    if let Err(e) = f.call::<()>(()) {
+                    if let Err(e) = profile::timed("effect", &f, || f.call::<()>(())) {
                         log::error!("g.effect: {e}");
                     }
                 });
@@ -1331,7 +1332,7 @@ impl Script {
             "watch",
             lua.create_function(|_, (source, handler): (Function, Function)| {
                 Effect::new(move || {
-                    let value = match source.call::<LuaValue>(()) {
+                    let value = match profile::timed("watch", &source, || source.call::<LuaValue>(())) {
                         Ok(v) => v,
                         Err(e) => {
                             log::error!("g.watch source: {e}");
@@ -2149,7 +2150,7 @@ thread_local! {
 
 fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Function, timing_name: Option<TimingName>) {
     Effect::new(move || {
-        let value = match f.call::<LuaValue>(()) {
+        let value = match profile::timed("bind", &f, || f.call::<LuaValue>(())) {
             Ok(v) => v,
             Err(e) => {
                 log::error!("binding {prop:?}: {e}");

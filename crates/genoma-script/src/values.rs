@@ -40,7 +40,7 @@ impl UserData for Computed {
 
 /// `g.computed(function() … end)`: read as `.value`, by bindings too.
 pub fn computed(f: Function) -> Computed {
-    Computed(Memo::new(move || match f.call::<LuaValue>(()) {
+    Computed(Memo::new(move || match crate::profile::timed("computed", &f, || f.call::<LuaValue>(())) {
         Ok(v) => v,
         Err(e) => {
             log::error!("g.computed: {e}");
