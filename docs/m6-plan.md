@@ -161,7 +161,24 @@ Time, Calendar, Proxy reading, Apps) are done: Bioma's `genoma/PORT.md`.
 
 - [ ] The lock screen on `g.pam`, as a separate process with its guard and
       its hyprlock fallback, as now.
-- [ ] The greeter on `g.greetd`, with agreety as its fallback.
+- [x] The greeter on `g.greetd`, with agreety as its fallback.
+
+The greeter, 2026-11-02: Bioma's `genoma/greeter.luau`, a second entry
+point (`genoma <dir> greeter.luau`), falling back to Quickshell's greeter
+and then agreety; Akusen logged in through it under greetd the same night.
+
+The lock, 2026-11-03: Genoma gained `@genoma/lock`, `ext-session-lock`
+behind a surface's `layer = "lock"`: asked for with `lock:lock()`, the
+compositor is asked and the interface mounted again with a lock surface on
+every output (output changes included); `lock:unlock()` unlocks before the
+surfaces go and mounts nothing again, since what follows is the
+interface's to decide; `locked` once the compositor says every output is
+covered, `finished` when it refused or ended it. A lock surface's first
+frame waits for its pictures (at most 750 ms), so the compositor keeps the
+desktop on screen until the lock is whole rather than showing it with its
+pictures missing. Bioma's `genoma/lock.luau` on it was checked in a nested
+niri (Bioma's `genoma/PORT.md`); the box stays open until it has run on
+Akusen's session with his password.
 
 ### 7. The switch
 

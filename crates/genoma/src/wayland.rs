@@ -1,6 +1,8 @@
 //! The surfaces on the compositor: one layer surface per output the
 //! interface asks for, each at its output's fractional scale, each drawn only
-//! when its own scene says something changed.
+//! when its own scene says something changed. While the interface holds the
+//! session lock, its `"lock"` surfaces are lock surfaces instead, one on
+//! every output.
 
 use std::{
     cell::RefCell,
@@ -58,6 +60,7 @@ use smithay_client_toolkit::{
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    session_lock::{SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface, SessionLockSurfaceConfigure},
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
@@ -72,7 +75,37 @@ use smithay_client_toolkit::{
     },
 };
 
-/// One layer surface and everything about it that is its own.
+/// What the compositor knows the surface as.
+enum Role {
+    Layer(LayerSurface),
+    /// Over everything, on one output, while the session is locked; sized
+    /// by the compositor alone.
+    Lock(SessionLockSurface),
+}
+
+impl Role {
+    fn wl_surface(&self) -> &wl_surface::WlSurface {
+        match self {
+            Role::Layer(layer) => layer.wl_surface(),
+            Role::Lock(lock) => lock.wl_surface(),
+        }
+    }
+
+    fn layer(&self) -> Option<&LayerSurface> {
+        match self {
+            Role::Layer(layer) => Some(layer),
+            Role::Lock(_) => None,
+        }
+    }
+}
+
+/// How long a lock surface's first frame may wait for its pictures. The
+/// compositor shows the lock only once every output has a frame, so a
+/// first frame held back keeps the desktop on screen rather than showing a
+/// lock with its pictures missing; held too long, it is a lock that is late.
+const LOCK_PICTURES: Duration = Duration::from_millis(750);
+
+/// One surface and everything about it that is its own.
 struct Surface {
     id: SurfaceId,
     /// Which of the interface's surfaces it is (its place in the list).
@@ -81,7 +114,7 @@ struct Surface {
     /// choice.
     output: Option<String>,
     scene: Rc<RefCell<Scene>>,
-    layer: LayerSurface,
+    role: Role,
     viewport: Option<WpViewport>,
     effect: Option<ExtBackgroundEffectSurfaceV1>,
     target_made: bool,
@@ -128,6 +161,8 @@ struct Surface {
     /// frame.
     access: crate::access::Access,
     access_checked: Option<Instant>,
+    /// Since when a lock surface's first frame has waited for its pictures.
+    held: Option<Instant>,
 }
 
 pub struct App {
@@ -190,6 +225,11 @@ pub struct App {
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle: Option<std::rc::Rc<genoma_services::idle::Idle>>,
     idle_notification: Option<(ExtIdleNotificationV1, u32)>,
+    /// `ext-session-lock`, bound once an interface requires `@genoma/lock`;
+    /// the service it sets, and the lock while one is asked for or held.
+    lock_state: Option<SessionLockState>,
+    lock: Option<std::rc::Rc<genoma_services::lock::Lock>>,
+    session_lock: Option<SessionLock>,
 }
 
 impl App {
@@ -235,6 +275,9 @@ impl App {
             idle_notifier: None,
             idle: None,
             idle_notification: None,
+            lock_state: None,
+            lock: None,
+            session_lock: None,
             globals,
         };
         // The compositor's main device, before any GPU is opened: rendering
@@ -282,6 +325,67 @@ impl App {
         self.idle_notifier = self.globals.bind(&self.qh, 1..=1, Ignore).ok();
         idle.available.set(self.idle_notifier.is_some());
         self.idle = Some(idle);
+    }
+
+    pub fn start_lock(&mut self, lock: std::rc::Rc<genoma_services::lock::Lock>) {
+        if self.lock.is_some() {
+            return;
+        }
+        let state = SessionLockState::new(&self.globals, &self.qh);
+        let offered = self.globals.contents().with_list(|g| g.iter().any(|g| g.interface == "ext_session_lock_manager_v1"));
+        lock.available.set(offered);
+        self.lock_state = Some(state);
+        self.lock = Some(lock);
+    }
+
+    /// The lock as the interface wants it: asked for, the compositor is
+    /// asked, and the trees are mounted again from the next pass with the
+    /// lock surfaces among them; let go, the session unlocks and they go.
+    pub fn sync_lock(&mut self) {
+        let Some(lock) = self.lock.clone() else { return };
+        let wanted = lock.wanted.get_untracked().unwrap_or(false);
+        match (&self.session_lock, wanted) {
+            (None, true) if !lock.finished.get_untracked().unwrap_or(false) => {
+                let Some(state) = &self.lock_state else { return };
+                match state.lock(&self.qh) {
+                    Ok(session_lock) => {
+                        log::info!("session lock asked for");
+                        self.session_lock = Some(session_lock);
+                        self.outputs_changed = true;
+                    }
+                    Err(e) => {
+                        log::warn!("no session lock: {e}");
+                        lock.finished.set(true);
+                    }
+                }
+            }
+            (Some(session_lock), false) => {
+                // Before the surfaces go, or the outputs would be locked
+                // with nothing on them for a moment.
+                if session_lock.is_locked() {
+                    session_lock.unlock();
+                    log::info!("session unlocked");
+                }
+                self.session_lock = None;
+                lock.locked.set(false);
+                self.drop_lock_surfaces();
+            }
+            _ => {}
+        }
+    }
+
+    /// The lock surfaces go, and nothing is mounted again: what follows an
+    /// unlock is the interface's to decide (a lock screen ends), and a load
+    /// would start it over.
+    fn drop_lock_surfaces(&mut self) {
+        let gone: Vec<SurfaceId> =
+            self.surfaces.iter().filter(|s| matches!(s.role, Role::Lock(_))).map(|s| s.id).collect();
+        if let Some(renderer) = &self.renderer {
+            for id in &gone {
+                renderer.destroy_target(*id);
+            }
+        }
+        self.surfaces.retain(|s| !gone.contains(&s.id));
     }
 
     /// A notification for the seconds the interface asks, asked again when
@@ -367,6 +471,11 @@ impl App {
     fn wanted_outputs(&self, spec: &SurfaceSpec) -> Vec<Option<String>> {
         let names: Vec<String> =
             self.outputs.outputs().filter_map(|o| self.outputs.info(&o).and_then(|i| i.name)).collect();
+        // A lock surface is on every output while the lock is held, and
+        // nowhere otherwise: a lock that left one output bare is no lock.
+        if spec.layer == "lock" {
+            return if self.session_lock.is_some() { names.into_iter().map(Some).collect() } else { Vec::new() };
+        }
         if spec.all_outputs {
             return names.into_iter().map(Some).collect();
         }
@@ -456,20 +565,26 @@ impl App {
             .and_then(|o| self.outputs.info(o))
             .and_then(|i| i.logical_size)
             .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
-        let layer = match spec.layer.as_str() {
-            "background" => Layer::Background,
-            "bottom" => Layer::Bottom,
-            "overlay" => Layer::Overlay,
-            _ => Layer::Top,
+        let role = if spec.layer == "lock" {
+            let (Some(session_lock), Some(output)) = (&self.session_lock, output.as_ref()) else { return };
+            Role::Lock(session_lock.create_lock_surface(wl, output, &qh))
+        } else {
+            let layer = match spec.layer.as_str() {
+                "background" => Layer::Background,
+                "bottom" => Layer::Bottom,
+                "overlay" => Layer::Overlay,
+                _ => Layer::Top,
+            };
+            let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some(spec.namespace.clone()), output.as_ref());
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            Role::Layer(layer)
         };
-        let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some(spec.namespace.clone()), output.as_ref());
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         self.surfaces.push(Surface {
             id,
             spec: spec_index,
             output: output_name,
             scene: Rc::new(RefCell::new(Scene::new(fonts))),
-            layer,
+            role,
             viewport,
             effect,
             target_made: false,
@@ -496,6 +611,7 @@ impl App {
             wake: None,
             access: crate::access::Access::new(),
             access_checked: None,
+            held: None,
         });
     }
 
@@ -541,6 +657,12 @@ impl App {
         let Some(spec) = self.specs.get(self.surfaces[i].spec).cloned() else { return };
         let s = &mut self.surfaces[i];
         s.wanted = wanted;
+        // A lock surface is the size of its output, and the compositor's
+        // to place: there is nothing to ask for.
+        let Some(layer) = s.role.layer() else {
+            s.dirty = true;
+            return;
+        };
         let mut anchor = Anchor::empty();
         for edge in &spec.anchor {
             anchor |= match edge.as_str() {
@@ -554,25 +676,25 @@ impl App {
                 }
             };
         }
-        s.layer.set_anchor(anchor);
+        layer.set_anchor(anchor);
         let [top, right, bottom, left] = spec.margin;
-        s.layer.set_margin(top, right, bottom, left);
-        s.layer.set_size(wanted.0, wanted.1);
+        layer.set_margin(top, right, bottom, left);
+        layer.set_size(wanted.0, wanted.1);
         // The reserved strip stays the membrane's, however tall the surface
         // grows while a cell is open.
         match spec.reserve_strip {
-            _ if spec.above_zones => s.layer.set_exclusive_zone(-1),
-            Some(strip) => s.layer.set_exclusive_zone(if spec.reserve { strip } else { 0 }),
-            None if !s.tall => s.layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
+            _ if spec.above_zones => layer.set_exclusive_zone(-1),
+            Some(strip) => layer.set_exclusive_zone(if spec.reserve { strip } else { 0 }),
+            None if !s.tall => layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
             None => {}
         }
         s.keyboard = s.scene.borrow().catcher().is_some();
-        s.layer.set_keyboard_interactivity(if s.keyboard {
+        layer.set_keyboard_interactivity(if s.keyboard {
             KeyboardInteractivity::Exclusive
         } else {
             KeyboardInteractivity::None
         });
-        s.layer.commit();
+        layer.commit();
         s.dirty = true;
     }
 
@@ -637,7 +759,36 @@ impl App {
         let qh = &self.qh;
         let s = &mut self.surfaces[i];
         let started = Instant::now();
-        let surface = s.layer.wl_surface().clone();
+        // A lock surface's first frame waits for its pictures, a while: the
+        // frame is laid out and listed, which asks for them, and only shown
+        // once nothing is still decoding.
+        if matches!(s.role, Role::Lock(_)) && s.frames == 0 {
+            let since = *s.held.get_or_insert_with(Instant::now);
+            if since.elapsed() < LOCK_PICTURES {
+                // Advanced as a frame would be: that is where finished
+                // decodes are taken in.
+                let _ = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
+                s.scene.borrow_mut().layout(spans.then_some(s.logical.0 as f32), None);
+                let _ = s.scene.borrow_mut().draw_list(s.scale as f32);
+                if let Some(wait) = s.scene.borrow().images_pending() {
+                    let id = s.id;
+                    if let Some(old) = s.wake.take() {
+                        handle.remove(old);
+                    }
+                    s.wake = handle
+                        .insert_source(Timer::from_duration(wait), move |_, _, app| {
+                            if let Some(i) = app.surfaces.iter().position(|s| s.id == id) {
+                                app.surfaces[i].wake = None;
+                                app.draw(i);
+                            }
+                            TimeoutAction::Drop
+                        })
+                        .ok();
+                    return;
+                }
+            }
+        }
+        let surface = s.role.wl_surface().clone();
         if !s.target_made {
             let wl = NonNull::new(surface.id().as_ptr() as *mut c_void).unwrap();
             // Safety: the display lives as long as the connection, the surface
@@ -717,11 +868,13 @@ impl App {
         // The keyboard while a cell is catching, with this frame's commit: a
         // full surface never changes size, so it is never placed again.
         if s.keyboard != catching {
-            s.layer.set_keyboard_interactivity(if catching {
-                KeyboardInteractivity::Exclusive
-            } else {
-                KeyboardInteractivity::None
-            });
+            if let Some(layer) = s.role.layer() {
+                layer.set_keyboard_interactivity(if catching {
+                    KeyboardInteractivity::Exclusive
+                } else {
+                    KeyboardInteractivity::None
+                });
+            }
             s.keyboard = catching;
         }
         // The compositor's shortcuts stand aside while a catching surface's
@@ -830,7 +983,7 @@ impl App {
     }
 
     fn by_wl(&self, wl: &wl_surface::WlSurface) -> Option<usize> {
-        self.surfaces.iter().position(|s| s.layer.wl_surface() == wl)
+        self.surfaces.iter().position(|s| s.role.wl_surface() == wl)
     }
 
     fn deliver(&mut self, i: usize, node: NodeId, input: Input) {
@@ -1017,6 +1170,51 @@ impl LayerShellHandler for App {
         }
         s.configured = true;
         // A configure must be answered with a buffer, frame callback or not.
+        s.frame_pending = false;
+        self.draw(i);
+    }
+}
+
+impl SessionLockHandler for App {
+    fn locked(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
+        log::info!("session locked");
+        if let Some(lock) = &self.lock {
+            lock.locked.set(true);
+        }
+    }
+
+    fn finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
+        // Refused, or ended by the compositor: the lock surfaces are inert
+        // and go; the interface hears it and decides what follows.
+        log::warn!("session lock finished by the compositor");
+        self.session_lock = None;
+        self.drop_lock_surfaces();
+        if let Some(lock) = &self.lock {
+            lock.locked.set(false);
+            lock.finished.set(true);
+        }
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: SessionLockSurface,
+        configure: SessionLockSurfaceConfigure,
+        _: u32,
+    ) {
+        let Some(i) = self.by_wl(surface.wl_surface()) else { return };
+        let s = &mut self.surfaces[i];
+        let (w, h) = configure.new_size;
+        s.logical = (w.max(1), h.max(1));
+        // Built for the output's size, as the compositor gives it: told
+        // otherwise, built again.
+        if s.built.is_some() && s.built != Some(s.logical) {
+            s.area = Some(s.logical);
+            self.outputs_changed = true;
+        }
+        s.wanted = s.logical;
+        s.configured = true;
         s.frame_pending = false;
         self.draw(i);
     }
@@ -1219,7 +1417,7 @@ impl OutputHandler for App {
     }
 
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some()) {
+        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some() || s.layer == "lock") {
             self.outputs_changed = true;
         }
     }
@@ -1227,7 +1425,7 @@ impl OutputHandler for App {
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some()) {
+        if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some() || s.layer == "lock") {
             self.outputs_changed = true;
         }
     }

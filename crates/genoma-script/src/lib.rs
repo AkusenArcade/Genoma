@@ -29,6 +29,7 @@ use genoma_services::{
     bluetooth::{Bluetooth, DeviceCall},
     clock::Clock,
     idle::Idle,
+    lock::Lock,
     media::{Action, Media},
     network::Network,
     niri::Niri,
@@ -253,6 +254,7 @@ pub struct Services {
     pub bluetooth: Rc<Bluetooth>,
     pub toplevels: Rc<Toplevels>,
     pub idle: Rc<Idle>,
+    pub lock: Rc<Lock>,
     pub tray: Rc<Tray>,
     pub polkit: Rc<Polkit>,
     pub notifications: Rc<Notifications>,
@@ -676,6 +678,35 @@ impl UserData for IdleRef {
         // input; 0 stops asking.
         methods.add_method("after", |_, this, seconds: f64| {
             this.0.timeout.set(seconds.max(0.0).round() as u32);
+            Ok(())
+        });
+    }
+}
+
+struct LockRef(Rc<Lock>);
+
+impl UserData for LockRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers ext-session-lock.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // Every output is covered, as the compositor says.
+        fields.add_field_method_get("locked", |_, this| Ok(this.0.locked.get()));
+        // The compositor refused the lock, or ended it on its own.
+        fields.add_field_method_get("finished", |_, this| Ok(this.0.finished.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // lock:lock(): the compositor is asked to lock the session, and the
+        // interface's "lock" surfaces are made, one per output. Once.
+        methods.add_method("lock", |_, this, ()| {
+            this.0.wanted.set(true);
+            Ok(())
+        });
+        // lock:unlock(): the session opens again and the lock surfaces go.
+        // Only the interface can say it; a process that dies leaves the
+        // compositor holding the outputs locked.
+        methods.add_method("unlock", |_, this, ()| {
+            this.0.wanted.set(false);
             Ok(())
         });
     }
@@ -1598,7 +1629,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -1610,6 +1641,7 @@ impl Script {
                         "bluetooth" => "bluetooth",
                         "toplevels" => "toplevels",
                         "idle" => "idle",
+                        "lock" => "lock",
                         "tray" => "tray",
                         "polkit" => "polkit",
                         "notifications" => "notifications",
@@ -1631,6 +1663,7 @@ impl Script {
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         "idle" => lua.create_userdata(IdleRef(services.idle.clone()))?,
+                        "lock" => lua.create_userdata(LockRef(services.lock.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
                         "polkit" => lua.create_userdata(PolkitRef(services.polkit.clone()))?,
                         "notifications" => lua.create_userdata(NotificationsRef(services.notifications.clone()))?,

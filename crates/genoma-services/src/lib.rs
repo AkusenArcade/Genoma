@@ -13,6 +13,7 @@ pub mod bus;
 pub mod clock;
 pub mod icons;
 pub mod idle;
+pub mod lock;
 pub mod media;
 pub mod network;
 pub mod notifications;
