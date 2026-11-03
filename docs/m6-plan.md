@@ -210,9 +210,9 @@ precise version.
 - [x] The Locker: logind's Lock, the idle lock, the lock before sleep and
       its inhibitor, suspending after idle. (Bioma ed73630; the Lock signal,
       PrepareForSleep and the idle suspend await a real session.)
-- [ ] The greeter's sync, the clipboard's history, the sounds played,
+- [x] The greeter's sync, the clipboard's history, the sounds played,
       the power profile following the mains, the only printer made the
-      default.
+      default. (Bioma 6a195a1; the mains and the printer await hardware.)
 - [ ] What settings and the setup ask of Quickshell now (`monitors`,
       `organisms`, `keybinds`, `niri`, `looks`, `presets`, `actions`,
       `setup`), done by Genoma itself.
