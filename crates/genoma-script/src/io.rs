@@ -28,7 +28,7 @@ use std::{
 };
 
 use calloop::RegistrationToken;
-use genoma_core::reactive::{Signal, on_cleanup};
+use genoma_core::reactive::{Signal, current_owner, on_cleanup, owned_by};
 use mlua::{Function, IntoLuaMulti, LuaString, Table, UserData, UserDataFields, UserDataMethods};
 use rustix::fs::inotify;
 
@@ -66,14 +66,18 @@ fn err(message: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(message.into())
 }
 
-fn call(f: &Function, what: &str, args: impl IntoLuaMulti) {
+/// A callback, run with the owner that was current when its source was
+/// made: what it starts (a process when another ends, a watcher in a
+/// D-Bus reply) belongs to the same load and goes with it. Run with none,
+/// it outlived every reload, and a reload at start left two of each.
+fn call(f: &Function, what: &str, args: impl IntoLuaMulti, owner: Option<usize>) {
     // A callback of a load that has been replaced: its state is gone. What
     // a g.watch handler starts is detached, so its timers outlive the load
     // they belong to, and fire into nothing.
     if f.weak_lua().try_upgrade().is_none() {
         return;
     }
-    if let Err(e) = f.call::<()>(args) {
+    if let Err(e) = owned_by(owner, || f.call::<()>(args)) {
         log::error!("{what}: {e}");
     }
 }
@@ -98,11 +102,13 @@ pub(crate) struct Stop {
     host: HostRef,
     tokens: RefCell<Vec<RegistrationToken>>,
     pub(crate) also: RefCell<Option<Box<dyn FnOnce()>>>,
+    /// Who owned what made it: its callbacks run as that owner.
+    pub(crate) owner: Option<usize>,
 }
 
 impl Stop {
     pub(crate) fn new(host: &HostRef) -> Rc<Stop> {
-        let stop = Rc::new(Stop { host: host.clone(), tokens: RefCell::default(), also: RefCell::default() });
+        let stop = Rc::new(Stop { host: host.clone(), tokens: RefCell::default(), also: RefCell::default(), owner: current_owner() });
         // Owned by the load: the next one stops it.
         let s = stop.clone();
         on_cleanup(move || s.stop());
@@ -188,10 +194,11 @@ pub fn timer(host: &HostRef, t: Table) -> mlua::Result<Timer> {
     let on_tick: Function = t.get("on_tick")?;
     let every = Duration::from_secs_f64(every);
     let stop = Stop::new(host);
+    let owner = stop.owner;
     stop.hold(host.timer(
         every,
         Box::new(move || {
-            call(&on_tick, "g.timer", ());
+            call(&on_tick, "g.timer", (), owner);
             Some(every)
         }),
     ));
@@ -202,12 +209,13 @@ pub fn timer(host: &HostRef, t: Table) -> mlua::Result<Timer> {
 /// fires to keep it from firing.
 pub fn after(host: &HostRef, (seconds, f): (f64, Function)) -> mlua::Result<Timer> {
     let stop = Stop::new(host);
+    let owner = stop.owner;
     let mut f = Some(f);
     stop.hold(host.timer(
         Duration::from_secs_f64(seconds.max(0.0)),
         Box::new(move || {
             if let Some(f) = f.take() {
-                call(&f, "g.after", ());
+                call(&f, "g.after", (), owner);
             }
             None
         }),
@@ -227,19 +235,20 @@ struct Running {
     on_line: Option<Function>,
     on_error_line: Option<Function>,
     exit: Cell<Option<i32>>,
+    owner: Option<usize>,
 }
 
 impl Running {
     fn out(&self) -> impl FnMut(&str) + '_ {
         move |line| match &self.on_line {
-            Some(f) => call(f, "g.process on_line", line.to_owned()),
+            Some(f) => call(f, "g.process on_line", line.to_owned(), self.owner),
             None => {}
         }
     }
 
     fn err(&self) -> impl FnMut(&str) + '_ {
         move |line| match &self.on_error_line {
-            Some(f) => call(f, "g.process on_error_line", line.to_owned()),
+            Some(f) => call(f, "g.process on_error_line", line.to_owned(), self.owner),
             None => log::debug!("process: {line}"),
         }
     }
@@ -373,6 +382,7 @@ pub fn process(host: &HostRef, t: Table) -> mlua::Result<Process> {
         on_line: t.get("on_line")?,
         on_error_line: t.get("on_error_line")?,
         exit: Cell::new(None),
+        owner: current_owner(),
     });
     let stop = Stop::new(host);
 
@@ -406,7 +416,7 @@ pub fn process(host: &HostRef, t: Table) -> mlua::Result<Process> {
             let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
             r.exit.set(Some(code));
             if let Some(f) = &on_exit {
-                call(f, "g.process on_exit", code);
+                call(f, "g.process on_exit", code, r.owner);
             }
             false
         }),
@@ -664,6 +674,7 @@ pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
     let on_close: Option<Function> = t.get("on_close")?;
     let stream = Rc::new(RefCell::new(Some(stream)));
     let stop = Stop::new(host);
+    let owner = stop.owner;
     let s = stream.clone();
     let mut lines = Lines::default();
     stop.hold(host.readable(
@@ -676,7 +687,7 @@ pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
             };
             let mut each = |line: &str| {
                 if let Some(f) = &on_line {
-                    call(f, "g.socket on_line", line.to_owned());
+                    call(f, "g.socket on_line", line.to_owned(), owner);
                 }
             };
             match read {
@@ -689,7 +700,7 @@ pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
                     lines.finish(&mut each);
                     s.borrow_mut().take();
                     if let Some(f) = &on_close {
-                        call(f, "g.socket on_close", ());
+                        call(f, "g.socket on_close", (), owner);
                     }
                     false
                 }

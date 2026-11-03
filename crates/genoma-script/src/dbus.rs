@@ -16,7 +16,7 @@ use std::{
 
 use calloop::channel::Sender;
 use futures_util::StreamExt;
-use genoma_core::reactive::on_cleanup;
+use genoma_core::reactive::{current_owner, on_cleanup, owned_by};
 use genoma_services::bus::{self, Bus};
 use mlua::{Function, Lua, Table, UserData, UserDataMethods, Value as LuaValue};
 use zbus::{
@@ -289,7 +289,9 @@ async fn call(c: Call) -> Result<Vec<Dyn>, String> {
 pub struct Dbus {
     bus: Bus,
     sender: Sender<Delivery>,
-    waiting: RefCell<HashMap<u64, (Function, bool)>>,
+    /// Each with whether it answers once, and the owner it was asked under:
+    /// what its answer starts belongs to the same load.
+    waiting: RefCell<HashMap<u64, (Function, bool, Option<usize>)>>,
     next: Cell<u64>,
 }
 
@@ -311,8 +313,8 @@ impl Dbus {
     }
 
     fn deliver(&self, delivery: Delivery) {
-        let (f, once) = match self.waiting.borrow().get(&delivery.id) {
-            Some((f, once)) => (f.clone(), *once),
+        let (f, once, owner) = match self.waiting.borrow().get(&delivery.id) {
+            Some((f, once, owner)) => (f.clone(), *once, *owner),
             None => return,
         };
         // Each load has its own Luau state: the callback's own.
@@ -330,9 +332,9 @@ impl Dbus {
                     if once {
                         values.insert(0, LuaValue::Boolean(true));
                     }
-                    f.call::<()>(mlua::MultiValue::from_iter(values))
+                    owned_by(owner, || f.call::<()>(mlua::MultiValue::from_iter(values)))
                 }),
-            Err(e) => Ok(f.call::<()>((false, e))),
+            Err(e) => Ok(owned_by(owner, || f.call::<()>((false, e)))),
         };
         if let Err(e) | Ok(Err(e)) = result {
             log::error!("g.dbus: {e}");
@@ -349,7 +351,7 @@ impl Dbus {
     fn wait(self: &Rc<Self>, f: Function, once: bool) -> u64 {
         let id = self.next.get();
         self.next.set(id + 1);
-        self.waiting.borrow_mut().insert(id, (f, once));
+        self.waiting.borrow_mut().insert(id, (f, once, current_owner()));
         let me = Rc::downgrade(self);
         on_cleanup(move || {
             if let Some(me) = me.upgrade() {
