@@ -207,8 +207,9 @@ precise version.
 - [x] The look acting on the desktop: matugen and the templates, gsettings
       (icons, cursors, the proxy), the cursor theme's slots, niri's blur.
       (Bioma 092fef7, the proxy after it.)
-- [ ] The Locker: logind's Lock, the idle lock, the lock before sleep and
-      its inhibitor, suspending after idle.
+- [x] The Locker: logind's Lock, the idle lock, the lock before sleep and
+      its inhibitor, suspending after idle. (Bioma ed73630; the Lock signal,
+      PrepareForSleep and the idle suspend await a real session.)
 - [ ] The greeter's sync, the clipboard's history, the sounds played,
       the power profile following the mains, the only printer made the
       default.
