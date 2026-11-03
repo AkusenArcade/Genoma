@@ -1389,6 +1389,34 @@ impl Script {
             "batch",
             lua.create_function(|_, f: Function| genoma_core::reactive::batch(|| f.call::<LuaValue>(())))?,
         )?;
+        // g.lasting(fn): what fn makes (a computed, a signal) belongs to the
+        // load, as a module's own state does, not to the binding or effect
+        // that happens to be running: a memo made the first time a binding
+        // asks for it outlives that binding's next run.
+        let lasting_owner = self.module_owner.clone();
+        g.set(
+            "lasting",
+            lua.create_function(move |_, f: Function| owned_by(lasting_owner.get(), || f.call::<LuaValue>(())))?,
+        )?;
+        // g.crossing("theme", fn): a batch whose colours cross rather than
+        // jump. What `fn` changes reaches every binding once; each colour a
+        // binding then sets, where its node names no transition of its own,
+        // is carried from the old to the new over that timing entry by the
+        // scene. A palette crossed by stepping its roles in Luau re-ran
+        // every binding at every step and filled the frame. Called from
+        // inside a binding or an effect, the bindings would run after it,
+        // once the wave under way settles: call it from a timer or a
+        // callback (g.after(0, …)).
+        g.set(
+            "crossing",
+            lua.create_function(|_, (name, f): (String, Function)| {
+                let timing = timing::get(&name).ok_or_else(|| err(format!("g.crossing: no timing named {name}")))?;
+                let previous = CROSSING.with(|c| c.replace(Some(timing)));
+                let result = genoma_core::reactive::batch(|| f.call::<LuaValue>(()));
+                CROSSING.with(|c| *c.borrow_mut() = previous);
+                result
+            })?,
+        )?;
         // g.untracked(fn): its result, without what it read becoming a
         // dependency of the binding around it.
         g.set(
@@ -2114,6 +2142,11 @@ impl TimingName {
     }
 }
 
+thread_local! {
+    /// The timing colours cross over while a `g.crossing` is under way.
+    static CROSSING: RefCell<Option<Timing>> = const { RefCell::new(None) };
+}
+
 fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Function, timing_name: Option<TimingName>) {
     Effect::new(move || {
         let value = match f.call::<LuaValue>(()) {
@@ -2125,7 +2158,9 @@ fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Fu
         };
         match convert(prop, &value) {
             Ok(value) => {
-                let timing = timing_name.as_ref().and_then(TimingName::resolve);
+                let timing = timing_name.as_ref().and_then(TimingName::resolve).or_else(|| {
+                    if prop.info().ty == Ty::Color { CROSSING.with(|c| c.borrow().clone()) } else { None }
+                });
                 if let Err(e) = scene.borrow_mut().set(node, prop, value, timing) {
                     log::error!("binding {prop:?}: {e}");
                 }
