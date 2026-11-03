@@ -32,7 +32,18 @@ pub enum Fit {
 enum Entry {
     Pending,
     Ready(Arc<Vec<u8>>),
+    /// On the GPU, its pixels let go here.
+    Uploaded,
     Failed,
+}
+
+/// Pixels this large are let go once the GPU holds them: a wallpaper's
+/// 20 MB, not an icon's few kilobytes.
+const LET_GO: usize = 1 << 20;
+
+fn nothing() -> Arc<Vec<u8>> {
+    static EMPTY: std::sync::LazyLock<Arc<Vec<u8>>> = std::sync::LazyLock::new(|| Arc::new(Vec::new()));
+    EMPTY.clone()
 }
 
 /// A request's result, handed back by the thread that decoded it.
@@ -46,6 +57,8 @@ struct Request {
     fit: Fit,
     radius: f32,
     soften: f32,
+    /// Only this part of the fitted picture is kept: x, y, w, h.
+    crop: Option<[u32; 4]>,
 }
 
 /// The requests waiting, newest last, and how many threads take them.
@@ -74,20 +87,43 @@ impl Images {
     /// with corners of `radius`, blurred by `soften` of those pixels,
     /// premultiplied RGBA, or `None` while they are being made (or when they
     /// cannot be).
-    pub fn get(&mut self, source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: f32) -> Option<(u64, Arc<Vec<u8>>)> {
+    /// The pixels of `source` fitted to `width` × `height`, keeping only
+    /// `crop` (x, y, w, h of the fitted picture) when one is given.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_part(
+        &mut self,
+        source: &str,
+        width: u32,
+        height: u32,
+        fit: Fit,
+        radius: f32,
+        soften: f32,
+        crop: Option<[u32; 4]>,
+    ) -> Option<(u64, Arc<Vec<u8>>)> {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        ("image", source, width, height, fit, (radius * 4.0).round() as i32, (soften * 4.0).round() as i32).hash(&mut h);
+        ("image", source, width, height, fit, (radius * 4.0).round() as i32, (soften * 4.0).round() as i32, crop).hash(&mut h);
         let key = h.finish();
         let frame = self.frame;
         if let Some((entry, used)) = self.cache.get_mut(&key) {
             *used = frame;
-            return match entry {
-                Entry::Ready(pixels) => Some((key, pixels.clone())),
-                _ => None,
-            };
+            match entry {
+                Entry::Ready(pixels) => {
+                    if pixels.len() >= LET_GO && genoma_render::resident(key) {
+                        *entry = Entry::Uploaded;
+                        return Some((key, nothing()));
+                    }
+                    return Some((key, pixels.clone()));
+                }
+                Entry::Uploaded if genoma_render::resident(key) => return Some((key, nothing())),
+                // Dropped from the GPU since: decoded again.
+                Entry::Uploaded => {
+                    self.cache.remove(&key);
+                }
+                _ => return None,
+            }
         }
         self.cache.insert(key, (Entry::Pending, frame));
-        let request = Request { key, source: source.to_owned(), width, height, fit, radius, soften };
+        let request = Request { key, source: source.to_owned(), width, height, fit, radius, soften, crop };
         let mut waiting = self.queue.waiting.lock().unwrap();
         waiting.0.push_back(request);
         // A thread more while there are fewer than WORKERS; each takes
@@ -106,7 +142,7 @@ impl Images {
                         }
                     }
                 };
-                let pixels = decode(&next.source, next.width, next.height, next.fit, next.radius, next.soften).map(Arc::new);
+                let pixels = decode(&next.source, next.width, next.height, next.fit, next.radius, next.soften, next.crop).map(Arc::new);
                 log::debug!("g.image {} decoded at {}x{}", next.source, next.width, next.height);
                 if pixels.is_none() {
                     log::warn!("g.image {}: could not be read", next.source);
@@ -153,7 +189,7 @@ impl Images {
     }
 }
 
-fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: f32) -> Option<Vec<u8>> {
+fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: f32, crop: Option<[u32; 4]>) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -170,6 +206,9 @@ fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: 
         out = image::imageops::fast_blur(&out, soften);
     }
     round(&mut out, width, height, radius);
+    if let Some([x, y, w, h]) = crop {
+        out = image::imageops::crop_imm(&out, x, y, w, h).to_image();
+    }
     premultiply(&mut out);
     Some(out.into_raw())
 }

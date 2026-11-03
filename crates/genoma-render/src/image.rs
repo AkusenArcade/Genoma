@@ -232,6 +232,8 @@ impl Pipeline {
         if self.uploads % 256 == 0 {
             let now = self.uploads;
             self.textures.retain(|_, (_, used)| now - *used < 1024);
+            let mut resident = RESIDENT.lock().unwrap();
+            resident.retain(|key| self.textures.contains_key(key));
         }
         if images.is_empty() {
             return;
@@ -244,6 +246,12 @@ impl Pipeline {
         let mut quads = Vec::with_capacity(images.len());
         for image in images {
             if !self.textures.contains_key(&image.key) {
+                // Sent by its key alone, its pixels let go on the CPU side,
+                // and no longer here: not drawn this once, and the scene
+                // decodes it again, as the key is no longer resident.
+                if image.pixels.is_empty() {
+                    continue;
+                }
                 let size = wgpu::Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 };
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("image"),
@@ -275,6 +283,7 @@ impl Pipeline {
                     ],
                 });
                 self.textures.insert(image.key, (group, 0));
+                RESIDENT.lock().unwrap().insert(image.key);
             }
             if let Some((_, used)) = self.textures.get_mut(&image.key) {
                 *used = self.uploads;
@@ -316,4 +325,15 @@ impl Pipeline {
             pass.draw(0..4, i as u32..i as u32 + 1);
         }
     }
+}
+
+/// The images on the GPU, by key: a scene lets a picture's pixels go once
+/// its key is here, and sends the key alone from then on. A wallpaper was
+/// kept twice, in a texture and in the scene's cache.
+static RESIDENT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether the image with this key is on the GPU now.
+pub fn resident(key: u64) -> bool {
+    RESIDENT.lock().unwrap().contains(&key)
 }

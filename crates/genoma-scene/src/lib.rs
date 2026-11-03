@@ -1367,7 +1367,8 @@ impl Scene {
     pub fn draw_list(&mut self, scale: f32) -> DrawList {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
-        let mut out = Out { list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new() };
+        let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
+        let mut out = Out { list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
@@ -1566,6 +1567,36 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     buffer
 }
 
+/// The part of an image on the surface, in its decoded pixels (x, y, w,
+/// h), when it reaches well past the surface and is drawn flat, its decode
+/// in proportion to its box; `None` to keep it whole.
+fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32; 2], flat: bool) -> Option<[u32; 4]> {
+    let (w, h) = (size[0] as f32, size[1] as f32);
+    if !flat || w <= 0.0 || h <= 0.0 || viewport[0] <= 0.0 || viewport[1] <= 0.0 {
+        return None;
+    }
+    let (sx, sy) = (decoded[0] as f32 / w, decoded[1] as f32 / h);
+    if (sx - sy).abs() > 0.01 {
+        return None;
+    }
+    let x0 = at[0].max(0.0);
+    let y0 = at[1].max(0.0);
+    let x1 = (at[0] + w).min(viewport[0]);
+    let y1 = (at[1] + h).min(viewport[1]);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    // Worth it only when a good part is off the surface.
+    if (x1 - x0) * (y1 - y0) > 0.9 * w * h {
+        return None;
+    }
+    let cx = (((x0 - at[0]) * sx).floor() as u32).min(decoded[0] - 1);
+    let cy = (((y0 - at[1]) * sy).floor() as u32).min(decoded[1] - 1);
+    let cw = ((((x1 - at[0]) * sx).ceil() as u32).min(decoded[0]) - cx).max(1);
+    let ch = ((((y1 - at[1]) * sy).ceil() as u32).min(decoded[1]) - cy).max(1);
+    Some([cx, cy, cw, ch])
+}
+
 struct Out<'a> {
     list: &'a mut DrawList,
     /// The fade toward the foot of the nearest clip that fades, physical
@@ -1591,6 +1622,9 @@ struct Out<'a> {
     raised: bool,
     /// The images drawn this frame.
     drawn_images: Vec<NodeId>,
+    /// The surface, physical pixels: an image reaching past it is decoded
+    /// only for what of it is on it.
+    viewport: [f32; 2],
 }
 
 impl Out<'_> {
@@ -2091,8 +2125,31 @@ fn collect_node(
                 let radius = n.radius.unwrap_or(0.0) * scale;
                 // The blur's radius in the decoded picture's own pixels.
                 let soften = n.soften * scale * dw as f32 / w.max(1) as f32;
-                if let Some((key, data)) = out.images.get(&source, dw, dh, n.fit, 0.0, soften) {
+                let at = [(origin[0] * scale).round(), (origin[1] * scale).round()];
+                // Reaching past the surface, as a wallpaper spanned over two
+                // monitors does on each: only the part on it is kept, in the
+                // decoded picture's own pixels. A spanned 3440 × 2520 was
+                // kept whole on both screens.
+                let crop = visible_part(at, [w, h], [dw, dh], out.viewport, out.transform == Rect::IDENTITY);
+                if let Some((key, data)) = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, crop) {
                     out.drawn_images.push(node);
+                    if let Some([cx, cy, cw, ch]) = crop {
+                        let (sx, sy) = (w as f32 / dw as f32, h as f32 / dh as f32);
+                        out.list.push_image(genoma_render::Image {
+                            key,
+                            pixels: data,
+                            width: cw,
+                            height: ch,
+                            origin: [at[0] + cx as f32 * sx, at[1] + cy as f32 * sy],
+                            size: [cw as f32 * sx, ch as f32 * sy],
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                            radius,
+                            alpha,
+                            clip: out.clip,
+                            fade: out.fade_of(),
+                            transform: out.transform,
+                        });
+                    } else {
                     let part = |shown: u32, decoded: u32| {
                         if shown >= decoded {
                             (0.0, 1.0)
@@ -2108,7 +2165,7 @@ fn collect_node(
                         pixels: data,
                         width: dw,
                         height: dh,
-                        origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                        origin: at,
                         size: [w as f32, h as f32],
                         uv: [u0, v0, u1, v1],
                         radius,
@@ -2117,6 +2174,7 @@ fn collect_node(
                         fade: out.fade_of(),
                         transform: out.transform,
                     });
+                    }
                 }
             }
         }

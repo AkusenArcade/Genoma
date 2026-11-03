@@ -30,6 +30,7 @@ mod shader;
 pub use particles::{Emitter, EmitterParams};
 pub use rect::Rect;
 pub use shader::Shader;
+pub use image::resident;
 
 /// Fonts, shared by the main thread (which shapes text to lay it out) and the
 /// render thread (which rasterises the glyphs). Shaping and drawing never run
