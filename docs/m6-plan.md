@@ -229,7 +229,29 @@ precise version.
       showed 760 against 460 MB: RSS, which counts Qt's shared libraries
       whole.)
 
-**7b. The package:**
+**7b. The package** (planned with Akusen 2026-11-03: an update must be all a
+person on the Quickshell version has to do, then a restart of the shell):
+- [ ] `genoma` on the AUR from a tag, `/usr/bin/genoma` (the scripts find
+      it on the PATH); the name checked free on the AUR first.
+- [ ] `bioma-shell` includes `genoma/`, depends on that precise `genoma`
+      version, and drops `quickshell`; the QML version leaves the package
+      for a backup folder of the repository.
+- [ ] `"runtime": "genoma"` in `config/default.json`, not in anybody's
+      override, so it holds for everyone; existing overrides stay valid.
+- [ ] The fallbacks without Quickshell: the lock to hyprlock (or
+      swaylock), the greeter to agreety; `lock.qml` and `greeter.qml`
+      paths out of `scripts/lock` and `greeter-sync`.
+- [ ] What the first start after the update already does by itself,
+      checked: `scripts/shell start` starts Genoma, `scripts/binds` moves
+      bioma-binds.kdl to `scripts/ipc`, the greeter's sync copies Genoma's
+      runtime into the greeter.
+- [ ] `post_upgrade` says to restart the shell (`scripts/shell restart`) or
+      log out: the Quickshell shell running goes on until then. The
+      release notes: a script of one's own calling `qs ipc call …` moves
+      to `scripts/ipc`.
+- [ ] The update tried on a clean machine, the laptop: the Quickshell
+      version from the AUR, then the new package, then a restart, and
+      everything on Genoma, lock and greeter included.
 - [ ] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
       starting Bioma on Genoma, depending on it; the person's
       `override.json` read unchanged; the Quickshell version moved to a
