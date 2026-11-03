@@ -221,6 +221,13 @@ precise version.
       (Bioma 5326942; the brightness awaits his monitors.)
 - [ ] His few days on it, Quickshell off; the cost measured whole, beside
       Quickshell's.
+      The cost, 2026-11-03, on his desktop at rest, the same layout, one
+      run after the other, 45 s to settle and 60 s measured: Bioma on
+      Quickshell 474 MB PSS, 8.43 % of a core, niri 12.08 %; Bioma on
+      Genoma 337 MB, 3.42 %, niri 5.35 %. The shell and niri together
+      20.5 % against 8.8 % of a core (−57 %); memory −29 %. (His monitor
+      showed 760 against 460 MB: RSS, which counts Qt's shared libraries
+      whole.)
 
 **7b. The package:**
 - [ ] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
