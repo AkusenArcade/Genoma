@@ -324,12 +324,16 @@ impl UserData for Process {
 /// come as the program writes them; `on_exit` after the last one, with the
 /// exit code (128 plus the signal for a process killed by one). `env` adds to
 /// the shell's environment: what must not be on a command line every user
-/// can read (`ps`) travels there.
+/// can read (`ps`) travels there. `cwd` is the directory it runs in, for a
+/// program whose configuration names files relative to it.
 pub fn process(host: &HostRef, t: Table) -> mlua::Result<Process> {
     let command: Vec<String> = t.get("command")?;
     let Some(program) = command.first() else { return Err(err("g.process: command is empty")) };
     let mut command_line = Command::new(program);
     command_line.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(cwd) = t.get::<Option<String>>("cwd")? {
+        command_line.current_dir(expand(&cwd));
+    }
     if let Some(env) = t.get::<Option<Table>>("env")? {
         for pair in env.pairs::<String, String>() {
             let (key, value) = pair?;
