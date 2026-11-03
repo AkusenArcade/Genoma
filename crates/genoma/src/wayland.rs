@@ -1059,6 +1059,13 @@ impl App {
         for node in ready {
             self.deliver(i, node, Input::Ready);
         }
+        // Sizes the layout changed: told after the frame, so content that
+        // answers by moving (a scroll brought back within reach) moves in
+        // the next one.
+        let sized = self.surfaces[i].scene.borrow_mut().take_sized();
+        for (node, w, h) in sized {
+            self.deliver(i, node, Input::Size(w, h));
+        }
 
         // What this surface takes moved, so a surface catching on the same
         // output cuts its holes again.

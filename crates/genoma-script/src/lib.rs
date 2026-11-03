@@ -86,6 +86,10 @@ pub enum Input {
     /// a picture that should appear only once it is there (a wallpaper's
     /// crossfade). Not pointer input, and never passed up to a parent.
     Ready,
+    /// A node's laid-out size, logical units, after the first layout and
+    /// whenever it changes: what only the layout knows (the height of a
+    /// column of wrapped text). Not pointer input, never passed up.
+    Size(f32, f32),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -105,13 +109,14 @@ impl Input {
             Input::Drag(..) => "on_drag",
             Input::Move(..) => "on_move",
             Input::Ready => "on_ready",
+            Input::Size(..) => "on_size",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_wheel", "on_fling", "on_outside", "on_key"];
 
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
@@ -1127,6 +1132,7 @@ impl Script {
                         f.call::<()>((lx, ly))
                     }
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
+                    Input::Size(w, h) => f.call::<()>((*w, *h)),
                 };
                 if let Err(e) = result {
                     log::error!("{name}: {e}");
@@ -1135,7 +1141,7 @@ impl Script {
             }
             // Hover stays with its own node: entering a child is not
             // entering every ancestor again.
-            if matches!(input, Input::Hover(_) | Input::Ready) {
+            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..)) {
                 return;
             }
             at = scene.borrow().parent(id);
@@ -2182,7 +2188,9 @@ fn mount(
                 return Err(err(format!("{key} wants a function")));
             };
             handlers.borrow_mut().entry((target, node)).or_default().insert(name, f);
-            if !matches!(name, "on_outside" | "on_key" | "on_ready") {
+            if name == "on_size" {
+                scene.borrow_mut().watch_size(node);
+            } else if !matches!(name, "on_outside" | "on_key" | "on_ready") {
                 scene.borrow_mut().set_interactive(node, true);
             }
             continue;

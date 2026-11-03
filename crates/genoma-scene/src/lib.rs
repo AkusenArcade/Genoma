@@ -488,6 +488,11 @@ pub struct Scene {
     /// those that got there in the last frame, for `on_ready`.
     ready: std::collections::HashSet<NodeId>,
     newly_ready: Vec<NodeId>,
+    /// Nodes whose laid-out size is reported, with the size last told
+    /// (none before the first layout), and the changes since the last take,
+    /// for `on_size`.
+    sized: std::collections::HashMap<NodeId, Option<[f32; 2]>>,
+    newly_sized: Vec<(NodeId, f32, f32)>,
 }
 
 /// A shape the compositor blurs behind, logical units.
@@ -522,6 +527,8 @@ impl Scene {
             blur: Vec::new(),
             ready: Default::default(),
             newly_ready: Vec::new(),
+            sized: Default::default(),
+            newly_sized: Vec::new(),
         }
     }
 
@@ -534,6 +541,20 @@ impl Scene {
     /// what `on_ready` is told.
     pub fn take_ready(&mut self) -> Vec<NodeId> {
         std::mem::take(&mut self.newly_ready)
+    }
+
+    /// Reports `node`'s laid-out size from the next layout on, and again
+    /// whenever it changes: content whose height only the layout knows (a
+    /// page of wrapped text in a scrolling well).
+    pub fn watch_size(&mut self, node: NodeId) {
+        self.sized.entry(node).or_insert(None);
+        self.dirty = true;
+    }
+
+    /// The watched nodes whose size changed in the layouts since the last
+    /// take, with their new width and height: what `on_size` is told.
+    pub fn take_sized(&mut self) -> Vec<(NodeId, f32, f32)> {
+        std::mem::take(&mut self.newly_sized)
     }
 
     pub fn root(&self) -> NodeId {
@@ -769,6 +790,8 @@ impl Scene {
         }
         self.animations.retain(|a| a.node != node);
         self.movers.retain(|&m| m != node);
+        self.sized.remove(&node);
+        self.newly_sized.retain(|&(n, ..)| n != node);
         let _ = self.tree.remove(node);
         self.dirty = true;
     }
@@ -1363,6 +1386,15 @@ impl Scene {
             height: height.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
         };
         self.tree.compute_layout_with_measure(self.root, space, measure).expect("layout");
+        for (&node, told) in self.sized.iter_mut() {
+            let Ok(l) = self.tree.layout(node) else { continue };
+            let now = [l.size.width, l.size.height];
+            if *told != Some(now) {
+                *told = Some(now);
+                self.newly_sized.retain(|&(n, ..)| n != node);
+                self.newly_sized.push((node, now[0], now[1]));
+            }
+        }
         let size = self.tree.layout(self.root).expect("root layout").size;
         (size.width, size.height)
     }
