@@ -73,6 +73,8 @@ pub struct Polkit {
     /// The request being answered, if any.
     pub request: Signal<Option<Request>>,
     answers: Answers,
+    /// What `start` was given, for `retry`.
+    started: std::cell::RefCell<Option<(Bus, Sender<Update>, Subject)>>,
 }
 
 impl Default for Polkit {
@@ -82,6 +84,7 @@ impl Default for Polkit {
             error: Signal::new(String::new()),
             request: Signal::new(None),
             answers: Arc::default(),
+            started: std::cell::RefCell::new(None),
         }
     }
 }
@@ -236,10 +239,26 @@ impl Polkit {
 
     /// Serves the agent and registers it for `subject`.
     pub fn start(&self, bus: &Bus, post: Sender<Update>, subject: Subject) {
+        *self.started.borrow_mut() = Some((bus.clone(), post.clone(), subject.clone()));
+        self.register(bus, post, subject);
+    }
+
+    /// Registers again, when the agent is not: another agent that held the
+    /// session has let go of it (Bioma's setup hands it over).
+    pub fn retry(&self) {
+        if self.registered.get_untracked().unwrap_or(false) {
+            return;
+        }
+        let Some((bus, post, subject)) = self.started.borrow().clone() else { return };
+        self.register(&bus, post, subject);
+    }
+
+    fn register(&self, bus: &Bus, post: Sender<Update>, subject: Subject) {
         let answers = self.answers.clone();
         bus.spawn("polkit", async move {
             let result: zbus::Result<()> = async {
                 let conn = bus::system().await?;
+                // Served once: a retry finds it there.
                 conn.object_server().at(AGENT_PATH, Agent { post: post.clone(), answers }).await?;
                 let (kind, details): (&str, HashMap<&str, Variant<'_>>) = match subject {
                     Subject::Session => {

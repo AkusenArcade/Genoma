@@ -850,6 +850,12 @@ impl UserData for PolkitRef {
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // polkit:retry(): registers again when not registered, after another
+        // agent has let the session go.
+        methods.add_method("retry", |_, this, ()| {
+            this.0.retry();
+            Ok(())
+        });
         // polkit:respond(cookie, password); polkit:cancel(cookie).
         methods.add_method("respond", |_, this, (cookie, answer): (String, String)| {
             this.0.respond(&cookie, answer);
