@@ -192,7 +192,7 @@ to the AUR as `genoma`, built from tags; `bioma-shell` depends on a
 precise version.
 
 **7a. Genoma alone** (Bioma's `genoma/PORT.md` keeps the detail):
-- [ ] The key: `scripts/bioma` starts Genoma, and Genoma draws every block
+- [x] The key: `scripts/bioma` starts Genoma, and Genoma draws every block
       whatever its own `runtime`; Quickshell, if started anyway, draws
       nothing.
 - [ ] One way in from outside: `scripts/ipc <target> <function> …`, sent
