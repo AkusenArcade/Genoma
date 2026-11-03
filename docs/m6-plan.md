@@ -201,8 +201,9 @@ precise version.
       Quickshell's `shell.qml` answers (cell, capture, actions,
       performance, audio, brightness, media, timer, sounds, …). Done
       (Bioma 0efcbcf) but for brightness, which comes with the OSD.
-- [ ] The names a session has one owner of: notifications, the polkit
-      agent, the tray's watcher.
+- [x] The names a session has one owner of: notifications, the polkit
+      agent, the tray's watcher. (Genoma b8fe4fb: a name let go by another
+      shell is taken.)
 - [ ] The look acting on the desktop: matugen and the templates, gsettings
       (icons, cursors, the proxy), the cursor theme's slots, niri's blur.
 - [ ] The Locker: logind's Lock, the idle lock, the lock before sleep and
