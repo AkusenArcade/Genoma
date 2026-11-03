@@ -47,6 +47,7 @@ use smithay_client_toolkit::reexports::{
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter_or("GENOMA_LOG", "info,zbus=warn,tracing=warn")).init();
+    take_name();
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("types") => print!("{}", genoma_scene::luau_definitions()),
@@ -55,6 +56,24 @@ fn main() {
         Some("polkit-test") => polkit_test(),
         Some("ipc") => ipc::call(std::env::args().skip(2).collect()),
         other => run(PathBuf::from(other.unwrap_or("examples/clock")), std::env::args().nth(2)),
+    }
+}
+
+/// The process goes by what it was started as: a shell started with
+/// `exec -a bioma genoma …` is `bioma` to ps, top and pgrep, not the
+/// toolkit it runs on. Genoma is the toolkit; what it runs is the program.
+/// The threads Genoma makes keep their own names (genoma-render, …).
+fn take_name() {
+    let Some(first) = std::env::args_os().next() else { return };
+    let path = PathBuf::from(first);
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return };
+    if name.is_empty() || name == "genoma" {
+        return;
+    }
+    // The kernel keeps fifteen bytes of it.
+    let short: String = name.chars().take(15).collect();
+    if let Ok(name) = std::ffi::CString::new(short) {
+        let _ = rustix::thread::set_name(&name);
     }
 }
 
