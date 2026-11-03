@@ -53,6 +53,7 @@ sources.
 | ~~Where the pointer is~~: done 2026-10-30: `on_move(x, y)` to the node under the pointer as it enters a surface and as it moves, local to whichever node handles it (entering included, so a surface that starts taking input under a still pointer learns where it is) | the quick actions' ring, summoned at the pointer and pointed by direction |
 | ~~A picture blurred, and told when it is there~~: done 2026-10-30: `soften` on an image (blurred once as it is decoded, nothing per frame) and `on_ready` (its pixels drawn for the first time since `src` was set) | the wallpaper's backdrop behind niri's overview, and its crossfade |
 | Drag and drop | organisms' arrange mode (on `on_drag`) |
+| ~~Surfaces that follow the configuration~~: done 2026-11-03: a surface's `present = function(output)` (asleep: one unit, no zone, no input, no blur, tree kept) and `reserve = function(output)`; `fluid = true` hands the content a size that follows the area instead of building it again; an area change builds only that surface again; `g.map(items, key, make)` and `g.cleanup(fn)`; a capsule's `halo` | Bioma's membranes, tissues and cells followed live; auto-hide |
 
 ## Steps, in dependency order
 

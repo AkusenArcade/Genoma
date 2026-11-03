@@ -49,6 +49,112 @@ pub fn computed(f: Function) -> Computed {
     }))
 }
 
+// ---- g.map ---------------------------------------------------------------------
+
+struct Mapped {
+    key: String,
+    scope: genoma_core::reactive::Scope,
+    item: Signal<LuaValue>,
+    index: Signal<f64>,
+    made: LuaValue,
+}
+
+/// `g.map(items, key, make)`: what `make(item, index)` made for each of
+/// `items()`, in their order, kept by `key(item)`. A key still there keeps
+/// what was made for it, and is handed the new item and index as getters;
+/// only a new key is made, in a scope of its own, and a key gone has its
+/// scope disposed. Read as a function, by bindings too. What `g.each` does
+/// for nodes, for things that are not nodes: a band's cells, which must
+/// outlive a change to the list that holds them.
+pub fn map(lua: &Lua, (items, key, make): (Function, Function, Function)) -> mlua::Result<Function> {
+    let rows: Rc<RefCell<Vec<Mapped>>> = Rc::default();
+    // Detached from the memo, or each run would dispose them; the owner
+    // the map was made in disposes them instead.
+    on_cleanup({
+        let rows = rows.clone();
+        move || {
+            for r in rows.borrow_mut().drain(..) {
+                r.scope.dispose();
+            }
+        }
+    });
+    let last: Rc<RefCell<Option<LuaValue>>> = Rc::default();
+    let weak = lua.weak();
+    let memo = Memo::new(move || {
+        let Some(lua) = weak.try_upgrade() else { return LuaValue::Nil };
+        let list = match items.call::<mlua::Table>(()) {
+            Ok(list) => list,
+            Err(e) => {
+                log::error!("g.map items: {e}");
+                return last.borrow().clone().unwrap_or(LuaValue::Nil);
+            }
+        };
+        let values: Vec<LuaValue> = list.sequence_values::<LuaValue>().filter_map(Result::ok).collect();
+        untracked(|| {
+            let mut old = std::mem::take(&mut *rows.borrow_mut());
+            let before: Vec<String> = old.iter().map(|r| r.key.clone()).collect();
+            let mut next: Vec<Mapped> = Vec::with_capacity(values.len());
+            for (i, value) in values.into_iter().enumerate() {
+                let k = match key.call::<LuaValue>(value.clone()).and_then(|k| k.to_string()) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        log::error!("g.map key: {e}");
+                        continue;
+                    }
+                };
+                if next.iter().any(|r| r.key == k) {
+                    log::error!("g.map: key {k} twice; the second is left out");
+                    continue;
+                }
+                let index = (i + 1) as f64;
+                if let Some(at) = old.iter().position(|r| r.key == k) {
+                    let r = old.swap_remove(at);
+                    r.item.set(value);
+                    r.index.set(index);
+                    next.push(r);
+                    continue;
+                }
+                let (scope, made) = genoma_core::reactive::detached(|| {
+                    genoma_core::reactive::Scope::new(|| -> mlua::Result<_> {
+                        let item = Signal::new(value);
+                        let index = Signal::new(index);
+                        let read_item = lua.create_function(move |_, ()| Ok(item.try_get().unwrap_or(LuaValue::Nil)))?;
+                        let read_index = lua.create_function(move |_, ()| Ok(index.try_get().unwrap_or(0.0)))?;
+                        let made: LuaValue = make.call((read_item, read_index))?;
+                        Ok((made, item, index))
+                    })
+                });
+                match made {
+                    Ok((made, item, index)) => next.push(Mapped { key: k, scope, item, index, made }),
+                    Err(e) => {
+                        log::error!("g.map make {k}: {e}");
+                        scope.dispose();
+                    }
+                }
+            }
+            for r in old {
+                r.scope.dispose();
+            }
+            let same = before.len() == next.len() && before.iter().zip(&next).all(|(a, r)| *a == r.key);
+            let out = match (&*last.borrow(), same) {
+                (Some(previous), true) => Some(previous.clone()),
+                _ => None,
+            };
+            let out = out.unwrap_or_else(|| {
+                let t = lua.create_table().expect("table");
+                for (i, r) in next.iter().enumerate() {
+                    let _ = t.raw_set(i + 1, r.made.clone());
+                }
+                LuaValue::Table(t)
+            });
+            *rows.borrow_mut() = next;
+            *last.borrow_mut() = Some(out.clone());
+            out
+        })
+    });
+    lua.create_function(move |_, ()| Ok(memo.try_get().unwrap_or(LuaValue::Nil)))
+}
+
 // ---- g.animated ------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq)]

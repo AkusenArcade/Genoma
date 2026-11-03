@@ -974,6 +974,38 @@ pub struct Script {
     /// The outputs at the moment of the load: a load is evaluated again
     /// whenever they change.
     outputs: Rc<RefCell<Vec<OutputInfo>>>,
+    /// What each target's surface asks for now, by target: whether it has
+    /// anything to be (`present`) and the strip it keeps (`reserve`), when
+    /// the description gave either as a function of the output; and whether
+    /// that changed since the runtime last took it.
+    wishes: Rc<RefCell<Vec<Wish>>>,
+    wishes_changed: Rc<std::cell::Cell<bool>>,
+    /// The mounted load's surface contents, each target's own scope, and
+    /// the load's owner: one target can be built again alone.
+    contents: Vec<LuaValue>,
+    target_scopes: Vec<Option<Scope>>,
+    load_owner: Option<usize>,
+    /// By surface description: whether its content takes its size as it
+    /// changes (`fluid = true`); and by target, that size, for those that do.
+    fluid: Vec<bool>,
+    sizes: Vec<Option<Signal<(f64, f64)>>>,
+}
+
+/// A surface's wish, as its description's functions answer it: `present`
+/// false puts the surface to sleep (nothing drawn, nothing kept, nothing
+/// taking the pointer; its tree stays mounted), and `reserve`, when the
+/// function gave one, is the strip to keep windows out of (`None` for
+/// none) in place of the description's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wish {
+    pub present: bool,
+    pub reserve: Option<Option<i32>>,
+}
+
+impl Default for Wish {
+    fn default() -> Self {
+        Wish { present: true, reserve: None }
+    }
 }
 
 /// One tree to mount: the output it is for, and the scene it goes into.
@@ -1007,7 +1039,56 @@ impl Script {
             icon_dirs: Rc::default(),
             scenes: Vec::new(),
             outputs: Rc::default(),
+            wishes: Rc::default(),
+            wishes_changed: Rc::default(),
+            contents: Vec::new(),
+            target_scopes: Vec::new(),
+            load_owner: None,
+            fluid: Vec::new(),
+            sizes: Vec::new(),
         }
+    }
+
+    /// Builds target `index`'s tree again for its area, alone: a surface the
+    /// compositor gave another area (another surface took or let go of a
+    /// zone) is laid out for what it has, and nothing else in the interface
+    /// is touched. On an error its last tree stays.
+    pub fn remount(&mut self, index: usize, target: &Target) -> Result<(), String> {
+        let (spec, output, scene, size) = target;
+        // A fluid surface is told its new size, and its tree follows it.
+        if let (Some(Some(signal)), Some((w, h))) = (self.sizes.get(index), size) {
+            signal.set((*w as f64, *h as f64));
+            return Ok(());
+        }
+        let Some(content) = self.contents.get(*spec).cloned() else { return Err("a surface with no description".into()) };
+        if let Some(old) = self.target_scopes.get_mut(index).and_then(Option::take) {
+            old.dispose();
+        }
+        self.handlers.borrow_mut().retain(|(t, _), _| *t != index);
+        let handlers = self.handlers.clone();
+        let (scope, result) = owned_by(self.load_owner, || Scope::new(|| build_tree(&content, output, size, None, scene, &handlers, index)));
+        match result {
+            Ok(holder) => {
+                let mut s = scene.borrow_mut();
+                let root = s.root();
+                s.clear();
+                s.append(root, holder);
+                s.set_icon_dirs(self.icon_dirs.borrow().clone());
+                if let Some(slot) = self.target_scopes.get_mut(index) {
+                    *slot = Some(scope);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                scope.dispose();
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Every target's wish, once something changed since the last call.
+    pub fn take_wishes(&self) -> Option<Vec<Wish>> {
+        self.wishes_changed.replace(false).then(|| self.wishes.borrow().clone())
     }
 
     /// What `g.outputs()` answers in the next load.
@@ -1163,40 +1244,84 @@ impl Script {
             contents.push(content);
         }
         let handlers: Handlers = Rc::default();
-        let (scope, result) = Scope::new(|| -> mlua::Result<Vec<genoma_scene::NodeId>> {
+        let (wishes, wishes_changed) = (self.wishes.clone(), self.wishes_changed.clone());
+        let fluid: Vec<bool> = surfaces.iter().map(|t| t.get::<Option<bool>>("fluid").ok().flatten() == Some(true)).collect();
+        let (scope, result) = Scope::new(|| -> mlua::Result<(Vec<genoma_scene::NodeId>, Vec<Scope>, Option<usize>, Vec<Option<Signal<(f64, f64)>>>)> {
+            let load_owner = current_owner();
             let mut holders = Vec::new();
+            // Each target's tree in a scope of its own, inside the load's:
+            // one can be built again alone.
+            let mut target_scopes: Vec<Scope> = Vec::new();
+            let mut sizes: Vec<Option<Signal<(f64, f64)>>> = Vec::new();
             for (index, (spec, output, scene, size)) in targets.iter().enumerate() {
                 let Some(content) = contents.get(*spec) else { return Err(err("a surface with no description")) };
-                let tree: Table = match content {
-                    // f(output, { width, height }), the size when the
-                    // compositor has said it.
-                    LuaValue::Function(f) => {
-                        let lua = f.weak_lua().upgrade();
-                        let info = match size {
-                            Some((w, h)) => {
-                                let t = lua.create_table()?;
-                                t.set("width", *w)?;
-                                t.set("height", *h)?;
-                                LuaValue::Table(t)
-                            }
-                            None => LuaValue::Nil,
-                        };
-                        f.call((output.clone(), info))?
-                    }
-                    LuaValue::Table(t) => t.clone(),
-                    _ => return Err(err("g.surface holds one node, or a function returning one")),
+                let signal = match (fluid.get(*spec), size) {
+                    (Some(true), Some((w, h))) => Some(Signal::new((*w as f64, *h as f64))),
+                    _ => None,
                 };
-                let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
-                // The holder takes the surface's whole span, so content that
-                // grows (a membrane's row) can reach the far edge.
-                let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
-                mount(scene, &handlers, index, &tree, holder)?;
-                holders.push(holder);
+                sizes.push(signal);
+                let (target_scope, built) = Scope::new(|| build_tree(content, output, size, signal, scene, &handlers, index));
+                match built {
+                    Ok(holder) => {
+                        holders.push(holder);
+                        target_scopes.push(target_scope);
+                    }
+                    Err(e) => {
+                        target_scope.dispose();
+                        return Err(e);
+                    }
+                }
             }
-            Ok(holders)
+            // present = function(output), reserve = function(output): asked
+            // again whenever what they read changes.
+            *wishes.borrow_mut() = vec![Wish::default(); targets.len()];
+            wishes_changed.set(true);
+            for (index, (spec, output, _, _)) in targets.iter().enumerate() {
+                let Some(surface) = surfaces.get(*spec) else { continue };
+                let present = surface.get::<Option<Function>>("present")?;
+                let reserve = match surface.get::<LuaValue>("reserve")? {
+                    LuaValue::Function(f) => Some(f),
+                    _ => None,
+                };
+                if present.is_none() && reserve.is_none() {
+                    continue;
+                }
+                let (wishes, changed, output) = (wishes.clone(), wishes_changed.clone(), output.clone());
+                Effect::new(move || {
+                    let is_present = match &present {
+                        Some(f) => f.call::<Option<bool>>(output.clone()).unwrap_or_else(|e| {
+                            log::error!("g.surface present: {e}");
+                            Some(true)
+                        }) != Some(false),
+                        None => true,
+                    };
+                    let reserving = reserve.as_ref().map(|f| match f.call::<LuaValue>(output.clone()) {
+                        Ok(LuaValue::Integer(n)) if n > 0 => Some(n as i32),
+                        Ok(LuaValue::Number(n)) if n > 0.0 => Some(n.round() as i32),
+                        Ok(_) => None,
+                        Err(e) => {
+                            log::error!("g.surface reserve: {e}");
+                            None
+                        }
+                    });
+                    let wish = Wish { present: is_present, reserve: reserving };
+                    let mut all = wishes.borrow_mut();
+                    if let Some(w) = all.get_mut(index) {
+                        if *w != wish {
+                            *w = wish;
+                            changed.set(true);
+                        }
+                    }
+                });
+            }
+            Ok((holders, target_scopes, load_owner, sizes))
         });
         match result {
-            Ok(holders) => {
+            Ok((holders, target_scopes, load_owner, sizes)) => {
+                self.sizes = sizes;
+                self.fluid = fluid;
+                self.target_scopes = target_scopes.into_iter().map(Some).collect();
+                self.load_owner = load_owner;
                 if let Some(old) = self.scope.take() {
                     old.dispose();
                 }
@@ -1211,6 +1336,7 @@ impl Script {
                     s.set_icon_dirs(self.icon_dirs.borrow().clone());
                 }
                 self.scenes = targets.iter().map(|(_, _, s, _)| s.clone()).collect();
+                self.contents = contents;
                 self.scope = Some(scope);
                 self.lua = lua;
                 // The map itself, not its contents: a keyed list adds and
@@ -1292,6 +1418,21 @@ impl Script {
         // g.computed(fn), g.animated(value), g.json_set(text, path, value):
         // an interface's own modules (Bioma's core/ singletons).
         g.set("computed", lua.create_function(|_, f: Function| Ok(values::computed(f)))?)?;
+        // g.map(items, key, make): a keyed list of things made once per key.
+        g.set("map", lua.create_function(values::map)?)?;
+        // g.cleanup(fn): fn runs when what is being made now is disposed (a
+        // row of g.map or g.each gone, the load replaced).
+        g.set(
+            "cleanup",
+            lua.create_function(|_, f: Function| {
+                on_cleanup(move || {
+                    if let Err(e) = f.call::<()>(()) {
+                        log::error!("g.cleanup: {e}");
+                    }
+                });
+                Ok(())
+            })?,
+        )?;
         let host = self.host.clone();
         g.set("animated", lua.create_function(move |_, v: LuaValue| values::animated(&host, v))?)?;
         g.set("json_set", lua.create_function(values::json_set)?)?;
@@ -1927,6 +2068,63 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
 }
 
 /// Creates the node `t` describes under `parent`, with its bindings.
+/// One target's tree: its surface's content (a node, or a function of the
+/// output and its size) mounted under a holder of its own, not yet in the
+/// scene's root.
+fn build_tree(
+    content: &LuaValue,
+    output: &Option<String>,
+    size: &Option<(u32, u32)>,
+    fluid: Option<Signal<(f64, f64)>>,
+    scene: &Rc<RefCell<Scene>>,
+    handlers: &Handlers,
+    index: usize,
+) -> mlua::Result<genoma_scene::NodeId> {
+    let tree: Table = match content {
+        // f(output, { width, height }), the size when the compositor has
+        // said it. A fluid surface's size is read through, so a binding that
+        // read it follows a new area instead of the tree being built again.
+        LuaValue::Function(f) => {
+            let lua = f.weak_lua().upgrade();
+            let info = match (size, fluid) {
+                (Some(_), Some(signal)) => {
+                    let t = lua.create_table()?;
+                    let meta = lua.create_table()?;
+                    meta.set(
+                        "__index",
+                        lua.create_function(move |_, (_, key): (LuaValue, String)| {
+                            let (w, h) = signal.try_get().unwrap_or((0.0, 0.0));
+                            Ok(match key.as_str() {
+                                "width" => LuaValue::Number(w),
+                                "height" => LuaValue::Number(h),
+                                _ => LuaValue::Nil,
+                            })
+                        })?,
+                    )?;
+                    t.set_metatable(Some(meta))?;
+                    LuaValue::Table(t)
+                }
+                (Some((w, h)), None) => {
+                    let t = lua.create_table()?;
+                    t.set("width", *w)?;
+                    t.set("height", *h)?;
+                    LuaValue::Table(t)
+                }
+                (None, _) => LuaValue::Nil,
+            };
+            f.call((output.clone(), info))?
+        }
+        LuaValue::Table(t) => t.clone(),
+        _ => return Err(err("g.surface holds one node, or a function returning one")),
+    };
+    let holder = scene.borrow_mut().create(Kind::Box, Role::Group);
+    // The holder takes the surface's whole span, so content that grows (a
+    // membrane's row) can reach the far edge.
+    let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
+    mount(scene, handlers, index, &tree, holder)?;
+    Ok(holder)
+}
+
 fn mount(
     scene: &Rc<RefCell<Scene>>,
     handlers: &Handlers,

@@ -15,7 +15,7 @@ use std::{
 
 use genoma_render::{Fonts, Renderer, SurfaceId};
 use genoma_scene::{Blur, NodeId, Scene};
-use genoma_script::{Input, SurfaceSpec, Target};
+use genoma_script::{Input, SurfaceSpec, Target, Wish};
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
@@ -170,6 +170,14 @@ struct Surface {
     access_checked: Option<Instant>,
     /// Since when a lock surface's first frame has waited for its pictures.
     held: Option<Instant>,
+    /// Nothing to be (its description's `present` said so): one logical
+    /// unit, keeping no strip, taking no pointer, blurring nothing, its tree
+    /// still mounted. A membrane on an edge nobody has configured costs this
+    /// much, and comes back the moment the configuration names it.
+    asleep: bool,
+    /// The strip its `reserve` function asks for, in place of the
+    /// description's; `None` while it has none.
+    reserve_wish: Option<Option<i32>>,
 }
 
 pub struct App {
@@ -217,6 +225,10 @@ pub struct App {
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
     input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
+    /// Surfaces the compositor gave another area than their trees were
+    /// built for (another surface took or let go of a zone): each is built
+    /// again on its own, the rest of the interface untouched.
+    areas_changed: Vec<SurfaceId>,
     /// The last drag not yet told: a mouse moves a thousand times a second,
     /// and a script's drag handler may move half a surface each time. Told
     /// once per turn of the loop, only where the pointer is now, and before
@@ -281,6 +293,7 @@ impl App {
             modifiers: Modifiers::default(),
             input: None,
             drag: None,
+            areas_changed: Vec::new(),
             outputs_changed: false,
             started: Instant::now(),
             toplevel_list: None,
@@ -631,6 +644,8 @@ impl App {
             hovered: None,
             pressed: None,
             pressed_at: (0.0, 0.0),
+            asleep: false,
+            reserve_wish: None,
             strokes: Vec::new(),
             tall: false,
             output_size,
@@ -655,6 +670,9 @@ impl App {
     /// The size to ask the compositor for: the content's, with 0 for a
     /// spanned width, which the compositor fills.
     fn measure(&mut self, i: usize) -> (u32, u32) {
+        if self.surfaces[i].asleep {
+            return (1, 1);
+        }
         let spans = self.spans(i);
         let s = &mut self.surfaces[i];
         let width = (spans && s.configured).then_some(s.logical.0 as f32);
@@ -667,10 +685,17 @@ impl App {
         // A full surface is its output's size from the start and stays so:
         // resizing a layer surface draws its content once at each size.
         let full = self.specs.get(self.surfaces[i].spec).is_some_and(|spec| spec.full);
+        // Anchored above and below, a full surface asks for no height and is
+        // given what is left between the other surfaces' zones, as it is
+        // given its width: asked for its output's height, niri cut it down
+        // when a zone appeared and did not give it back when the zone went.
+        let tall = self.specs.get(self.surfaces[i].spec).is_some_and(|spec| {
+            spec.anchor.iter().any(|a| a == "top") && spec.anchor.iter().any(|a| a == "bottom")
+        });
         let s = &mut self.surfaces[i];
         if full {
             if let Some((ow, oh)) = s.output_size {
-                return (if spans { 0 } else { ow }, oh);
+                return (if spans { 0 } else { ow }, if tall { 0 } else { oh });
             }
         }
         let h = match (s.tall, s.output_size) {
@@ -711,7 +736,12 @@ impl App {
         // The reserved strip stays the membrane's, however tall the surface
         // grows while a cell is open.
         match spec.reserve_strip {
+            _ if s.asleep => layer.set_exclusive_zone(0),
+            // A strip its `reserve` asks for comes first: a membrane over
+            // every zone while it keeps none keeps its own when it has one.
+            _ if s.reserve_wish.is_some_and(|w| w.is_some()) => layer.set_exclusive_zone(s.reserve_wish.flatten().unwrap_or(0)),
             _ if spec.above_zones => layer.set_exclusive_zone(-1),
+            _ if s.reserve_wish.is_some() => layer.set_exclusive_zone(0),
             Some(strip) => layer.set_exclusive_zone(if spec.reserve { strip } else { 0 }),
             None if !s.tall => layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
             None => {}
@@ -724,6 +754,37 @@ impl App {
         });
         layer.commit();
         s.dirty = true;
+    }
+
+    /// What each surface's description asks for now, by target (the order
+    /// [`App::apply`] returned): a surface that goes to sleep or wakes, or
+    /// keeps another strip, is placed again.
+    pub fn apply_wishes(&mut self, wishes: &[Wish]) {
+        for (i, wish) in wishes.iter().enumerate() {
+            let Some(s) = self.surfaces.get_mut(i) else { break };
+            let asleep = !wish.present;
+            if s.asleep == asleep && s.reserve_wish == wish.reserve {
+                continue;
+            }
+            log::debug!("surface {}: {}", s.id, if asleep { "asleep" } else { "awake" });
+            s.asleep = asleep;
+            s.reserve_wish = wish.reserve;
+            self.place(i);
+        }
+    }
+
+    /// The surfaces whose area changed, once, each as the target to build
+    /// again (its index among the targets, and the target).
+    pub fn take_areas_changed(&mut self) -> Vec<(usize, Target)> {
+        let ids = std::mem::take(&mut self.areas_changed);
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(i) = self.surfaces.iter().position(|s| s.id == id) else { continue };
+            let s = &mut self.surfaces[i];
+            s.built = s.area.or(s.output_size);
+            out.push((i, (s.spec, s.output.clone(), s.scene.clone(), s.built)));
+        }
+        out
     }
 
     /// Whether the outputs changed under an interface that spans them all,
@@ -860,7 +921,7 @@ impl App {
                 Blur::Outline(points) => outline(&mut shapes, points, s.logical.1 as i32),
             }
         }
-        let shapes = within(shapes, s.logical);
+        let shapes = if s.asleep { Vec::new() } else { within(shapes, s.logical) };
         if shapes != s.blurred {
             if let (Some(effect), Ok(region)) = (&s.effect, Region::new(compositor)) {
                 for &[x, y, w, h] in &shapes {
@@ -883,7 +944,7 @@ impl App {
                 .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
                 .collect()
         };
-        let inputs = within(inputs, s.logical);
+        let inputs = if s.asleep { Vec::new() } else { within(inputs, s.logical) };
         if s.inputs.as_ref() != Some(&inputs) || s.holes != holes {
             if let Ok(region) = Region::new(compositor) {
                 for &[x, y, w, h] in &inputs {
@@ -1222,9 +1283,12 @@ impl LayerShellHandler for App {
         // another shell's top bar got 56 px less, and its band was laid out
         // below the surface's end, out of sight. Built again for the size
         // given; the next configure gives the same and nothing follows.
-        if full && w > 0 && h > 0 && s.built.is_some() && s.built != Some((w, h)) {
+        // Asleep, it is one unit square: nothing to build for.
+        if full && !s.asleep && w > 0 && h > 0 && s.built.is_some() && s.built != Some((w, h)) {
             s.area = Some((w, h));
-            self.outputs_changed = true;
+            if !self.areas_changed.contains(&s.id) {
+                self.areas_changed.push(s.id);
+            }
         }
         s.configured = true;
         // A configure must be answered with a buffer, frame callback or not.

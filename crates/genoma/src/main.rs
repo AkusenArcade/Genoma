@@ -620,8 +620,13 @@ fn probe() {
 fn load(script: &RefCell<Script>, app: &mut wayland::App) -> Result<(), String> {
     script.borrow_mut().set_outputs(app.output_list());
     let specs = script.borrow_mut().evaluate()?;
+    // A load builds every tree for the area its surface has now.
+    let _ = app.take_areas_changed();
     let targets = app.apply(specs);
     script.borrow_mut().mount(&targets)?;
+    if let Some(wishes) = script.borrow().take_wishes() {
+        app.apply_wishes(&wishes);
+    }
     app.refit();
     Ok(())
 }
@@ -733,6 +738,16 @@ fn run(dir: PathBuf, entry: Option<String>) {
                     Ok(()) => log::info!("outputs or areas changed: surfaces fitted"),
                     Err(e) => log::error!("outputs changed, reload failed: {e}"),
                 }
+            }
+            // A surface given another area is built again alone.
+            for (i, target) in app.take_areas_changed() {
+                match script.borrow_mut().remount(i, &target) {
+                    Ok(()) => log::info!("surface {i}: fitted to its area {:?}", target.3),
+                    Err(e) => log::error!("surface {i}: building again failed, its last tree stays: {e}"),
+                }
+            }
+            if let Some(wishes) = script.borrow().take_wishes() {
+                app.apply_wishes(&wishes);
             }
             app.after_events();
         })
