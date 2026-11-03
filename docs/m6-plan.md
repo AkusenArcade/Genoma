@@ -204,8 +204,9 @@ precise version.
 - [x] The names a session has one owner of: notifications, the polkit
       agent, the tray's watcher. (Genoma b8fe4fb: a name let go by another
       shell is taken.)
-- [ ] The look acting on the desktop: matugen and the templates, gsettings
+- [x] The look acting on the desktop: matugen and the templates, gsettings
       (icons, cursors, the proxy), the cursor theme's slots, niri's blur.
+      (Bioma 092fef7, the proxy after it.)
 - [ ] The Locker: logind's Lock, the idle lock, the lock before sleep and
       its inhibitor, suspending after idle.
 - [ ] The greeter's sync, the clipboard's history, the sounds played,
