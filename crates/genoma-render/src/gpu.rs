@@ -156,6 +156,9 @@ impl Gpu {
 
     pub(crate) fn destroy_target(&mut self, id: SurfaceId) {
         self.targets.remove(&id);
+        if let Some(images) = &mut self.images {
+            images.forget(id);
+        }
     }
 
     pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
@@ -235,7 +238,7 @@ impl Gpu {
         let rects = self.rects.get_or_insert_with(|| rect::Pipeline::new(&self.device, format));
         rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects);
         let images = self.images.get_or_insert_with(|| image::Pipeline::new(&self.device, format));
-        images.upload(&self.device, &self.queue, [width as f32, height as f32], &list.images);
+        images.upload(id, &self.device, &self.queue, [width as f32, height as f32], &list.images);
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
         shaders.upload(&self.device, &self.queue, [width as f32, height as f32], &list.shaders);
         let particles = self.particles.get_or_insert_with(|| particles::Pipeline::new(&self.device, format));

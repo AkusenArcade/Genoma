@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use crate::SurfaceId;
+
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -86,6 +88,13 @@ pub(crate) struct Pipeline {
     /// Each key's texture, and the upload that last drew it.
     textures: HashMap<u64, (wgpu::BindGroup, u64)>,
     uploads: u64,
+    /// What each surface's last frame drew. The compositor keeps showing
+    /// that frame, and the surface may draw it again at any time with the
+    /// pixels already let go: a texture listed here is never dropped. A
+    /// still wallpaper drew nothing for a thousand uploads of the busy
+    /// surfaces, lost its picture, and showed black while it was decoded
+    /// again whenever anything made it draw (a settings page, a new picture).
+    shown: HashMap<SurfaceId, Vec<u64>>,
     quads: wgpu::Buffer,
     capacity: usize,
     draws: Vec<u64>,
@@ -200,6 +209,7 @@ impl Pipeline {
             sampler,
             textures: HashMap::new(),
             uploads: 0,
+            shown: HashMap::new(),
             quads,
             capacity,
             draws: Vec::new(),
@@ -217,8 +227,14 @@ impl Pipeline {
         })
     }
 
+    /// A surface gone: what it showed may go too.
+    pub(crate) fn forget(&mut self, id: SurfaceId) {
+        self.shown.remove(&id);
+    }
+
     pub(crate) fn upload(
         &mut self,
+        id: SurfaceId,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         viewport: [f32; 2],
@@ -231,10 +247,12 @@ impl Pipeline {
         self.uploads += 1;
         if self.uploads % 256 == 0 {
             let now = self.uploads;
-            self.textures.retain(|_, (_, used)| now - *used < 1024);
+            let shown: std::collections::HashSet<u64> = self.shown.values().flatten().copied().collect();
+            self.textures.retain(|key, (_, used)| now - *used < 1024 || shown.contains(key));
             let mut resident = RESIDENT.lock().unwrap();
             resident.retain(|key| self.textures.contains_key(key));
         }
+        self.shown.insert(id, images.iter().map(|i| i.key).collect());
         if images.is_empty() {
             return;
         }
