@@ -213,10 +213,12 @@ precise version.
 - [x] The greeter's sync, the clipboard's history, the sounds played,
       the power profile following the mains, the only printer made the
       default. (Bioma 6a195a1; the mains and the printer await hardware.)
-- [ ] What settings and the setup ask of Quickshell now (`monitors`,
+- [x] What settings and the setup ask of Quickshell now (`monitors`,
       `organisms`, `keybinds`, `niri`, `looks`, `presets`, `actions`,
-      `setup`), done by Genoma itself.
-- [ ] The OSD (volume, brightness, keyboard layout), and brightness.
+      `setup`), done by Genoma itself. (Bioma 75622a2, 5326942; the setup's
+      actions await a machine to run them on.)
+- [x] The OSD (volume, brightness, keyboard layout), and brightness.
+      (Bioma 5326942; the brightness awaits his monitors.)
 - [ ] His few days on it, Quickshell off; the cost measured whole, beside
       Quickshell's.
 
