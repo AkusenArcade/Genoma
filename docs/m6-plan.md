@@ -195,11 +195,12 @@ precise version.
 - [x] The key: `scripts/bioma` starts Genoma, and Genoma draws every block
       whatever its own `runtime`; Quickshell, if started anyway, draws
       nothing.
-- [ ] One way in from outside: `scripts/ipc <target> <function> …`, sent
+- [x] One way in from outside: `scripts/ipc <target> <function> …`, sent
       to whichever runtime runs; the keybinds template, `scripts/key` and
       the session's scripts go through it; Genoma answers every target
       Quickshell's `shell.qml` answers (cell, capture, actions,
-      performance, audio, brightness, media, timer, sounds, …).
+      performance, audio, brightness, media, timer, sounds, …). Done
+      (Bioma 0efcbcf) but for brightness, which comes with the OSD.
 - [ ] The names a session has one owner of: notifications, the polkit
       agent, the tray's watcher.
 - [ ] The look acting on the desktop: matugen and the templates, gsettings
