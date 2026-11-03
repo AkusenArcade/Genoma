@@ -142,7 +142,14 @@ struct Surface {
     /// Whether the surface last asked for the keyboard.
     keyboard: bool,
     hovered: Option<NodeId>,
+    /// The node the press landed on, and where that node was then: a drag
+    /// is told relative to it. A node carried by its own drag moves before
+    /// the frame lays it out again, and several motions arrive in one frame;
+    /// measured from where it is now, each motion counted the ones before it
+    /// again, and a carried organism ran away from the pointer faster and
+    /// faster, until its blur region overflowed niri's i32 (an abort).
     pressed: Option<NodeId>,
+    pressed_at: (f32, f32),
     /// The touchpad's recent movement: when, and how far, for the fling.
     strokes: Vec<(Instant, f64, f64)>,
     /// The surface covers its output: a cell is open, or closing.
@@ -210,6 +217,11 @@ pub struct App {
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
     input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
+    /// The last drag not yet told: a mouse moves a thousand times a second,
+    /// and a script's drag handler may move half a surface each time. Told
+    /// once per turn of the loop, only where the pointer is now, and before
+    /// anything else the pointer does (a release must follow its last drag).
+    drag: Option<(usize, NodeId, f32, f32)>,
     /// The outputs changed under an interface that spans them all: its
     /// trees are to be mounted again.
     outputs_changed: bool,
@@ -268,6 +280,7 @@ impl App {
             keyboard_seat: None,
             modifiers: Modifiers::default(),
             input: None,
+            drag: None,
             outputs_changed: false,
             started: Instant::now(),
             toplevel_list: None,
@@ -386,6 +399,8 @@ impl App {
             }
         }
         self.surfaces.retain(|s| !gone.contains(&s.id));
+        // A drag kept for a surface's index must not reach another.
+        self.drag = None;
     }
 
     /// A notification for the seconds the interface asks, asked again when
@@ -524,6 +539,8 @@ impl App {
             }
         }
         self.surfaces.retain(|s| !gone.contains(&s.id));
+        // A drag kept for a surface's index must not reach another.
+        self.drag = None;
         self.specs = specs;
         for (spec, output) in &wanted {
             if !self.surfaces.iter().any(|s| s.spec == *spec && &s.output == output) {
@@ -613,6 +630,7 @@ impl App {
             keyboard: false,
             hovered: None,
             pressed: None,
+            pressed_at: (0.0, 0.0),
             strokes: Vec::new(),
             tall: false,
             output_size,
@@ -718,6 +736,7 @@ impl App {
     /// out and asks for a frame. This is the only place a frame is asked for,
     /// apart from motion in flight.
     pub fn after_events(&mut self) {
+        self.flush_drag();
         self.sync_idle();
         for i in 0..self.surfaces.len() {
             let changed = self.surfaces[i].scene.borrow_mut().take_dirty();
@@ -833,12 +852,15 @@ impl App {
         for b in s.scene.borrow().blur_shapes() {
             match b {
                 Blur::Rounded(b) => {
-                    let [x, y, w, h, r] = b.map(|v| v.round() as i32);
+                    // Far beyond any screen is as good as the screen's edge,
+                    // and keeps the sums below from passing i32.
+                    let [x, y, w, h, r] = b.map(|v| v.clamp(-1.0e6, 1.0e6).round() as i32);
                     rounded(&mut shapes, x, y, w, h, r);
                 }
-                Blur::Outline(points) => outline(&mut shapes, points),
+                Blur::Outline(points) => outline(&mut shapes, points, s.logical.1 as i32),
             }
         }
+        let shapes = within(shapes, s.logical);
         if shapes != s.blurred {
             if let (Some(effect), Ok(region)) = (&s.effect, Region::new(compositor)) {
                 for &[x, y, w, h] in &shapes {
@@ -861,6 +883,7 @@ impl App {
                 .map(|r| [r[0].floor() as i32, r[1].floor() as i32, r[2].ceil() as i32, r[3].ceil() as i32])
                 .collect()
         };
+        let inputs = within(inputs, s.logical);
         if s.inputs.as_ref() != Some(&inputs) || s.holes != holes {
             if let Ok(region) = Region::new(compositor) {
                 for &[x, y, w, h] in &inputs {
@@ -996,6 +1019,12 @@ impl App {
         self.surfaces.iter().position(|s| s.role.wl_surface() == wl)
     }
 
+    fn flush_drag(&mut self) {
+        if let Some((i, node, x, y)) = self.drag.take() {
+            self.deliver(i, node, Input::Drag(x, y));
+        }
+    }
+
     fn deliver(&mut self, i: usize, node: NodeId, input: Input) {
         if let Some(f) = self.input.as_mut() {
             f(i, node, input);
@@ -1037,11 +1066,28 @@ fn rounded(region: &mut Vec<[i32; 4]>, x: i32, y: i32, w: i32, h: i32, r: i32) {
     }
 }
 
+/// Rectangles cut to the surface, the empty ones left out. A region is the
+/// compositor's to add up, and niri 26.04 aborts when a rectangle's far edge
+/// passes i32 (`utils/region.rs`, the blur region): whatever a script did,
+/// nothing outside the surface is sent.
+fn within(rects: Vec<[i32; 4]>, logical: (u32, u32)) -> Vec<[i32; 4]> {
+    let (sw, sh) = (logical.0 as i64, logical.1 as i64);
+    rects
+        .into_iter()
+        .filter_map(|[x, y, w, h]| {
+            let (x0, y0) = ((x as i64).clamp(0, sw), (y as i64).clamp(0, sh));
+            let (x1, y1) = ((x as i64 + w as i64).clamp(0, sw), (y as i64 + h as i64).clamp(0, sh));
+            (x1 > x0 && y1 > y0).then(|| [x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32])
+        })
+        .collect()
+}
+
 /// A convex outline as rows one logical unit tall: each row spans where its
 /// middle crosses the outline's edges.
-fn outline(region: &mut Vec<[i32; 4]>, points: &[[f32; 2]]) {
-    let top = points.iter().map(|p| p[1]).fold(f32::MAX, f32::min).round() as i32;
-    let bottom = points.iter().map(|p| p[1]).fold(f32::MIN, f32::max).round() as i32;
+/// Only the rows on the surface, `0..height`, are walked.
+fn outline(region: &mut Vec<[i32; 4]>, points: &[[f32; 2]], height: i32) {
+    let top = points.iter().map(|p| p[1]).fold(f32::MAX, f32::min).round().max(0.0) as i32;
+    let bottom = (points.iter().map(|p| p[1]).fold(f32::MIN, f32::max).round() as i32).min(height);
     for row in top..bottom {
         let y = row as f32 + 0.5;
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
@@ -1158,6 +1204,7 @@ impl LayerShellHandler for App {
         // The compositor took the surface away (its output went): drop it.
         if let Some(i) = self.by_wl(layer.wl_surface()) {
             let s = self.surfaces.remove(i);
+            self.drag = None;
             if let Some(renderer) = &self.renderer {
                 renderer.destroy_target(s.id);
             }
@@ -1289,6 +1336,9 @@ impl PointerHandler for App {
         use smithay_client_toolkit::seat::pointer::PointerEventKind as K;
         for event in events {
             log::trace!("pointer {:?} at {:?}", event.kind, event.position);
+            if !matches!(event.kind, K::Motion { .. }) {
+                self.flush_drag();
+            }
             let Some(i) = self.by_wl(&event.surface) else { continue };
             let scene = self.surfaces[i].scene.clone();
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
@@ -1325,8 +1375,8 @@ impl PointerHandler for App {
             match event.kind {
                 K::Motion { .. } => {
                     if let Some(node) = self.surfaces[i].pressed {
-                        let (lx, ly) = scene.borrow().local(node, x, y);
-                        self.deliver(i, node, Input::Drag(lx, ly));
+                        let (ox, oy) = self.surfaces[i].pressed_at;
+                        self.drag = Some((i, node, x - ox, y - oy));
                     }
                 }
                 K::Press { button, .. } => {
@@ -1339,6 +1389,7 @@ impl PointerHandler for App {
                     self.surfaces[i].pressed = hit;
                     if let Some(node) = hit {
                         let (lx, ly) = scene.borrow().local(node, x, y);
+                        self.surfaces[i].pressed_at = (x - lx, y - ly);
                         self.deliver(i, node, Input::Press(button, lx, ly));
                     }
                 }
