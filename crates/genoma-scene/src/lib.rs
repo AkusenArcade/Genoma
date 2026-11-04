@@ -517,6 +517,11 @@ pub enum Blur {
 impl Scene {
     pub fn new(fonts: Fonts) -> Scene {
         let mut tree = TaffyTree::new();
+        // Taffy rounds every edge to a whole logical unit, which on a
+        // fractional screen is no pixel at all: at 1.5 an odd unit is half a
+        // physical pixel. The layout stays exact; `place` lands it on the
+        // screen's pixels when it is drawn.
+        tree.disable_rounding();
         let root = tree
             .new_leaf_with_context(Style::default(), Node::new(Kind::Box, Role::Group))
             .expect("root");
@@ -1448,7 +1453,7 @@ impl Scene {
         let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
         self.frame += 1;
         let mut out = Out { frame: self.frame, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
-        collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
+        collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
             if self.ready.insert(id) {
@@ -1777,13 +1782,84 @@ fn rim_width(n: &Node, scale: f32) -> f32 {
     }
 }
 
+/// Where a node is drawn: its rectangle in logical units with every edge on
+/// a whole physical pixel, and the exact one taffy laid out.
+///
+/// It is placed against its parent's drawn rectangle and keeps the relation
+/// it has to the exact one: centred stays centred, flush stays flush, and
+/// anything else is rounded where it falls. Rounding each edge on its own
+/// does not keep a centre — an odd gap leaves the half pixel on one side,
+/// always the same one — so a centred node takes the parity of the room
+/// around it, a pixel larger or smaller than it asked for.
+fn place(tree: &TaffyTree<Node>, node: NodeId, parent: [f32; 4], parent_exact: [f32; 4], scale: f32) -> ([f32; 4], [f32; 4]) {
+    let layout = *tree.layout(node).expect("laid out");
+    let size = [layout.size.width, layout.size.height];
+    // An overlay is centred in its parent, whatever taffy reports for an
+    // out-of-flow box.
+    let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
+    let attach = tree.get_node_context(node).map_or(0, |n| n.attach);
+    let p = parent_exact;
+    let at = if overlay {
+        match attach {
+            1 => [p[0], p[1] + p[3]],
+            2 => [p[0], p[1] - size[1]],
+            3 => [p[0] + (p[2] - size[0]) / 2.0, p[1] + p[3]],
+            4 => [p[0] + (p[2] - size[0]) / 2.0, p[1] - size[1]],
+            5 => [p[0] - size[0], p[1] + (p[3] - size[1]) / 2.0],
+            6 => [p[0] + p[2], p[1] + (p[3] - size[1]) / 2.0],
+            7 => [p[0], p[1]],
+            _ => [p[0] + (p[2] - size[0]) / 2.0, p[1] + (p[3] - size[1]) / 2.0],
+        }
+    } else {
+        [p[0] + layout.location.x, p[1] + layout.location.y]
+    };
+    // An offset moves the node and everything in it: a panel set below its
+    // thread carries its content with it. It counts in the relation, so a
+    // shape set in the middle by hand is centred as surely as one laid out
+    // there.
+    let offset = tree.get_node_context(node).map_or([0.0; 2], |n| n.offset);
+    let at = [at[0] + offset[0], at[1] + offset[1]];
+    let x = on_pixels(parent[0], parent[2], at[0] - p[0], p[2], size[0], scale);
+    let y = on_pixels(parent[1], parent[3], at[1] - p[1], p[3], size[1], scale);
+    ([x.0, y.0, x.1, y.1], [at[0], at[1], size[0], size[1]])
+}
+
+/// One axis of `place`: a span of `len` at `at` within an exact parent span
+/// of `room`, drawn inside the parent's span that starts at `start` and is
+/// `drawn` long, all in logical units. Returns the drawn start and length.
+fn on_pixels(start: f32, drawn: f32, at: f32, room: f32, len: f32, scale: f32) -> (f32, f32) {
+    const NEAR: f32 = 0.01;
+    let s = (start * scale).round();
+    let e = ((start + drawn) * scale).round();
+    let mut n = (len * scale).round().max(0.0);
+    let from = if len > 0.0 && room > 0.0 && (at - (room - len) / 2.0).abs() < NEAR {
+        if (e - s - n).rem_euclid(2.0) != 0.0 {
+            n += if len * scale > n || n < 1.0 { 1.0 } else { -1.0 };
+        }
+        s + (e - s - n) / 2.0
+    } else if at.abs() < NEAR {
+        s
+    } else if (at + len - room).abs() < NEAR {
+        e - n
+    } else if (at - room).abs() < NEAR {
+        e
+    } else if (at + len).abs() < NEAR {
+        s - n
+    } else {
+        ((start + at) * scale).round()
+    };
+    (from / scale, n / scale)
+}
+
 /// A raised node and everything in it go to the raised layer, drawn after
 /// the whole base layer; a raised node inside a raised one is already there.
+#[allow(clippy::too_many_arguments)]
 fn collect(
     tree: &mut TaffyTree<Node>,
     fonts: &mut ct::FontSystem,
     node: NodeId,
     parent: [f32; 4],
+    parent_exact: [f32; 4],
     alpha: f32,
     scale: f32,
     out: &mut Out,
@@ -1793,47 +1869,29 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = true;
     }
-    collect_node(tree, fonts, node, parent, alpha, scale, out);
+    collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
     if raise {
         std::mem::swap(out.list, &mut out.upper);
         out.raised = false;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_node(
     tree: &mut TaffyTree<Node>,
     fonts: &mut ct::FontSystem,
     node: NodeId,
     parent: [f32; 4],
+    parent_exact: [f32; 4],
     alpha: f32,
     scale: f32,
     out: &mut Out,
 ) {
-    let layout = *tree.layout(node).expect("laid out");
-    // An overlay is centred in its parent, whatever taffy reports for an
-    // out-of-flow box.
-    let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
-    let attach = tree.get_node_context(node).map_or(0, |n| n.attach);
-    let mut origin = if overlay {
-        match attach {
-            1 => [parent[0], parent[1] + parent[3]],
-            2 => [parent[0], parent[1] - layout.size.height],
-            3 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + parent[3]],
-            4 => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] - layout.size.height],
-            5 => [parent[0] - layout.size.width, parent[1] + (parent[3] - layout.size.height) / 2.0],
-            6 => [parent[0] + parent[2], parent[1] + (parent[3] - layout.size.height) / 2.0],
-            7 => [parent[0], parent[1]],
-            _ => [parent[0] + (parent[2] - layout.size.width) / 2.0, parent[1] + (parent[3] - layout.size.height) / 2.0],
-        }
-    } else {
-        [parent[0] + layout.location.x, parent[1] + layout.location.y]
-    };
-    // An offset moves the node and everything in it: a panel set below its
-    // thread carries its content with it.
-    if let Some(n) = tree.get_node_context(node) {
-        origin[0] += n.offset[0];
-        origin[1] += n.offset[1];
-    }
+    let (placed, exact) = place(tree, node, parent, parent_exact, scale);
+    let mut layout = *tree.layout(node).expect("laid out");
+    layout.size.width = placed[2];
+    layout.size.height = placed[3];
+    let mut origin = [placed[0], placed[1]];
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
     // Depth: this node's turn about its pivot, through its perspective,
     // composed with what its ancestors already turned.
@@ -2051,15 +2109,15 @@ fn collect_node(
             // shape is taken back out of it before the child is drawn.
             if hollow {
                 for child in tree.children(node).unwrap_or_default() {
-                    let Ok(l) = tree.layout(child) else { continue };
-                    let l = *l;
                     let Some(c) = tree.get_node_context(child) else { continue };
                     if c.kind != Kind::Capsule || !c.present {
                         continue;
                     }
-                    let cs = [l.size.width * scale, l.size.height * scale];
+                    let (l, _) = place(tree, child, own, exact, scale);
+                    let Some(c) = tree.get_node_context(child) else { continue };
+                    let cs = [l[2] * scale, l[3] * scale];
                     out.list.push_rect(Rect {
-                        origin: [(origin[0] + l.location.x) * scale, (origin[1] + l.location.y) * scale],
+                        origin: [l[0] * scale, l[1] * scale],
                         size: cs,
                         radius: c.radius.map_or(cs[1] / 2.0, |r| r * scale).min(cs[0].min(cs[1]) / 2.0),
                         rim: 0.0,
@@ -2297,7 +2355,11 @@ fn collect_node(
                 }
             }
             let buffer = shape(fonts, n);
-            let at = [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale];
+            // On a whole pixel, as the box it is centred in is.
+            let at = [
+                ((origin[0] + layout.padding.left) * scale).round(),
+                ((origin[1] + layout.padding.top) * scale).round(),
+            ];
             // Lit by a gradient: rasterised with it, as tilted text is.
             let lit = n.color_bottom[3] > 0.0;
             let size = [
@@ -2410,8 +2472,18 @@ fn collect_node(
             out.fade = [c[3], fade * scale];
         }
     }
+    let scrolled = (scroll * scale).round() / scale;
     for child in tree.children(node).unwrap_or_default() {
-        collect(tree, fonts, child, [own[0], own[1] - scroll, own[2], own[3]], alpha, scale, out);
+        collect(
+            tree,
+            fonts,
+            child,
+            [own[0], own[1] - scrolled, own[2], own[3]],
+            [exact[0], exact[1] - scroll, exact[2], exact[3]],
+            alpha,
+            scale,
+            out,
+        );
     }
     out.clip = saved;
     out.fade = saved_fade;
@@ -2587,5 +2659,46 @@ mod tests {
         assert_eq!((l.location.x, l.location.y), (8.0, 8.0), "centred in 26");
         let list = scene.draw_list(1.0);
         assert_eq!(list.rects.len(), 1);
+    }
+
+    #[test]
+    fn a_centred_shape_stays_centred_on_a_fractional_screen() {
+        // `compact` on a 1.5 screen: a 34 × 0.85 band, a margin of 1.7, and
+        // a cell of an odd 22.1 in it, after a sibling that leaves the band
+        // starting between pixels.
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let before = scene.create(Kind::Box, Role::None);
+        scene.append(root, before);
+        scene.set(before, Prop::Width, Value::Number(3.3), None).unwrap();
+        let band = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, band);
+        for (p, v) in [(Prop::Width, 37.4), (Prop::Height, 37.4)] {
+            scene.set(band, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(band, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        let cell = scene.create(Kind::Capsule, Role::None);
+        scene.append(band, cell);
+        for (p, v) in [(Prop::Width, 22.1), (Prop::Height, 22.1)] {
+            scene.set(cell, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(cell, Prop::Overlay, Value::Bool(true), None).unwrap();
+        scene.set(cell, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        scene.layout(None, None);
+        let list = scene.draw_list(1.5);
+        assert_eq!(list.rects.len(), 2);
+        let (outer, inner) = (&list.rects[0], &list.rects[1]);
+        for r in [outer, inner] {
+            for v in [r.origin[0], r.origin[1], r.size[0], r.size[1]] {
+                assert_eq!(v, v.round(), "on whole pixels: {:?} {:?}", r.origin, r.size);
+            }
+        }
+        for i in 0..2 {
+            let before = inner.origin[i] - outer.origin[i];
+            let after = outer.origin[i] + outer.size[i] - inner.origin[i] - inner.size[i];
+            assert_eq!(before, after, "centred on axis {i}: {before} and {after}");
+            assert!((inner.size[i] - 22.1 * 1.5).abs() <= 1.0, "within a pixel of its size: {}", inner.size[i]);
+        }
     }
 }

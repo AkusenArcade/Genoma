@@ -106,9 +106,15 @@ govern what Bioma draws. These govern how Genoma lets it be drawn.
    text is drawn from a glyph atlas at the current scale (or MSDF). Any
    transform, including depth, keeps edges and text sharp. This is what lifts
    the reason behind Bioma's "never `transform: scale`" rule (§8.4).
-5. **Logical units everywhere; physical pixels only for hairlines.** As in
-   Bioma: dimensions are logical, and only critical thin lines snap to the
-   physical pixel.
+5. **Logical units everywhere; the drawing lands on physical pixels.**
+   Dimensions are written and laid out in logical units, exactly. When a
+   surface is drawn, every edge goes to a whole physical pixel against its
+   parent's drawn edges: what is centred stays centred (it takes the parity
+   of the room around it, a pixel off its size at most), what is flush stays
+   flush. A `compact` step on a 1.5 screen is a factor of 1.275, and without
+   this an odd half pixel fell on the same side of every centred thing.
+   Motion (swell, orbit, sway) is not snapped. Hairlines keep their own rule:
+   whole pixels, at least one.
 6. **One owner per domain.** One service object per system domain, shared by
    every consumer. Never a poller per widget.
 7. **The script describes, Rust does.** Luau code builds trees and writes

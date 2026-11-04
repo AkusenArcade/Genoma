@@ -33,7 +33,9 @@ English everywhere: code, comments, identifiers, documents, commit messages.
 - **One wgpu device for the whole process, on the compositor's GPU.** It is
   chosen from linux-dmabuf feedback. A hybrid laptop made this rule: niri on
   NVIDIA and Qt on the Vega copied every frame between GPUs.
-- **Logical units everywhere**; only hairlines snap to the physical pixel.
+- **Logical units everywhere**, and the drawing lands them on physical
+  pixels (PRD §3, principle 5): never round a layout in Luau, and never let taffy round
+  it to logical units.
 - **Durations come from the timing set.** Luau code naming a literal duration
   is rejected at load time.
 - **Genoma knows nothing of Bioma.** Membrane, tissue and cell are Bioma's
