@@ -142,6 +142,8 @@ struct Surface {
     /// Whether the surface last asked for the keyboard.
     keyboard: bool,
     hovered: Option<NodeId>,
+    /// The button the keyboard's focus is on, if any.
+    focused: Option<NodeId>,
     /// The node the press landed on, and where that node was then: a drag
     /// is told relative to it. A node carried by its own drag moves before
     /// the frame lays it out again, and several motions arrive in one frame;
@@ -225,6 +227,7 @@ pub struct App {
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
     input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
+    focus: Option<genoma_script::FocusQueue>,
     /// Surfaces the compositor gave another area than their trees were
     /// built for (another surface took or let go of a zone): each is built
     /// again on its own, the rest of the interface untouched.
@@ -292,6 +295,7 @@ impl App {
             keyboard_seat: None,
             modifiers: Modifiers::default(),
             input: None,
+            focus: None,
             drag: None,
             areas_changed: Vec::new(),
             outputs_changed: false,
@@ -460,6 +464,66 @@ impl App {
     /// Where input is delivered: (the surface's tree index, node, input).
     pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) + 'static) {
         self.input = Some(Box::new(f));
+    }
+
+    /// Where `g.focus_*` leaves its requests.
+    pub fn on_focus(&mut self, queue: genoma_script::FocusQueue) {
+        self.focus = Some(queue);
+    }
+
+    /// Does what the key just handled asked of the keyboard's focus, on the
+    /// surface it went to, inside the cell that is catching.
+    fn serve_focus(&mut self, i: usize, catcher: NodeId) {
+        use genoma_script::FocusRequest;
+        let Some((queue, held)) = self.focus.clone() else { return };
+        // A focus left on something gone, or outside the open cell, is let
+        // go without a word: there is nobody to tell.
+        if let Some(f) = self.surfaces[i].focused {
+            let scene = self.surfaces[i].scene.borrow();
+            if !scene.within(f, catcher) {
+                drop(scene);
+                self.surfaces[i].focused = None;
+            }
+        }
+        let requests: Vec<FocusRequest> = std::mem::take(&mut *queue.borrow_mut());
+        for request in requests {
+            match request {
+                FocusRequest::Move(step) => {
+                    let list = self.surfaces[i].scene.borrow().focusables(catcher);
+                    if list.is_empty() {
+                        continue;
+                    }
+                    let now = self.surfaces[i].focused.and_then(|f| list.iter().position(|&n| n == f));
+                    let next = match now {
+                        Some(at) => (at as i64 + step as i64).rem_euclid(list.len() as i64) as usize,
+                        None if step < 0 => list.len() - 1,
+                        None => 0,
+                    };
+                    let node = list[next];
+                    if let Some(old) = self.surfaces[i].focused.take() {
+                        self.deliver(i, old, Input::Focus(false));
+                    }
+                    self.surfaces[i].focused = Some(node);
+                    self.deliver(i, node, Input::Focus(true));
+                    let extent = self.surfaces[i].scene.borrow().extent(node);
+                    if let Some([x, y, w, h]) = extent {
+                        self.deliver(i, node, Input::FocusWithin(x, y, w, h));
+                    }
+                }
+                FocusRequest::Press => {
+                    if let Some(node) = self.surfaces[i].focused {
+                        let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(node).unwrap_or([0.0; 4]);
+                        self.deliver(i, node, Input::Click(272, w / 2.0, h / 2.0));
+                    }
+                }
+                FocusRequest::Clear => {
+                    if let Some(old) = self.surfaces[i].focused.take() {
+                        self.deliver(i, old, Input::Focus(false));
+                    }
+                }
+            }
+        }
+        held.set(self.surfaces[i].focused.is_some());
     }
 
     pub fn start(&mut self, renderer: Renderer, fonts: Fonts, handle: LoopHandle<'static, App>) {
@@ -642,6 +706,7 @@ impl App {
             inhibitor: None,
             keyboard: false,
             hovered: None,
+            focused: None,
             pressed: None,
             pressed_at: (0.0, 0.0),
             asleep: false,
@@ -1117,6 +1182,7 @@ impl App {
         let text = event.utf8.clone().filter(|t| !t.chars().any(char::is_control) && !m.ctrl && !m.alt);
         let key = genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt, logo: m.logo, code: event.raw_code + 8 };
         self.deliver(i, catcher, Input::Key(key));
+        self.serve_focus(i, catcher);
     }
 }
 

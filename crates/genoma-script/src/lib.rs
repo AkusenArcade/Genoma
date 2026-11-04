@@ -86,6 +86,13 @@ pub enum Input {
     /// a picture that should appear only once it is there (a wallpaper's
     /// crossfade). Not pointer input, and never passed up to a parent.
     Ready,
+    /// The keyboard's focus came to the node (true) or left it: it shows
+    /// that it is the one Enter would press. Never passed up.
+    Focus(bool),
+    /// A node inside took the keyboard's focus, at this rectangle (x, y,
+    /// width, height), local to whoever handles it: the nearest ancestor
+    /// with on_focus_within, a well that scrolls it into view.
+    FocusWithin(f32, f32, f32, f32),
     /// A node's laid-out size, logical units, after the first layout and
     /// whenever it changes: what only the layout knows (the height of a
     /// column of wrapped text). Not pointer input, never passed up.
@@ -110,13 +117,30 @@ impl Input {
             Input::Move(..) => "on_move",
             Input::Ready => "on_ready",
             Input::Size(..) => "on_size",
+            Input::Focus(_) => "on_focus",
+            Input::FocusWithin(..) => "on_focus_within",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_focus", "on_focus_within", "on_wheel", "on_fling", "on_outside", "on_key"];
+
+/// What `g.focus_*` asks of the keyboard's focus, done by the host once the
+/// key that asked has been handled, on the surface the key went to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FocusRequest {
+    /// To the next (1) or previous (-1) button or slider of the open cell.
+    Move(i32),
+    /// Press the one that has it, as a click.
+    Press,
+    /// Let it go.
+    Clear,
+}
+
+/// The requests waiting, and whether a node has the focus now.
+pub type FocusQueue = (Rc<RefCell<Vec<FocusRequest>>>, Rc<std::cell::Cell<bool>>);
 
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
@@ -985,6 +1009,7 @@ pub struct Script {
     /// that changed since the runtime last took it.
     wishes: Rc<RefCell<Vec<Wish>>>,
     wishes_changed: Rc<std::cell::Cell<bool>>,
+    focus: FocusQueue,
     /// The mounted load's surface contents, each target's own scope, and
     /// the load's owner: one target can be built again alone.
     contents: Vec<LuaValue>,
@@ -1046,6 +1071,7 @@ impl Script {
             outputs: Rc::default(),
             wishes: Rc::default(),
             wishes_changed: Rc::default(),
+            focus: (Rc::default(), Rc::default()),
             contents: Vec::new(),
             target_scopes: Vec::new(),
             load_owner: None,
@@ -1092,6 +1118,11 @@ impl Script {
     }
 
     /// Every target's wish, once something changed since the last call.
+    /// The keyboard focus's requests and state, shared with the host.
+    pub fn focus_queue(&self) -> FocusQueue {
+        (self.focus.0.clone(), self.focus.1.clone())
+    }
+
     pub fn take_wishes(&self) -> Option<Vec<Wish>> {
         self.wishes_changed.replace(false).then(|| self.wishes.borrow().clone())
     }
@@ -1133,6 +1164,11 @@ impl Script {
                     }
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
+                    Input::Focus(on) => f.call::<()>(*on),
+                    Input::FocusWithin(x, y, w, h) => {
+                        let (lx, ly) = scene.borrow().local(id, *x, *y);
+                        f.call::<()>((lx, ly, *w, *h))
+                    }
                 };
                 if let Err(e) = result {
                     log::error!("{name}: {e}");
@@ -1141,7 +1177,7 @@ impl Script {
             }
             // Hover stays with its own node: entering a child is not
             // entering every ancestor again.
-            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..)) {
+            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_)) {
                 return;
             }
             at = scene.borrow().parent(id);
@@ -1360,6 +1396,23 @@ impl Script {
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
         let g = lua.create_table()?;
+        // g.focus_move(1 | -1), g.focus_press(), g.focus_clear(): the
+        // keyboard's way through the open cell's buttons, done once the key
+        // that asked is handled. g.has_focus(): whether one has it.
+        for (name, request) in [("focus_press", FocusRequest::Press), ("focus_clear", FocusRequest::Clear)] {
+            let queue = self.focus.0.clone();
+            g.set(name, lua.create_function(move |_, ()| {
+                queue.borrow_mut().push(request);
+                Ok(())
+            })?)?;
+        }
+        let queue = self.focus.0.clone();
+        g.set("focus_move", lua.create_function(move |_, step: i32| {
+            queue.borrow_mut().push(FocusRequest::Move(if step < 0 { -1 } else { 1 }));
+            Ok(())
+        })?)?;
+        let held = self.focus.1.clone();
+        g.set("has_focus", lua.create_function(move |_, ()| Ok(held.get()))?)?;
         // g.ipc("cell", { toggle = function(domain) … end }): what a call
         // from outside reaches, for this load.
         lua.set_named_registry_value(IPC, lua.create_table()?)?;
@@ -2190,7 +2243,7 @@ fn mount(
             handlers.borrow_mut().entry((target, node)).or_default().insert(name, f);
             if name == "on_size" {
                 scene.borrow_mut().watch_size(node);
-            } else if !matches!(name, "on_outside" | "on_key" | "on_ready") {
+            } else if !matches!(name, "on_outside" | "on_key" | "on_ready" | "on_focus" | "on_focus_within") {
                 scene.borrow_mut().set_interactive(node, true);
             }
             continue;

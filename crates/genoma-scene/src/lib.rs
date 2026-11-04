@@ -154,6 +154,11 @@ pub struct Node {
     offset: [f32; 2],
     /// Takes pointer input: it is hit-tested and belongs to the input region.
     interactive: bool,
+    /// The frame it was last drawn in with something to see, and where it
+    /// was then, unclipped: what the keyboard's focus may reach, and where
+    /// a well scrolls to bring it into view.
+    drawn_frame: u64,
+    extent: [f32; 4],
     opacity: f32,
     attach: u8,
     catch: bool,
@@ -266,6 +271,8 @@ impl Node {
             arc_rate: 0.0,
             offset: [0.0; 2],
             interactive: false,
+            drawn_frame: 0,
+            extent: [0.0; 4],
             opacity: 1.0,
             attach: 0,
             catch: false,
@@ -493,6 +500,8 @@ pub struct Scene {
     /// for `on_size`.
     sized: std::collections::HashMap<NodeId, Option<[f32; 2]>>,
     newly_sized: Vec<(NodeId, f32, f32)>,
+    /// Counts the frames drawn, for `drawn_frame`.
+    frame: u64,
 }
 
 /// A shape the compositor blurs behind, logical units.
@@ -529,6 +538,7 @@ impl Scene {
             newly_ready: Vec::new(),
             sized: Default::default(),
             newly_sized: Vec::new(),
+            frame: 0,
         }
     }
 
@@ -708,6 +718,38 @@ impl Scene {
         for child in self.tree.children(node).unwrap_or_default() {
             self.walk_layered(child, up, f);
         }
+    }
+
+    /// What the keyboard's focus can reach inside `within`, in the order the
+    /// tree has them: buttons and sliders that take the pointer and were
+    /// seen in the last frame (not faded to nothing, not inside something
+    /// absent). A row scrolled out of its well still counts.
+    /// `within` itself is left out: it is the cell that opened, whose own
+    /// press would close what the keyboard is walking through.
+    pub fn focusables(&self, within: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for child in self.tree.children(within).unwrap_or_default() {
+            self.collect_focusables(child, &mut out);
+        }
+        out
+    }
+
+    fn collect_focusables(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        let Some(n) = self.tree.get_node_context(node) else { return };
+        if !n.present {
+            return;
+        }
+        if n.interactive && matches!(n.role, Role::Button | Role::Slider) && n.drawn_frame == self.frame {
+            out.push(node);
+        }
+        for child in self.tree.children(node).unwrap_or_default() {
+            self.collect_focusables(child, out);
+        }
+    }
+
+    /// Where a node was last drawn, unclipped, logical units.
+    pub fn extent(&self, node: NodeId) -> Option<[f32; 4]> {
+        self.tree.get_node_context(node).map(|n| n.extent)
     }
 
     /// A point in the surface, logical units, from `node`'s top-left corner
@@ -1404,7 +1446,8 @@ impl Scene {
         let mut list = DrawList::default();
         let mut fonts = self.fonts.lock().unwrap();
         let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
-        let mut out = Out { list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        self.frame += 1;
+        let mut out = Out { frame: self.frame, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
@@ -1634,6 +1677,7 @@ fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32;
 }
 
 struct Out<'a> {
+    frame: u64,
     list: &'a mut DrawList,
     /// The fade toward the foot of the nearest clip that fades, physical
     /// pixels: where nothing is left and how far above it it begins.
@@ -1814,6 +1858,7 @@ fn collect_node(
     if let Some(n) = tree.get_node_context_mut(node) {
         n.arc_radius = layout.size.width / 2.0;
         n.bounds = [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)];
+        n.extent = own;
     }
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {
@@ -1825,6 +1870,7 @@ fn collect_node(
     if alpha <= 0.0 {
         return;
     }
+    n.drawn_frame = out.frame;
     let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
     // Motion moves and swells what a node draws, never its place in the
     // layout: nothing around a beating dot shifts.

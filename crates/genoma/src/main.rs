@@ -689,6 +689,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     ipc::serve(&handle, script.clone());
     let dispatcher = script.clone();
     app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
+    app.on_focus(script.borrow().focus_queue());
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();
     let reloader = script.clone();
