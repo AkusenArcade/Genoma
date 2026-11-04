@@ -1,4 +1,6 @@
-# Genoma
+<h1 align="center">
+  <img src="docs/media/logo.png" width="240" alt="Genoma — A Living Toolkit">
+</h1>
 
 A Wayland shell toolkit in Rust, with interfaces written in Luau and reloaded
 while they run.
