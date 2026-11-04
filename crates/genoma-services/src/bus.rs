@@ -8,6 +8,8 @@
 
 use std::{future::Future, sync::OnceLock};
 
+use futures_channel::mpsc::UnboundedReceiver;
+
 use zruntime::{SharedRuntime, lock::OnceCell};
 
 static THREAD: OnceLock<Bus> = OnceLock::new();
@@ -62,6 +64,37 @@ impl Bus {
     /// Runs `work` on the bus thread until it ends or the task is dropped.
     pub fn task<T: Send + 'static>(&self, name: &'static str, work: impl Future<Output = T> + Send + 'static) -> zruntime::Task<T, zruntime::Shared> {
         self.runtime.spawn(name, work)
+    }
+
+    /// `stream`, emptied as fast as messages arrive, so that it never holds
+    /// up the connection it belongs to.
+    ///
+    /// zbus gives each match rule a queue of 64, and while one is full the
+    /// connection reads nothing more: no signal, and no reply to a call. A
+    /// service that reads its state with calls between two polls of its
+    /// stream waits for a reply that cannot come once a burst outgrows the
+    /// queue, and the whole connection stops for the rest of the session.
+    /// NetworkManager's burst on resume, or a scan among many access points,
+    /// did that to the system bus: the Wi-Fi switch and the networks went
+    /// deaf. Here a task of its own does nothing but move the messages into
+    /// an unbounded channel, which the service polls instead.
+    pub fn drained<S>(&self, name: &'static str, mut stream: S) -> UnboundedReceiver<S::Item>
+    where
+        S: futures_util::Stream + Unpin + Send + 'static,
+        S::Item: Send + 'static,
+    {
+        use futures_util::StreamExt;
+        let (sender, receiver) = futures_channel::mpsc::unbounded();
+        self.runtime
+            .spawn(name, async move {
+                while let Some(message) = stream.next().await {
+                    if sender.unbounded_send(message).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        receiver
     }
 
     /// Runs `work` on the bus thread. A failure is logged under `name`: a

@@ -195,7 +195,7 @@ impl Bluetooth {
         bus.spawn("bluetooth", async move {
             let conn = bus::system().await?;
             let rule = MatchRule::builder().msg_type(Type::Signal).sender(BLUEZ).build()?;
-            let mut stream = MessageStream::for_match_rule(rule, &conn, None).await?;
+            let mut stream = pause.drained("bluetooth signals", MessageStream::for_match_rule(rule, &conn, None).await?);
             let _ = post.send(read(&conn).await?);
             while stream.next().await.is_some() {
                 pause.sleep(SETTLE).await;

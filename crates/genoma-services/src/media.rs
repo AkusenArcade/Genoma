@@ -212,6 +212,7 @@ impl Media {
 
     pub fn start(&self, bus: &Bus, post: Sender<Update>) {
         *self.bus.borrow_mut() = Some(bus.clone());
+        let media_bus = bus.clone();
         bus.spawn("media", async move {
             let conn = bus::session().await?;
             // The players' own signals, by sender, and the bus's word on
@@ -224,7 +225,7 @@ impl Media {
                 .build()?;
             let players_stream = MessageStream::for_match_rule(players_rule, &conn, None).await?;
             let names_stream = MessageStream::for_match_rule(names_rule, &conn, None).await?;
-            let mut signals = futures_util::stream::select(players_stream, names_stream);
+            let mut signals = media_bus.drained("media signals", futures_util::stream::select(players_stream, names_stream));
 
             let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
             // Unique name → bus name: a player's signals come from its

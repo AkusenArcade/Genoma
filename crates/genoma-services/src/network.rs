@@ -403,7 +403,7 @@ impl Network {
                 .sender(NM)
                 .path_namespace("/org/freedesktop/NetworkManager")
                 .build()?;
-            let mut stream = MessageStream::for_match_rule(rule, &conn, None).await?;
+            let mut stream = pause.drained("network signals", MessageStream::for_match_rule(rule, &conn, None).await?);
             let _ = post.send(Update::State(read(&conn).await?));
             while let Some(message) = stream.next().await {
                 let Ok(message) = message else { continue };

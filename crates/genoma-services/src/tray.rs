@@ -359,7 +359,7 @@ impl Tray {
             let _ = post.send(Update::Watcher(serving));
             // The watcher's signals and every item's.
             let rule = MatchRule::builder().msg_type(Type::Signal).build()?;
-            let mut stream = MessageStream::for_match_rule(rule, &conn, None).await?;
+            let mut stream = thread.drained("tray signals", MessageStream::for_match_rule(rule, &conn, None).await?);
             let host = format!("org.kde.StatusNotifierHost-{}", std::process::id());
             conn.request_name(host.as_str()).await?;
             // Another's watcher, held by a shell that may be on its way out
