@@ -8,6 +8,13 @@
 //! announces, and posts each change into the main loop. Commands go the
 //! other way on PipeWire's channel. Volumes are on `wpctl`'s scale, the cube
 //! root of what PipeWire stores per channel, which is what a person sees.
+//!
+//! A sound card's own sink or source keeps its volume on the card, not on
+//! the node: in the route the card is playing through (the speakers, the
+//! headphones), where the hardware mixer is. Its node's `Props` say
+//! nothing a person set (zero, on the laptop's Ryzen card), and writing
+//! them changes nothing heard. So the cards are bound too, and such a node
+//! reads and sets its route, as WirePlumber and `wpctl` do.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -137,13 +144,103 @@ fn props_pod(properties: Vec<Property>) -> Option<Vec<u8>> {
     .map(|(cursor, _)| cursor.into_inner())
 }
 
+/// A card's route in use for one of its profile's devices: the speakers, the
+/// headphones, the internal microphone.
+#[derive(Clone, Debug, Default)]
+struct Route {
+    index: i32,
+    /// The card profile's device it is the route of (`card.profile.device`).
+    device: i32,
+    /// Linear, per channel, as PipeWire keeps them.
+    volumes: Vec<f32>,
+    muted: bool,
+}
+
+/// The route a node's volume lives in: its card and the card profile's
+/// device, when it is a card's own sink or source.
+fn route_key(node: &Node) -> Option<(u32, i32)> {
+    let get = |k: &str| node.properties.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    Some((get("device.id")?.parse().ok()?, get("card.profile.device")?.parse().ok()?))
+}
+
+/// A route from a `Route` parameter, when it carries its index and device.
+fn read_route(pod: &Pod) -> Option<Route> {
+    let Ok((_, Value::Object(object))) = PodDeserializer::deserialize_any_from(pod.as_bytes()) else { return None };
+    let mut route = Route { index: -1, device: -1, ..Route::default() };
+    for p in object.properties {
+        match (p.key, p.value) {
+            (spa::sys::SPA_PARAM_ROUTE_index, Value::Int(i)) => route.index = i,
+            (spa::sys::SPA_PARAM_ROUTE_device, Value::Int(d)) => route.device = d,
+            (spa::sys::SPA_PARAM_ROUTE_props, Value::Object(props)) => {
+                for q in props.properties {
+                    match (q.key, q.value) {
+                        (spa::sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(v))) => route.volumes = v,
+                        (spa::sys::SPA_PROP_mute, Value::Bool(m)) => route.muted = m,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (route.index >= 0 && route.device >= 0).then_some(route)
+}
+
+/// A `Route` parameter setting `props` on `route`, kept by WirePlumber as a
+/// person's choice (`save`).
+fn route_pod(route: &Route, props: Vec<Property>) -> Option<Vec<u8>> {
+    let property = |key, value| Property { key, flags: PropertyFlags::empty(), value };
+    PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(Object {
+            type_: spa::sys::SPA_TYPE_OBJECT_ParamRoute,
+            id: spa::sys::SPA_PARAM_Route,
+            properties: vec![
+                property(spa::sys::SPA_PARAM_ROUTE_index, Value::Int(route.index)),
+                property(spa::sys::SPA_PARAM_ROUTE_device, Value::Int(route.device)),
+                property(
+                    spa::sys::SPA_PARAM_ROUTE_props,
+                    Value::Object(Object { type_: spa::sys::SPA_TYPE_OBJECT_Props, id: spa::sys::SPA_PARAM_Route, properties: props }),
+                ),
+                property(spa::sys::SPA_PARAM_ROUTE_save, Value::Bool(true)),
+            ],
+        }),
+    )
+    .ok()
+    .map(|(cursor, _)| cursor.into_inner())
+}
+
 /// What the PipeWire thread keeps of each object: the proxy, its listener,
 /// and for a node what it last posted.
 struct Bound {
     nodes: HashMap<u32, (pw::node::Node, pw::node::NodeListener, Node)>,
+    /// Cards, with their routes in use by the profile's device.
+    devices: HashMap<u32, (pw::device::Device, pw::device::DeviceListener, HashMap<i32, Route>)>,
     links: HashMap<u32, (pw::link::Link, pw::link::LinkListener)>,
     metadata: Option<(pw::metadata::Metadata, pw::metadata::MetadataListener)>,
     defaults: (Option<String>, Option<String>),
+}
+
+impl Bound {
+    /// The route `node` keeps its volume in, if it is a card's and the card
+    /// has said which.
+    fn route_of(&self, node: &Node) -> Option<(&pw::device::Device, &Route)> {
+        let (card, device) = route_key(node)?;
+        let (proxy, _, routes) = self.devices.get(&card)?;
+        Some((proxy, routes.get(&device)?))
+    }
+
+    /// `node`'s volume and mute from its route, over what its `Props` said.
+    fn heard_through_route(&self, node: &mut Node) {
+        let Some((_, route)) = self.route_of(node) else { return };
+        if route.volumes.is_empty() {
+            return;
+        }
+        node.has_volume = true;
+        node.channels = route.volumes.len();
+        node.volume = route.volumes.iter().map(|c| (c.max(0.0) as f64).cbrt()).sum::<f64>() / route.volumes.len() as f64;
+        node.muted = route.muted;
+    }
 }
 
 fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result<(), pw::Error> {
@@ -154,10 +251,24 @@ fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result
     let registry = core.get_registry_rc()?;
     let bound = Rc::new(RefCell::new(Bound {
         nodes: HashMap::new(),
+        devices: HashMap::new(),
         links: HashMap::new(),
         metadata: None,
         defaults: (None, None),
     }));
+
+    // Props on a card's node go to its route; any other node takes them.
+    fn set(b: &Bound, proxy: &pw::node::Node, node: &Node, props: Vec<Property>) {
+        if let Some((device, route)) = b.route_of(node) {
+            if let Some(pod) = route_pod(route, props).as_deref().and_then(Pod::from_bytes) {
+                device.set_param(ParamType::Route, 0, pod);
+            }
+            return;
+        }
+        if let Some(pod) = props_pod(props).as_deref().and_then(Pod::from_bytes) {
+            proxy.set_param(ParamType::Props, 0, pod);
+        }
+    }
 
     // Commands from the main thread.
     let b = bound.clone();
@@ -168,25 +279,21 @@ fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result
                 let Some((proxy, _, node)) = b.nodes.get(&id) else { return };
                 let linear = volume.max(0.0).powi(3) as f32;
                 let channels = node.channels.max(1);
-                let pod = props_pod(vec![Property {
+                let props = vec![Property {
                     key: spa::sys::SPA_PROP_channelVolumes,
                     flags: PropertyFlags::empty(),
                     value: Value::ValueArray(ValueArray::Float(vec![linear; channels])),
-                }]);
-                if let Some(pod) = pod.as_deref().and_then(Pod::from_bytes) {
-                    proxy.set_param(ParamType::Props, 0, pod);
-                }
+                }];
+                set(&b, proxy, node, props);
             }
             Command::Mute(id, muted) => {
-                let Some((proxy, _, _)) = b.nodes.get(&id) else { return };
-                let pod = props_pod(vec![Property {
+                let Some((proxy, _, node)) = b.nodes.get(&id) else { return };
+                let props = vec![Property {
                     key: spa::sys::SPA_PROP_mute,
                     flags: PropertyFlags::empty(),
                     value: Value::Bool(muted),
-                }]);
-                if let Some(pod) = pod.as_deref().and_then(Pod::from_bytes) {
-                    proxy.set_param(ParamType::Props, 0, pod);
-                }
+                }];
+                set(&b, proxy, node, props);
             }
             Command::Default(sink, name) => {
                 let Some((metadata, _)) = &b.metadata else { return };
@@ -226,7 +333,9 @@ fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result
                             node.media_class = get("media.class");
                             node.kind = kind_of(&node.media_class);
                         }
-                        let _ = p1.send(Update::Node(Box::new(node.clone())));
+                        let mut node = node.clone();
+                        b.heard_through_route(&mut node);
+                        let _ = p1.send(Update::Node(Box::new(node)));
                     })
                     .param(move |_, kind, _, _, pod| {
                         if kind != ParamType::Props {
@@ -236,12 +345,60 @@ fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result
                         let mut b = b2.borrow_mut();
                         let Some((_, _, node)) = b.nodes.get_mut(&id) else { return };
                         read_props(pod, node);
-                        let _ = p2.send(Update::Node(Box::new(node.clone())));
+                        let mut node = node.clone();
+                        b.heard_through_route(&mut node);
+                        let _ = p2.send(Update::Node(Box::new(node)));
                     })
                     .register();
                 proxy.subscribe_params(&[ParamType::Props]);
                 let node = Node { id, kind: "other", ..Node::default() };
                 b.borrow_mut().nodes.insert(id, (proxy, listener, node));
+            }
+            ObjectType::Device => {
+                let is_audio = global.props.as_ref().and_then(|p| p.get("media.class")) == Some("Audio/Device");
+                if !is_audio {
+                    return;
+                }
+                let Ok(proxy) = r.bind::<pw::device::Device, _>(global) else { return };
+                let id = global.id;
+                let (b0, b1, p1) = (b.clone(), b.clone(), p.clone());
+                let listener = proxy
+                    .add_listener_local()
+                    // A card says its routes changed without saying them:
+                    // they are asked for again, as WirePlumber does.
+                    .info(move |info| {
+                        if !info.change_mask().contains(pw::device::DeviceChangeMask::PARAMS) {
+                            return;
+                        }
+                        let b = b0.borrow();
+                        if let Some((proxy, _, _)) = b.devices.get(&id) {
+                            proxy.enum_params(0, Some(ParamType::Route), 0, u32::MAX);
+                        }
+                    })
+                    .param(move |_, kind, _, _, pod| {
+                        if kind != ParamType::Route {
+                            return;
+                        }
+                        let Some(route) = pod.and_then(read_route) else { return };
+                        let mut b = b1.borrow_mut();
+                        let Some((_, _, routes)) = b.devices.get_mut(&id) else { return };
+                        routes.insert(route.device, route);
+                        // The card's nodes read again through it.
+                        let mut changed = Vec::new();
+                        for (_, _, node) in b.nodes.values() {
+                            if route_key(node).is_some_and(|(card, _)| card == id) {
+                                let mut node = node.clone();
+                                b.heard_through_route(&mut node);
+                                changed.push(node);
+                            }
+                        }
+                        for node in changed {
+                            let _ = p1.send(Update::Node(Box::new(node)));
+                        }
+                    })
+                    .register();
+                proxy.subscribe_params(&[ParamType::Route]);
+                b.borrow_mut().devices.insert(id, (proxy, listener, HashMap::new()));
             }
             ObjectType::Link => {
                 let Ok(proxy) = r.bind::<pw::link::Link, _>(global) else { return };
@@ -294,6 +451,8 @@ fn run(post: Sender<Update>, commands: pw::channel::Receiver<Command>) -> Result
                     let _ = p.send(Update::NodeGone(id));
                 } else if b.links.remove(&id).is_some() {
                     let _ = p.send(Update::LinkGone(id));
+                } else {
+                    b.devices.remove(&id);
                 }
             }
         })
