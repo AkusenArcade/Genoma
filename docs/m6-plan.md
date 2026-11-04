@@ -232,25 +232,30 @@ precise version.
 
 **7b. The package** (planned with Akusen 2026-11-03: an update must be all a
 person on the Quickshell version has to do, then a restart of the shell):
-- [ ] `genoma` on the AUR from a tag, `/usr/bin/genoma` (the scripts find
-      it on the PATH); the name checked free on the AUR first.
-- [ ] `bioma-shell` includes `genoma/`, depends on that precise `genoma`
+- [x] `genoma` on the AUR from a tag, `/usr/bin/genoma` (the scripts find
+      it on the PATH); the name checked free on the AUR first. (Tag v0.1.0,
+      e4fe4d3; AUR b8e0ee1, 2026-11-04.)
+- [x] `bioma-shell` includes `genoma/`, depends on that precise `genoma`
       version, and drops `quickshell`; the QML version leaves the package
-      for a backup folder of the repository.
-- [ ] `"runtime": "genoma"` in `config/default.json`, not in anybody's
+      for a backup folder of the repository. (Bioma d9ee424: `quickshell/`,
+      with assets, config, scripts and tools as symlinks.)
+- [x] `"runtime": "genoma"` in `config/default.json`, not in anybody's
       override, so it holds for everyone; existing overrides stay valid.
-- [ ] The fallbacks without Quickshell: the lock to hyprlock (or
+- [x] The fallbacks without Quickshell: the lock to hyprlock (or
       swaylock), the greeter to agreety; `lock.qml` and `greeter.qml`
-      paths out of `scripts/lock` and `greeter-sync`.
+      paths out of `scripts/lock` and `greeter-sync`. (A failed greeter
+      leaves a mark; greeter-session hands the login to agreety. QML paths
+      kept only for a checkout's `quickshell/`.)
 - [ ] What the first start after the update already does by itself,
       checked: `scripts/shell start` starts Genoma, `scripts/binds` moves
       bioma-binds.kdl to `scripts/ipc`, the greeter's sync copies Genoma's
       runtime into the greeter.
-- [ ] `post_upgrade` says to restart the shell (`scripts/shell restart`) or
+- [x] `post_upgrade` says to restart the shell (`scripts/shell restart`) or
       log out: the Quickshell shell running goes on until then. The
       release notes: a script of one's own calling `qs ipc call …` moves
       to `scripts/ipc`.
-- [ ] The update tried on a clean machine, the laptop: the Quickshell
+- [ ] *(Bioma 1.0.0-beta.61 tagged, GitHub pre-release; the AUR push of
+      `bioma-shell` waits for this.)* The update tried on a clean machine, the laptop: the Quickshell
       version from the AUR, then the new package, then a restart, and
       everything on Genoma, lock and greeter included.
 - [ ] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
