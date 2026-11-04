@@ -8,12 +8,18 @@ while they run.
 Genoma opens surfaces on the compositor, draws them on the GPU through
 distance-field primitives, feeds them the system's state as reactive signals
 and reloads them when their files change. It is built for
-[Bioma](https://github.com/AkusenArcade/Bioma), which runs on Quickshell today,
-and for what Bioma could not afford there: shapes that bud and grow, particles,
-and depth transitions. At rest it should cost nothing at all.
+[Bioma](https://github.com/AkusenArcade/Bioma), which ran on Quickshell before
+it, and for what Bioma could not afford there: shapes that bud and grow,
+particles, and depth transitions. At rest it should cost nothing at all.
 
-**Status:** milestone 1 — signals, layout, text, transitions and hot-reloaded Luau, nothing running at rest. See
-[`docs/genoma-prd.md`](docs/genoma-prd.md).
+**Status:** 0.1.0, the first release. Bioma runs on it whole: its shell, its
+lock screen and its greeter. The toolkit's API is Bioma's for now and will
+change; see [`docs/genoma-prd.md`](docs/genoma-prd.md).
+
+## Installing
+
+On Arch, from the AUR: `genoma`, which puts the runtime at `/usr/bin/genoma`.
+Bioma's package (`bioma-shell`) depends on it, so installing Bioma brings it.
 
 ## Running
 
