@@ -254,11 +254,12 @@ person on the Quickshell version has to do, then a restart of the shell):
       log out: the Quickshell shell running goes on until then. The
       release notes: a script of one's own calling `qs ipc call …` moves
       to `scripts/ipc`.
-- [ ] *(Bioma 1.0.0-beta.61 tagged, GitHub pre-release; the AUR push of
-      `bioma-shell` waits for this.)* The update tried on a clean machine, the laptop: the Quickshell
+- [x] *(Akusen, 2026-11-04: the laptop updated from the AUR's Quickshell
+      beta.60 to the beta.61 package, everything working; it also found the
+      cytoplasm's cost, fixed in Genoma 0.1.1.)* The update tried on a clean machine, the laptop: the Quickshell
       version from the AUR, then the new package, then a restart, and
       everything on Genoma, lock and greeter included.
-- [ ] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
+- [x] Genoma tagged and packaged (`genoma` on the AUR); `bioma-shell`
       starting Bioma on Genoma, depending on it; the person's
       `override.json` read unchanged; the Quickshell version moved to a
       backup folder and left out.
