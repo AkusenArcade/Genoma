@@ -353,6 +353,18 @@ struct Animation {
     spring: Option<(Vec<f32>, Vec<f32>)>,
 }
 
+/// Whether moving `prop` from `a` to `b` changes nothing anyone can see: a
+/// quarter of a physical pixel for a length, under 1/500 for anything else.
+fn unseen(prop: Prop, a: &Value, b: &Value, scale: f32) -> bool {
+    let lengths = [
+        Prop::Width, Prop::Height, Prop::Radius, Prop::OffsetX, Prop::OffsetY, Prop::ScrollY,
+        Prop::FromX, Prop::FromY, Prop::ToX, Prop::ToY, Prop::BendX, Prop::BendY,
+    ];
+    let near = if lengths.contains(&prop) { step() / scale.max(0.01) } else { 0.002 };
+    let (a, b) = (components(a), components(b));
+    a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| (x - y).abs() < near)
+}
+
 fn components(v: &Value) -> Vec<f32> {
     match v {
         Value::Number(n) => vec![*n],
@@ -482,6 +494,8 @@ pub struct Scene {
     /// Nodes with a pulse or an orbit, stepped on every advance.
     movers: Vec<NodeId>,
     last_step: Option<Instant>,
+    /// The surface's scale at the last frame: what a quarter pixel is.
+    scale: f32,
     dirty: bool,
     icons: icons::Icons,
     images: images::Images,
@@ -532,6 +546,7 @@ impl Scene {
             animations: Vec::new(),
             movers: Vec::new(),
             last_step: None,
+            scale: 1.0,
             dirty: true,
             icons: icons::Icons::default(),
             images: images::Images::default(),
@@ -870,6 +885,13 @@ impl Scene {
         let animate = !first && prop.info().animatable && timing.is_some_and(|t| t.moves());
         if animate {
             let from = self.current(node, prop);
+            // Closer than the eye can tell, it jumps: a label that follows
+            // a drifting cell a hundredth of a pixel a step would otherwise
+            // be one transition after another, and every refresh a frame.
+            if from.as_ref().is_some_and(|f| f != &value && unseen(prop, f, &value, self.scale)) {
+                self.animations.retain(|a| !(a.node == node && a.prop == prop));
+                return self.apply(node, prop, value);
+            }
             if from.as_ref() == Some(&value) {
                 // Already there, and staying: whatever was on its way
                 // elsewhere is called off. Left running, a value sent back
@@ -1219,6 +1241,7 @@ impl Scene {
     pub fn advance(&mut self, now: Instant, scale: f32) -> Motion {
         let dt = self.last_step.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.last_step = Some(now);
+        self.scale = scale;
         self.now = now.saturating_duration_since(self.epoch).as_secs_f32();
         let clock = self.now;
 
@@ -1263,7 +1286,9 @@ impl Scene {
             let elapsed = now.saturating_duration_since(a.start).as_secs_f64() - a.timing.delay;
             let t = (elapsed / a.timing.duration).clamp(0.0, 1.0);
             let y = a.timing.curve.eval(t) as f32;
-            let value = match (&a.from, &a.to) {
+            // Ended where it was going, exactly: a fade that stopped at
+            // 0.99999994 was a fade to 1 started again by every new 1.
+            let value = if t >= 1.0 { a.to.clone() } else { match (&a.from, &a.to) {
                 (Value::Number(f), Value::Number(to)) => Value::Number(f + (to - f) * y),
                 (Value::Color(f), Value::Color(to)) => {
                     let mut c = [0.0; 4];
@@ -1273,13 +1298,17 @@ impl Scene {
                     Value::Color(c)
                 }
                 _ => a.to.clone(),
-            };
+            } };
             let _ = self.apply(a.node, a.prop, value);
             if t < 1.0 {
                 running.push(a);
             }
         }
         self.animations = running;
+        if log::log_enabled!(log::Level::Trace) && !self.animations.is_empty() {
+            let props: Vec<String> = self.animations.iter().take(6).map(|a| format!("{:?}:{:?}->{:?}", a.prop, a.from, a.to)).collect();
+            log::trace!("moving: {} animations {}", self.animations.len(), props.join(" "));
+        }
         let mut motion = Motion { moving: !self.animations.is_empty(), wake: None };
         // An image that finished decoding is news; one still decoding is
         // looked for again on a short beat.
@@ -1297,31 +1326,41 @@ impl Scene {
                 continue;
             }
             if n.kind == Kind::Shader {
-                // The drawn numbers follow the bound ones, at the display's
-                // rate while one is still on its way and not at all after:
-                // data arriving at sixty a second breathes at a hundred and
-                // twenty instead of stepping. The clock runs while asked to,
-                // and while the numbers move.
+                // The drawn numbers follow the bound ones while one is still
+                // on its way, and not at all after: data arriving at sixty a
+                // second breathes instead of stepping. They are paced as
+                // everything else that travels, a frame a quarter pixel of
+                // movement, its numbers taken as logical units (the shapes a
+                // shader is given are): lobes that turn slowly ask for few
+                // frames, fast ones for every refresh. The clock, when asked
+                // for, runs at the display's rate.
                 let mut moving = false;
+                let mut fastest = 0.0f32;
                 if n.follow > 0.0 {
-                    let k = 1.0 - (-dt.min(0.05) / n.follow).exp();
+                    let k = 1.0 - (-dt.min(0.1) / n.follow).exp();
                     for (shown, wanted) in n.shown.iter_mut().zip(&n.values) {
                         let gap = wanted - *shown;
                         if gap.abs() > 0.002 {
                             *shown += gap * k;
                             moving = true;
+                            // How fast it closes now, units a second.
+                            fastest = fastest.max((wanted - *shown).abs() / n.follow);
                         } else {
                             *shown = *wanted;
                         }
                     }
                 }
                 if n.clock || moving {
-                    n.time += dt.min(0.05);
-                    moving = true;
-                }
-                if moving {
-                    motion.moving = true;
+                    // A paced shader's frames are further apart than a
+                    // clock's; after a quiet spell neither leaps.
+                    n.time += dt.min(if n.clock { 0.05 } else { 0.1 });
                     self.dirty = true;
+                }
+                if n.clock {
+                    motion.moving = true;
+                } else if moving {
+                    let wait = Duration::from_secs_f32((step() / (fastest * scale).max(1e-3)).min(0.1));
+                    motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
                 }
                 continue;
             }
