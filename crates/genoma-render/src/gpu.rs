@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
-use crate::{DrawList, Error, Fonts, Layer, SurfaceId, image, particles, raw_handles, rect, shader};
+use crate::{Damage, DrawList, Error, Fonts, Layer, SurfaceId, image, particles, raw_handles, rect, shader};
 
 pub(crate) struct Gpu {
     instance: wgpu::Instance,
@@ -14,6 +14,7 @@ pub(crate) struct Gpu {
     images: Option<image::Pipeline>,
     particles: Option<particles::Pipeline>,
     shaders: Option<shader::Pipeline>,
+    clear: Option<Clear>,
     text: Option<Text>,
     targets: HashMap<SurfaceId, Target>,
     /// The last frame's wait for its buffer, and each surface's minute of
@@ -38,6 +39,15 @@ struct Target {
     present_mode: wgpu::PresentMode,
     size: Option<(u32, u32)>,
     viewport: Option<glyphon::Viewport>,
+    /// Whether the swapchain's images can be copied into, which a canvas
+    /// needs.
+    copyable: bool,
+    canvas: Option<Canvas>,
+    /// The last frame's list, what the next is compared with.
+    last: Option<DrawList>,
+    /// Frames drawn in a row, and when the last was.
+    streak: u32,
+    drawn: Option<std::time::Instant>,
 }
 
 impl Gpu {
@@ -103,6 +113,7 @@ impl Gpu {
             images: None,
             particles: None,
             shaders: None,
+            clear: None,
             text: None,
             targets: HashMap::new(),
             waited: std::time::Duration::ZERO,
@@ -150,7 +161,11 @@ impl Gpu {
             log::warn!("surface {id}: no mailbox presentation; frames wait in fifo behind the GPU");
             wgpu::PresentMode::Fifo
         };
-        self.targets.insert(id, Target { surface, format, present_mode, size: None, viewport: None });
+        let copyable = caps.usages.contains(wgpu::TextureUsages::COPY_DST);
+        self.targets.insert(
+            id,
+            Target { surface, format, present_mode, size: None, viewport: None, copyable, canvas: None, last: None, streak: 0, drawn: None },
+        );
         Ok(())
     }
 
@@ -161,8 +176,9 @@ impl Gpu {
         }
     }
 
-    pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
+    pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
         let started = std::time::Instant::now();
+        let counts = (list.rects.len(), list.images.len(), list.texts.len());
         self.draw_inner(id, width, height, list);
         let took = started.elapsed();
         log::trace!("render {} us", took.as_micros());
@@ -183,23 +199,35 @@ impl Gpu {
             log::warn!(
                 "surface {id}: rendered in {} ms ({} rects, {} images, {} texts)",
                 took.as_millis(),
-                list.rects.len(),
-                list.images.len(),
-                list.texts.len()
+                counts.0,
+                counts.1,
+                counts.2
             );
         }
     }
 
-    fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: &DrawList) {
+    fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
+        let now = std::time::Instant::now();
+        // A canvas is kept only while its surface keeps moving: one at rest
+        // gives its memory back.
+        for t in self.targets.values_mut() {
+            if t.canvas.is_some() && t.drawn.is_some_and(|d| now.duration_since(d) > CANVAS_IDLE) {
+                t.canvas = None;
+            }
+        }
         let Some(target) = self.targets.get_mut(&id) else {
             log::warn!("draw for unknown surface {id}");
             return;
         };
         if target.size != Some((width, height)) {
+            let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+            if target.copyable {
+                usage |= wgpu::TextureUsages::COPY_DST;
+            }
             target.surface.configure(
                 &self.device,
                 &wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage,
                     format: target.format,
                     width,
                     height,
@@ -211,6 +239,37 @@ impl Gpu {
                 },
             );
             target.size = Some((width, height));
+            target.canvas = None;
+            target.last = None;
+        }
+
+        // Frames in a row: a surface that animates is drawn into a canvas of
+        // its own, and only what changed is drawn again (`Damage`). A frame
+        // now and then is drawn whole, straight into the swapchain, as
+        // before: the canvas costs a surface's worth of memory.
+        target.streak = if target.drawn.is_some_and(|d| now.duration_since(d) < CANVAS_BEAT) { target.streak + 1 } else { 0 };
+        target.drawn = Some(now);
+        let damage = match &target.last {
+            Some(before) => list.damage(before, [width, height]),
+            None => Damage::Whole,
+        };
+        let use_canvas = target.copyable && (target.canvas.is_some() || target.streak >= CANVAS_STREAK);
+        if !use_canvas {
+            target.canvas = None;
+        } else if target.canvas.is_none() {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("canvas"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: target.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            log::debug!("surface {id}: drawn into a canvas, only what changes");
+            target.canvas = Some(Canvas { texture, view, valid: false });
         }
 
         // How long the buffer took to come back: a frame the eye catches late
@@ -232,9 +291,75 @@ impl Gpu {
                 return;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
+        let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let format = target.format;
+        let mut viewport = target
+            .viewport
+            .take()
+            .unwrap_or_else(|| {
+                let cache = &self.text.get_or_insert_with(|| Text::new(&self.device, &self.queue, format)).cache;
+                glyphon::Viewport::new(&self.device, cache)
+            });
+        viewport.update(&self.queue, glyphon::Resolution { width, height });
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let target = self.targets.get_mut(&id).expect("target");
+        match &mut target.canvas {
+            Some(canvas) => {
+                let region = if canvas.valid { damage } else { Damage::Whole };
+                log::trace!("surface {id}: damage {region:?}");
+                let view = canvas.view.clone();
+                match region {
+                    Damage::Whole => self.render(&mut encoder, &view, format, id, [width, height], &list, &mut viewport, None),
+                    Damage::Within(area) => {
+                        let part = list.within(area);
+                        self.render(&mut encoder, &view, format, id, [width, height], &part, &mut viewport, Some(area));
+                        if let Some(images) = &mut self.images {
+                            images.showing(id, list.images.iter().map(|i| i.key));
+                        }
+                        if let Some(shaders) = &mut self.shaders {
+                            shaders.touch(list.shaders.iter().map(|s| s.key));
+                        }
+                    }
+                    Damage::None => {}
+                }
+                let target = self.targets.get_mut(&id).expect("target");
+                let canvas = target.canvas.as_mut().expect("canvas");
+                canvas.valid = true;
+                encoder.copy_texture_to_texture(
+                    canvas.texture.as_image_copy(),
+                    frame.texture.as_image_copy(),
+                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                );
+            }
+            None => self.render(&mut encoder, &frame_view, format, id, [width, height], &list, &mut viewport, None),
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+        if let Some(text) = &mut self.text {
+            text.atlas.trim();
+        }
+        let target = self.targets.get_mut(&id).expect("target");
+        target.viewport = Some(viewport);
+        target.last = Some(list);
+    }
+
+    /// Draws `list` into `view`: the whole of it cleared first, or only
+    /// `within` (x, y, width, height), cleared and drawn over again while
+    /// the rest keeps what the view held.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        id: SurfaceId,
+        size: [u32; 2],
+        list: &DrawList,
+        viewport: &mut glyphon::Viewport,
+        within: Option<[u32; 4]>,
+    ) {
+        let [width, height] = size;
         let rects = self.rects.get_or_insert_with(|| rect::Pipeline::new(&self.device, format));
         rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects);
         let images = self.images.get_or_insert_with(|| image::Pipeline::new(&self.device, format));
@@ -243,23 +368,9 @@ impl Gpu {
         shaders.upload(&self.device, &self.queue, [width as f32, height as f32], &list.shaders);
         let particles = self.particles.get_or_insert_with(|| particles::Pipeline::new(&self.device, format));
         particles.upload(&self.device, &self.queue, [width as f32, height as f32], &list.emitters);
+        let clear = self.clear.get_or_insert_with(|| Clear::new(&self.device, format));
 
-        let text = self.text.get_or_insert_with(|| {
-            let cache = glyphon::Cache::new(&self.device);
-            // Web: sRGB-encoded colours in a linear target, as the rects.
-            let atlas = glyphon::TextAtlas::with_color_mode(
-                &self.device,
-                &self.queue,
-                &cache,
-                format,
-                glyphon::ColorMode::Web,
-            );
-            Text { atlas, renderers: Vec::new(), swash: glyphon::SwashCache::new(), cache }
-        });
-        let viewport = target
-            .viewport
-            .get_or_insert_with(|| glyphon::Viewport::new(&self.device, &text.cache));
-        viewport.update(&self.queue, glyphon::Resolution { width, height });
+        let text = self.text.get_or_insert_with(|| Text::new(&self.device, &self.queue, format));
         let layers: Vec<(Layer, Layer)> = list.layers().collect();
         let mut fonts = self.fonts.lock().unwrap();
         let mut used = 0;
@@ -311,41 +422,110 @@ impl Gpu {
         }
         drop(fonts);
 
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("surface"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            // Layer by layer, each whole: a later layer's shapes lie over
-            // everything an earlier one drew, and a raised one's cut what
-            // lies under them first.
-            let mut used = 0;
-            for (from, to) in &layers {
-                rects.draw(&mut pass, from.rects as u32..to.rects as u32);
-                images.draw(&mut pass, from.images..to.images);
-                shaders.draw(&mut pass, from.shaders..to.shaders);
-                particles.draw(&mut pass, from.emitters..to.emitters);
-                if to.texts > from.texts {
-                    let renderer = &text.renderers[used];
-                    used += 1;
-                    if let Err(e) = renderer.render(&text.atlas, viewport, &mut pass) {
-                        log::warn!("text: {e}");
-                    }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("surface"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: if within.is_some() { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        if let Some([x, y, w, h]) = within {
+            // Only the changed rectangle is touched: emptied, then drawn
+            // again by everything that leaves paint in it.
+            pass.set_scissor_rect(x, y, w, h);
+            clear.draw(&mut pass);
+        }
+        // Layer by layer, each whole: a later layer's shapes lie over
+        // everything an earlier one drew, and a raised one's cut what
+        // lies under them first.
+        let mut used = 0;
+        for (from, to) in &layers {
+            rects.draw(&mut pass, from.rects as u32..to.rects as u32);
+            images.draw(&mut pass, from.images..to.images);
+            shaders.draw(&mut pass, from.shaders..to.shaders);
+            particles.draw(&mut pass, from.emitters..to.emitters);
+            if to.texts > from.texts {
+                let renderer = &text.renderers[used];
+                used += 1;
+                if let Err(e) = renderer.render(&text.atlas, viewport, &mut pass) {
+                    log::warn!("text: {e}");
                 }
             }
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
-        text.atlas.trim();
+    }
+}
+
+/// A surface drawn into a texture of its own, kept between frames: only
+/// what changes is drawn again, and the whole is copied to the swapchain.
+struct Canvas {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Whether it holds the last frame whole.
+    valid: bool,
+}
+
+/// Frames this close together are in a row.
+const CANVAS_BEAT: std::time::Duration = std::time::Duration::from_millis(50);
+/// After this many in a row, the surface gets a canvas.
+const CANVAS_STREAK: u32 = 20;
+/// A canvas not drawn into for this long is let go.
+const CANVAS_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Text {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Text {
+        let cache = glyphon::Cache::new(device);
+        // Web: sRGB-encoded colours in a linear target, as the rects.
+        let atlas = glyphon::TextAtlas::with_color_mode(device, queue, &cache, format, glyphon::ColorMode::Web);
+        Text { atlas, renderers: Vec::new(), swash: glyphon::SwashCache::new(), cache }
+    }
+}
+
+/// Empties the scissored part of a pass: transparent, written over what is
+/// there rather than blended with it.
+struct Clear {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl Clear {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Clear {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("clear"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+                    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+                }
+                @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }"
+                    .into(),
+            ),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clear"),
+            layout: None,
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Clear { pipeline }
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.draw(0..3, 0..1);
     }
 }

@@ -61,6 +61,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// One run of shaped text, already laid out by the main thread.
+#[derive(Clone)]
 pub struct Text {
     pub buffer: Arc<cosmic_text::Buffer>,
     /// Top-left corner, physical pixels.
@@ -77,6 +78,7 @@ pub struct Text {
 /// A rasterised image, premultiplied RGBA at its physical size. The render
 /// thread keeps one texture per `key`; the pixels travel with every list but
 /// are uploaded only the first time a key is seen.
+#[derive(Clone)]
 pub struct Image {
     pub key: u64,
     pub pixels: Arc<Vec<u8>>,
@@ -121,6 +123,21 @@ pub struct DrawList {
     /// What the current layer holds that is drawn over its rects: the kind's
     /// rank and its bounds, physical pixels.
     over: Vec<(u8, [f32; 4])>,
+    /// Where each item can leave paint, physical pixels, x0, y0, x1, y1, by
+    /// kind as `order`'s ranks: what a frame that redraws only what changed
+    /// has to clear and draw again (see [`DrawList::damage`]).
+    paint: [Vec<[f32; 4]>; 5],
+}
+
+/// What changed between two frames of one surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Damage {
+    /// Nothing at all.
+    None,
+    /// Only inside this rectangle, whole physical pixels: x, y, width, height.
+    Within([u32; 4]),
+    /// Too much, or the layers themselves: the whole surface.
+    Whole,
 }
 
 /// A surface the render thread knows, named by the main thread.
@@ -140,6 +157,50 @@ impl Layer {
     fn total(&self) -> usize {
         self.rects + self.images + self.shaders + self.emitters + self.texts
     }
+}
+
+/// Whether two rectangles (x0, y0, x1, y1) share any area.
+fn meets(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+/// Whether two items of the same kind draw the same pixels.
+fn same_rect(a: &Rect, b: &Rect) -> bool {
+    bytemuck::bytes_of(a) == bytemuck::bytes_of(b)
+}
+
+fn same_image(a: &Image, b: &Image) -> bool {
+    a.key == b.key
+        && a.width == b.width
+        && a.height == b.height
+        && a.origin == b.origin
+        && a.size == b.size
+        && a.uv == b.uv
+        && a.radius == b.radius
+        && a.alpha == b.alpha
+        && a.clip == b.clip
+        && a.fade == b.fade
+        && a.transform == b.transform
+}
+
+fn same_shader(a: &Shader, b: &Shader) -> bool {
+    a.key == b.key
+        && a.origin == b.origin
+        && a.size == b.size
+        && a.scale == b.scale
+        && a.time == b.time
+        && a.alpha == b.alpha
+        && a.clip == b.clip
+        && a.fade == b.fade
+        && a.values == b.values
+}
+
+fn same_emitter(a: &Emitter, b: &Emitter) -> bool {
+    a.key == b.key && a.generation == b.generation && bytemuck::bytes_of(&a.params) == bytemuck::bytes_of(&b.params)
+}
+
+fn same_text(a: &Text, b: &Text) -> bool {
+    Arc::ptr_eq(&a.buffer, &b.buffer) && a.origin == b.origin && a.scale == b.scale && a.color == b.color && a.clip == b.clip
 }
 
 /// What an item covers, clipped: everything its clip allows when it is
@@ -196,25 +257,44 @@ impl DrawList {
     }
 
     pub fn push_rect(&mut self, r: Rect) {
-        self.order(0, bounds(r.origin, r.size, r.clip, r.transform != Rect::IDENTITY));
+        let tilted = r.transform != Rect::IDENTITY;
+        self.order(0, bounds(r.origin, r.size, r.clip, tilted));
+        // The quad the GPU covers: a pixel past every side for the
+        // antialiased edge, and a bud's parent box (rect.rs, `vs`).
+        let (mut lo, mut hi) = (r.origin, [r.origin[0] + r.size[0], r.origin[1] + r.size[1]]);
+        if r.bud_shape[1] > 0.0 {
+            let centre = [r.origin[0] + r.size[0] * 0.5 + r.bud[0], r.origin[1] + r.size[1] * 0.5 + r.bud[1]];
+            lo = [lo[0].min(centre[0] - r.bud[2]), lo[1].min(centre[1] - r.bud[3])];
+            hi = [hi[0].max(centre[0] + r.bud[2]), hi[1].max(centre[1] + r.bud[3])];
+        }
+        let quad = [lo[0] - 1.0, lo[1] - 1.0];
+        let size = [hi[0] - lo[0] + 2.0, hi[1] - lo[1] + 2.0];
+        self.paint[0].push(bounds(quad, size, r.clip, tilted));
         self.rects.push(r);
     }
 
     pub fn push_image(&mut self, i: Image) {
-        self.order(1, bounds(i.origin, i.size, i.clip, i.transform != Rect::IDENTITY));
+        let tilted = i.transform != Rect::IDENTITY;
+        let painted = bounds(i.origin, i.size, i.clip, tilted);
+        self.order(1, painted);
+        self.paint[1].push(bounds([i.origin[0] - 1.0, i.origin[1] - 1.0], [i.size[0] + 2.0, i.size[1] + 2.0], i.clip, tilted));
         self.images.push(i);
     }
 
     pub fn push_shader(&mut self, s: Shader) {
         let size = [s.size[0] * s.scale, s.size[1] * s.scale];
-        self.order(2, bounds(s.origin, size, s.clip, false));
+        let painted = bounds(s.origin, size, s.clip, false);
+        self.order(2, painted);
+        self.paint[2].push(bounds([s.origin[0] - 1.0, s.origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], s.clip, false));
         self.shaders.push(s);
     }
 
     /// Particles go anywhere their emitter throws them: they count as
     /// covering all of their clip.
     pub fn push_emitter(&mut self, e: Emitter) {
-        self.order(3, bounds([0.0; 2], [0.0; 2], e.params.clip, true));
+        let painted = bounds([0.0; 2], [0.0; 2], e.params.clip, true);
+        self.order(3, painted);
+        self.paint[3].push(painted);
         self.emitters.push(e);
     }
 
@@ -224,8 +304,129 @@ impl DrawList {
         let slack = 4.0 * t.scale;
         let origin = [t.origin[0] - slack, t.origin[1] - slack];
         let size = [size[0] + slack * 2.0, size[1] + slack * 2.0];
-        self.order(4, bounds(origin, size, t.clip, false));
+        let painted = bounds(origin, size, t.clip, false);
+        self.order(4, painted);
+        self.paint[4].push(painted);
         self.texts.push(t);
+    }
+
+    /// What has to be drawn again to turn `before` into this list, on a
+    /// surface `viewport` physical pixels large: every item that changed,
+    /// where it was and where it is. Different layers, or a different
+    /// count of anything, is the whole surface; so is a change over more
+    /// than half of it, which a whole frame draws as cheaply.
+    pub fn damage(&self, before: &DrawList, viewport: [u32; 2]) -> Damage {
+        let counts = |l: &DrawList| [l.rects.len(), l.images.len(), l.shaders.len(), l.emitters.len(), l.texts.len()];
+        if counts(self) != counts(before) || self.breaks.len() != before.breaks.len() {
+            return Damage::Whole;
+        }
+        let same_breaks = self.breaks.iter().zip(&before.breaks).all(|(a, b)| {
+            a.rects == b.rects && a.images == b.images && a.shaders == b.shaders && a.emitters == b.emitters && a.texts == b.texts
+        });
+        if !same_breaks {
+            return Damage::Whole;
+        }
+        let mut area: Option<[f32; 4]> = None;
+        let mut add = |b: [f32; 4]| {
+            if b[2] <= b[0] || b[3] <= b[1] {
+                return;
+            }
+            area = Some(match area {
+                None => b,
+                Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+            });
+        };
+        let mut changed = |kind: usize, i: usize| {
+            add(self.paint[kind][i]);
+            add(before.paint[kind][i]);
+        };
+        for i in 0..self.rects.len() {
+            if !same_rect(&self.rects[i], &before.rects[i]) {
+                changed(0, i);
+            }
+        }
+        for i in 0..self.images.len() {
+            if !same_image(&self.images[i], &before.images[i]) {
+                changed(1, i);
+            }
+        }
+        for i in 0..self.shaders.len() {
+            if !same_shader(&self.shaders[i], &before.shaders[i]) {
+                changed(2, i);
+            }
+        }
+        for i in 0..self.emitters.len() {
+            if !same_emitter(&self.emitters[i], &before.emitters[i]) {
+                changed(3, i);
+            }
+        }
+        for i in 0..self.texts.len() {
+            if !same_text(&self.texts[i], &before.texts[i]) {
+                changed(4, i);
+            }
+        }
+        let Some(a) = area else { return Damage::None };
+        // Out to whole pixels, inside the surface.
+        let (w, h) = (viewport[0] as f32, viewport[1] as f32);
+        let x0 = a[0].floor().clamp(0.0, w);
+        let y0 = a[1].floor().clamp(0.0, h);
+        let x1 = a[2].ceil().clamp(0.0, w);
+        let y1 = a[3].ceil().clamp(0.0, h);
+        if x1 <= x0 || y1 <= y0 {
+            return Damage::None;
+        }
+        if (x1 - x0) * (y1 - y0) > 0.5 * w * h {
+            return Damage::Whole;
+        }
+        Damage::Within([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
+    }
+
+    /// Only what can leave paint inside `area` (x, y, width, height), in the
+    /// same layers and order: what a frame drawn again within it needs.
+    pub fn within(&self, area: [u32; 4]) -> DrawList {
+        let r = [area[0] as f32, area[1] as f32, (area[0] + area[2]) as f32, (area[1] + area[3]) as f32];
+        let mut out = DrawList::default();
+        for (from, to) in self.layers() {
+            for i in from.rects..to.rects {
+                if meets(&self.paint[0][i], &r) {
+                    out.rects.push(self.rects[i]);
+                    out.paint[0].push(self.paint[0][i]);
+                }
+            }
+            for i in from.images..to.images {
+                if meets(&self.paint[1][i], &r) {
+                    out.images.push(self.images[i].clone());
+                    out.paint[1].push(self.paint[1][i]);
+                }
+            }
+            for i in from.shaders..to.shaders {
+                if meets(&self.paint[2][i], &r) {
+                    out.shaders.push(self.shaders[i].clone());
+                    out.paint[2].push(self.paint[2][i]);
+                }
+            }
+            for i in from.emitters..to.emitters {
+                if meets(&self.paint[3][i], &r) {
+                    out.emitters.push(self.emitters[i].clone());
+                    out.paint[3].push(self.paint[3][i]);
+                }
+            }
+            for i in from.texts..to.texts {
+                if meets(&self.paint[4][i], &r) {
+                    out.texts.push(self.texts[i].clone());
+                    out.paint[4].push(self.paint[4][i]);
+                }
+            }
+            let mark = out.mark();
+            if mark.total() > out.breaks.last().map_or(0, |b| b.total()) {
+                out.breaks.push(mark);
+            }
+        }
+        // The last layer ends at the list's end, not at a break.
+        if out.breaks.last().is_some_and(|b| b.total() == out.mark().total()) {
+            out.breaks.pop();
+        }
+        out
     }
 
     /// `other`'s layers after all of these.
@@ -246,6 +447,9 @@ impl DrawList {
         self.shaders.extend(other.shaders);
         self.emitters.extend(other.emitters);
         self.texts.extend(other.texts);
+        for (mine, theirs) in self.paint.iter_mut().zip(other.paint) {
+            mine.extend(theirs);
+        }
         self.over = other.over;
     }
 
@@ -304,7 +508,7 @@ impl Renderer {
                             }
                         }
                         Message::Draw { id, width, height, list } => {
-                            gpu.draw(id, width, height, &list)
+                            gpu.draw(id, width, height, list)
                         }
                         Message::Destroy { id } => gpu.destroy_target(id),
                     }
@@ -403,5 +607,61 @@ mod tests {
         let layers: Vec<_> = list.layers().collect();
         assert_eq!(layers.len(), 2);
         assert_eq!((layers[1].0.rects, layers[1].1.rects), (1, 2));
+    }
+
+    fn scene(moved: f32) -> DrawList {
+        let mut list = DrawList::default();
+        list.push_rect(rect(0.0));
+        list.push_image(image(200.0));
+        list.push_rect(rect(400.0 + moved));
+        list
+    }
+
+    #[test]
+    fn the_same_frame_is_no_damage() {
+        assert_eq!(scene(0.0).damage(&scene(0.0), [1000, 100]), Damage::None);
+    }
+
+    #[test]
+    fn a_moved_shape_damages_where_it_was_and_is() {
+        // At 400 and then 405, ten wide, a pixel past each side.
+        assert_eq!(scene(5.0).damage(&scene(0.0), [1000, 100]), Damage::Within([399, 0, 17, 11]));
+    }
+
+    #[test]
+    fn a_different_count_is_the_whole_surface() {
+        let mut more = scene(0.0);
+        more.push_rect(rect(600.0));
+        assert_eq!(more.damage(&scene(0.0), [1000, 100]), Damage::Whole);
+    }
+
+    #[test]
+    fn a_change_over_most_of_it_is_the_whole_surface() {
+        let (mut a, mut b) = (DrawList::default(), DrawList::default());
+        a.push_rect(rect(0.0));
+        b.push_rect(rect(4.0));
+        assert_eq!(b.damage(&a, [20, 12]), Damage::Whole);
+    }
+
+    #[test]
+    fn within_keeps_only_what_paints_there() {
+        let list = scene(0.0);
+        let part = list.within([395, 0, 20, 10]);
+        assert_eq!((part.rects.len(), part.images.len()), (1, 0));
+        assert_eq!(part.rects[0].origin, [400.0, 0.0]);
+        let part = list.within([0, 0, 1000, 10]);
+        assert_eq!((part.rects.len(), part.images.len()), (2, 1));
+    }
+
+    #[test]
+    fn within_keeps_the_layers_order() {
+        // A shape over a picture: two layers, and both kept where they meet.
+        let mut list = DrawList::default();
+        list.push_image(image(0.0));
+        list.push_rect(rect(5.0));
+        let part = list.within([0, 0, 20, 10]);
+        let layers: Vec<_> = part.layers().collect();
+        assert_eq!(layers.len(), 2);
+        assert_eq!((layers[0].1.images, layers[1].0.rects, layers[1].1.rects), (1, 0, 1));
     }
 }

@@ -227,6 +227,12 @@ impl Pipeline {
         })
     }
 
+    /// What a surface shows, when the last upload carried only part of it
+    /// (a frame drawn again only where it changed): the rest stays too.
+    pub(crate) fn showing(&mut self, id: SurfaceId, keys: impl Iterator<Item = u64>) {
+        self.shown.insert(id, keys.collect());
+    }
+
     /// A surface gone: what it showed may go too.
     pub(crate) fn forget(&mut self, id: SurfaceId) {
         self.shown.remove(&id);

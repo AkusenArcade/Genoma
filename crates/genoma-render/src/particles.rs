@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
 /// One emitter, as the main thread describes it.
+#[derive(Clone)]
 pub struct Emitter {
     /// Stable across frames, so its births are uploaded only when they change.
     pub key: u64,

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
 /// One shader node, as the main thread describes it.
+#[derive(Clone)]
 pub struct Shader {
     /// The interface's WGSL.
     pub source: std::sync::Arc<String>,
@@ -220,6 +221,16 @@ impl Pipeline {
             Some(e) => {
                 log::error!("g.shader does not compile: {e}");
                 None
+            }
+        }
+    }
+
+    /// Shaders still shown though not uploaded this time (a frame drawn
+    /// again only where it changed): their pipelines stay.
+    pub(crate) fn touch(&mut self, keys: impl Iterator<Item = u64>) {
+        for key in keys {
+            if let Some((_, used)) = self.pipelines.get_mut(&key) {
+                *used = self.uploads;
             }
         }
     }
