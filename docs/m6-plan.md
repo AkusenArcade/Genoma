@@ -263,8 +263,9 @@ person on the Quickshell version has to do, then a restart of the shell):
       starting Bioma on Genoma, depending on it; the person's
       `override.json` read unchanged; the Quickshell version moved to a
       backup folder and left out.
-- [ ] The laptop: the measurements M0 to M2 left pending, and the hardware
-      checks M5 left (battery, Wi-Fi join, Bluetooth pairing).
+- [x] The laptop: the hardware checks M5 left (battery, Wi-Fi join,
+      Bluetooth pairing), working (Akusen, 2026-11-04).
+- [ ] The laptop: the measurements M0 to M2 left pending.
 
 ## Done when
 

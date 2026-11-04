@@ -48,8 +48,10 @@ the loop through a `calloop` channel.
   through as two signals. `power:set_profile("balanced")` from Luau moved
   the daemon and came back as `power.profile`. At rest the bus thread woke
   0 times in 30 s.
-- [ ] **On the laptop:** the battery half (the desktop has none), unplugging
+- [x] **On the laptop:** the battery half (the desktop has none), unplugging
       the charger, and time to empty.
+      *Akusen, 2026-11-04, on the laptop with Bioma on Genoma 0.1.1:
+      working. Not reported item by item.*
 
 ### 2. Building blocks (§9.2)
 
@@ -112,8 +114,10 @@ again and posted whole.
   shows came through (SoToUniFi's two access points as one); then the radio
   off again. No saved Wi-Fi profile, so nothing joined.
 - At rest the bus thread woke 0 times in 30 s.
-- [ ] **On the laptop, with his Wi-Fi:** join with and without a password,
+- [x] **On the laptop, with his Wi-Fi:** join with and without a password,
       the failure reason for a wrong one, leave, forget.
+      *Akusen, 2026-11-04, on the laptop with Bioma on Genoma 0.1.1:
+      working. Not reported item by item.*
 
 ### 4. Media
 
@@ -182,9 +186,11 @@ its call is in flight, as Quickshell has it, since BlueZ has no such state.
 - Discovery from Luau on and off: the two unnamed devices nearby that
   `bluetoothctl devices` listed came through, and `Discovering` went back to
   no.
-- [ ] **With one of Akusen's devices:** pair, connect, the battery,
+- [x] **With one of Akusen's devices:** pair, connect, the battery,
       disconnect, forget. Pairing a device that wants a code needs an agent;
       whether Bioma relies on one (and which) is checked then.
+      *Akusen, 2026-11-04, on the laptop with Bioma on Genoma 0.1.1:
+      working. Not reported item by item.*
 
 ### 7. Windows and colours
 
