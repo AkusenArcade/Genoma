@@ -1,9 +1,11 @@
 # Genoma's mark
 
-A double helix in Bioma's drawing: one 1.5 stroke on the 24 grid, round
-caps and joins, a gap where a strand passes behind the other, and Bioma's
-own thread across the middle with a node at each end, so the toolkit reads
-as the same family as the shell it was made for.
+Bioma's capsule, the same 10.8 × 18.8 on the 24 grid, holding a double
+helix seen through it: two strands crossing once in the middle, the one
+behind cut either side of the crossing, cropped by the capsule so they
+curve back along its ends. One 1.5 stroke, round caps and joins, the
+primary gradient: the shell's own drawing, so the toolkit reads as its
+family.
 
 | File | What |
 |---|---|
@@ -11,6 +13,6 @@ as the same family as the shell it was made for.
 | `genoma-icon.svg` / `.png` | the application icon: the mark on the dark ground, primary gradient |
 | `logo.svg` / `.png` | the mark, GENOMA in Orbitron and a line in Spectral, as Bioma's logo |
 
-The SVGs are written by `mark.py` from the helix's numbers (amplitude 5.4,
-a turn and a half over 2.6–21.4, gaps of 1.0 either side of a crossing);
-change them there rather than by hand.
+The SVGs are written by `mark.py` from the helix's numbers (amplitude
+5.4, half a turn over 15 units, a gap of 1.15 either side of the
+crossing); change them there rather than by hand.
