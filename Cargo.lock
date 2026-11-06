@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "genoma"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -1005,14 +1005,14 @@ dependencies = [
 
 [[package]]
 name = "genoma-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "genoma-render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "glyphon",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "genoma-scene"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "genoma-core",
  "genoma-render",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "genoma-script"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "calloop",
  "futures-util",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "genoma-services"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "calloop",
  "futures-channel",
