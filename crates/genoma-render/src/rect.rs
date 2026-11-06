@@ -209,6 +209,10 @@ struct Varyings {
     @location(12) bud: vec4<f32>,
     @location(13) bud_shape: vec4<f32>,
     @location(14) fade: vec4<f32>,
+    // The pixel before the node's matrix: where the clip and the fade are
+    // measured, so what a tilted shape holds is cut by its turned parent,
+    // not by where that parent lay flat. The same as the position when flat.
+    @location(15) unturned: vec2<f32>,
 };
 
 @vertex
@@ -250,6 +254,7 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     out.bud = instance.bud;
     out.bud_shape = instance.bud_shape;
     out.fade = instance.fade;
+    out.unturned = pixel;
     return out;
 }
 
@@ -351,7 +356,7 @@ fn body(in: Varyings) -> vec4<f32> {
     // less under depth. Taken before any branch, where derivatives are
     // defined.
     let aa = max(length(fwidth(in.local)) * 0.70710678, 1e-3);
-    let p = in.position.xy;
+    let p = in.unturned;
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
     }
@@ -468,7 +473,7 @@ fn faded(colour: vec4<f32>, y: f32, fade: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
-    return faded(body(in), in.position.y, in.fade);
+    return faded(body(in), in.unturned.y, in.fade);
 }
 "#;
 

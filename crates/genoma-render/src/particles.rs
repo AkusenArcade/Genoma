@@ -36,6 +36,8 @@ pub struct EmitterParams {
     /// The carried path's control point, physical pixels, and whether it is
     /// set: particles then follow the same curve as a thread.
     pub bend: [f32; 4],
+    /// Depth, as a rect's (see [`crate::Rect::transform`]).
+    pub transform: [[f32; 4]; 4],
 }
 
 const SHADER: &str = r#"
@@ -47,6 +49,7 @@ struct Params {
     clip: vec4<f32>,
     viewport: vec4<f32>,
     bend: vec4<f32>,
+    transform: mat4x4<f32>,
 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> births: array<f32>;
@@ -56,6 +59,8 @@ struct Varyings {
     @location(0) local: vec2<f32>,
     @location(1) alpha: f32,
     @location(2) radius: f32,
+    // The pixel before the matrix, where the clip is measured (as the rects').
+    @location(3) unturned: vec2<f32>,
 };
 
 // A particle's own randomness: three numbers in [0, 1) from its slot and
@@ -107,7 +112,10 @@ fn vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) slot: u32) ->
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u)) * 2.0 - 1.0;
     let half = size * 0.5 + 1.0;
     let pixel = at + corner * half;
-    out.position = vec4<f32>(pixel / p.viewport.xy * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    // Depth, as the rects have it: w carries the perspective.
+    let turned = vec4<f32>(pixel, 0.0, 1.0) * p.transform;
+    out.position = vec4<f32>(((turned.xy / turned.w) / p.viewport.xy * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0)) * turned.w, 0.0, turned.w);
+    out.unturned = pixel;
     out.local = corner * half;
     out.radius = size * 0.5;
     return out;
@@ -115,7 +123,7 @@ fn vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) slot: u32) ->
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
-    let q = in.position.xy;
+    let q = in.unturned;
     if (q.x < p.clip.x || q.y < p.clip.y || q.x >= p.clip.z || q.y >= p.clip.w) { discard; }
     let cover = clamp(in.radius - length(in.local) + 0.5, 0.0, 1.0) * in.alpha;
     return vec4<f32>(p.color.rgb * cover, cover);

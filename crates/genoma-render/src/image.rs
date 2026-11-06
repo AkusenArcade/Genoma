@@ -34,6 +34,9 @@ struct Varyings {
     @location(3) local: vec2<f32>,
     @location(4) shape: vec3<f32>,
     @location(5) fade: vec2<f32>,
+    // The pixel before the matrix, where the clip and the fade are measured
+    // (as the rects': a tilted subtree is cut by its turned parent).
+    @location(6) unturned: vec2<f32>,
 };
 
 @vertex
@@ -53,12 +56,13 @@ fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @locat
     out.local = corner * size;
     out.shape = vec3<f32>(size, alpha.y);
     out.fade = alpha.zw;
+    out.unturned = pixel;
     return out;
 }
 
 @fragment
 fn fs(in: Varyings) -> @location(0) vec4<f32> {
-    let p = in.position.xy;
+    let p = in.unturned;
     if (p.x < in.clip.x || p.y < in.clip.y || p.x >= in.clip.z || p.y >= in.clip.w) {
         discard;
     }

@@ -42,6 +42,8 @@ pub struct Shader {
     pub fade: [f32; 4],
     /// At most [`VALUES`]; the rest read 0.
     pub values: Vec<f32>,
+    /// Depth, as a rect's (see [`crate::Rect::transform`]).
+    pub transform: [[f32; 4]; 4],
 }
 
 pub const VALUES: usize = 1024;
@@ -59,6 +61,7 @@ struct Uniforms {
     fade_end: f32,
     fade_span: f32,
     _pad: f32,
+    transform: [[f32; 4]; 4],
     values: [[f32; 4]; VALUES / 4],
 }
 
@@ -77,9 +80,18 @@ struct Shader {
     alpha: f32,
     fade_end: f32,
     fade_span: f32,
+    transform: mat4x4<f32>,
     values: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> shader: Shader;
+
+// The pixel before the node's matrix rides beside the position: the
+// interface's `shade` is given it, and the clip and the fade are measured
+// on it, so a tilted shader is drawn and cut as its turned parent is.
+struct GenomaVaryings {
+    @builtin(position) position: vec4<f32>,
+    @location(0) unturned: vec2<f32>,
+};
 
 fn value(i: i32) -> f32 {
     if (i < 0 || i >= 1024) { return 0.0; }
@@ -87,15 +99,21 @@ fn value(i: i32) -> f32 {
 }
 
 @vertex
-fn genoma_vs(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+fn genoma_vs(@builtin(vertex_index) vertex: u32) -> GenomaVaryings {
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u));
     let pixel = shader.origin + corner * shader.size * shader.scale;
-    return vec4<f32>(pixel / shader.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+    // Depth, as the rects have it: w carries the perspective.
+    let t = vec4<f32>(pixel, 0.0, 1.0) * shader.transform;
+    let ndc = (t.xy / t.w) / shader.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    var out: GenomaVaryings;
+    out.position = vec4<f32>(ndc * t.w, 0.0, t.w);
+    out.unturned = pixel;
+    return out;
 }
 
 @fragment
-fn genoma_fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let q = position.xy;
+fn genoma_fs(in: GenomaVaryings) -> @location(0) vec4<f32> {
+    let q = in.unturned;
     let c = shader.clip;
     // Shaded before the clip is tested: derivatives need every pixel of a quad.
     let colour = shade((q - shader.origin) / shader.scale);
@@ -272,6 +290,7 @@ impl Pipeline {
                 fade_end: s.fade[0],
                 fade_span: s.fade[1],
                 _pad: 0.0,
+                transform: s.transform,
                 values,
             };
             let at = i * STRIDE as usize;

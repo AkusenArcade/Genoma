@@ -2275,6 +2275,7 @@ fn collect_node(
                         } else {
                             [0.0; 4]
                         },
+                        transform: out.transform,
                     },
                 });
             }
@@ -2292,6 +2293,7 @@ fn collect_node(
                     clip: out.clip,
                     fade: out.fade_of(),
                     values: n.shown.clone(),
+                    transform: out.transform,
                 });
             }
         }

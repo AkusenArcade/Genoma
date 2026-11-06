@@ -193,6 +193,7 @@ fn same_shader(a: &Shader, b: &Shader) -> bool {
         && a.clip == b.clip
         && a.fade == b.fade
         && a.values == b.values
+        && a.transform == b.transform
 }
 
 fn same_emitter(a: &Emitter, b: &Emitter) -> bool {
@@ -283,9 +284,10 @@ impl DrawList {
 
     pub fn push_shader(&mut self, s: Shader) {
         let size = [s.size[0] * s.scale, s.size[1] * s.scale];
-        let painted = bounds(s.origin, size, s.clip, false);
+        let tilted = s.transform != Rect::IDENTITY;
+        let painted = bounds(s.origin, size, s.clip, tilted);
         self.order(2, painted);
-        self.paint[2].push(bounds([s.origin[0] - 1.0, s.origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], s.clip, false));
+        self.paint[2].push(bounds([s.origin[0] - 1.0, s.origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], s.clip, tilted));
         self.shaders.push(s);
     }
 
