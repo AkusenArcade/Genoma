@@ -200,6 +200,10 @@ pub struct Node {
     wave_time: f32,
     level_left: bool,
     fill_across: bool,
+    /// The fill gradient turned (CSS degrees), and its shape: 0 linear,
+    /// 1 radial, 2 conic. `None` with shape 0 is the vertical gradient.
+    fill_angle: Option<f32>,
+    fill_shape: u8,
     raised: bool,
     /// The pointer's shape over it, an index into `schema::CURSORS`; 0 is
     /// whatever the node around it asks for.
@@ -304,6 +308,8 @@ impl Node {
             wave_time: 0.0,
             level_left: false,
             fill_across: false,
+            fill_angle: None,
+            fill_shape: 0,
             raised: false,
             cursor: 0,
             decode: [None, None],
@@ -934,6 +940,7 @@ impl Scene {
             Prop::Radius => Value::Number(n.radius?),
             Prop::Level => Value::Number(n.level),
             Prop::Arc => Value::Number(n.arc),
+            Prop::FillAngle => Value::Number(n.fill_angle?),
             Prop::Opacity => Value::Number(n.opacity),
             Prop::Growth => Value::Number(n.growth),
             Prop::Reach => Value::Number(n.reach),
@@ -1196,6 +1203,14 @@ impl Scene {
             Prop::WaveTime => (n.wave_time, mover) = (take!(number).max(0.0), true),
             Prop::LevelLeft => n.level_left = take!(flag),
             Prop::FillAcross => n.fill_across = take!(flag),
+            Prop::FillAngle => n.fill_angle = Some(take!(number)),
+            Prop::FillShape => {
+                n.fill_shape = match take!(text).as_str() {
+                    "radial" => 1,
+                    "conic" => 2,
+                    _ => 0,
+                };
+            }
             Prop::Raised => n.raised = take!(flag),
             Prop::Cursor => {
                 let name = take!(text);
@@ -1757,6 +1772,22 @@ impl Out<'_> {
     }
 }
 
+/// The fill gradient's shape in the fourth slot of `fade`, which the GPU
+/// reads as `kind × 1000 + degrees`: 1 linear at an angle, 2 radial, 3
+/// conic. 0 leaves the gradient vertical (or across, with `fill_across`).
+fn with_fill_shape(mut fade: [f32; 4], n: &Node) -> [f32; 4] {
+    fade[3] = fill_shape_code(n.fill_shape, n.fill_angle);
+    fade
+}
+
+fn fill_shape_code(shape: u8, angle: Option<f32>) -> f32 {
+    if shape == 0 && angle.is_none() {
+        return 0.0;
+    }
+    let degrees = angle.unwrap_or(if shape == 0 { 180.0 } else { 0.0 }).rem_euclid(360.0);
+    (shape as f32 + 1.0) * 1000.0 + degrees
+}
+
 fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut m = [[0.0; 4]; 4];
     for i in 0..4 {
@@ -2140,7 +2171,7 @@ fn collect_node(
                     path_end: [0.0; 4],
                     bud,
                     bud_shape,
-                    fade: out.fade_of(),
+                    fade: with_fill_shape(out.fade_of(), n),
                     transform: out.transform,
                 });
             }
@@ -2535,6 +2566,17 @@ fn collect_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fill_without_shape_or_angle_stays_vertical() {
+        assert_eq!(fill_shape_code(0, None), 0.0);
+        // A turned linear fill, the angle kept within a turn.
+        assert_eq!(fill_shape_code(0, Some(90.0)), 1090.0);
+        assert_eq!(fill_shape_code(0, Some(-90.0)), 1270.0);
+        // Radial needs no angle; conic starts at twelve without one.
+        assert_eq!(fill_shape_code(1, None), 2000.0);
+        assert_eq!(fill_shape_code(2, Some(45.0)), 3045.0);
+    }
 
     #[test]
     fn a_name_cut_in_the_middle_keeps_both_ends() {

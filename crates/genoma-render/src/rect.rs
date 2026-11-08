@@ -51,7 +51,8 @@ pub struct Rect {
     /// Faded toward a clip's foot: the bottom edge where nothing is left
     /// and how far above it the fade begins, physical pixels. A zero span
     /// is no fade. The third is the GPU's own (the fill's stops, by index);
-    /// the fourth is unused.
+    /// the fourth is the fill gradient's shape, kind × 1000 + degrees (1
+    /// linear at an angle, 2 radial, 3 conic), 0 for the vertical one.
     pub fade: [f32; 4],
     /// Budding (PRD §8.2): the parent's box, its centre relative to this
     /// one's and its half size, physical pixels; then the parent's radius,
@@ -438,6 +439,9 @@ fn body(in: Varyings) -> vec4<f32> {
     if ((flags & 2u) != 0u) {
         along_fill = (in.local.x + in.half.x) / max(in.half.x * 2.0, 1.0);
     }
+    if (in.fade.w > 0.5) {
+        along_fill = along_shape(in.local, in.half, in.fade.w);
+    }
     if (in.fade.z > 0.5) {
         fill = along_stops(gradients[u32(in.fade.z + 0.5)], clamp(along_fill, 0.0, 1.0));
     } else if (in.fill_to.a > 0.0) {
@@ -463,6 +467,25 @@ fn body(in: Varyings) -> vec4<f32> {
     }
     // Premultiplied out: the surface is composited as premultiplied alpha.
     return vec4<f32>(rim_colour.rgb * rim_alpha + fill.rgb * fill_alpha, rim_alpha + fill_alpha);
+}
+
+// Where a point lies along a turned, radial or conic fill (`fade.w`, kind ×
+// 1000 + degrees). Linear follows CSS: 0° runs bottom to top, 90° left to
+// right, and the line is as long as the box's projection on it, so the
+// corners sit at 0 and 1. Radial reaches 1 at the middle of each side.
+// Conic goes round clockwise from the angle, twelve at 0°.
+fn along_shape(local: vec2<f32>, half: vec2<f32>, code: f32) -> f32 {
+    let kind = floor(code / 1000.0 + 0.0005);
+    let radians = (code - kind * 1000.0) * 0.017453293;
+    if (kind < 1.5) {
+        let direction = vec2<f32>(sin(radians), -cos(radians));
+        let reach = abs(half.x * direction.x) + abs(half.y * direction.y);
+        return dot(local, direction) / max(reach * 2.0, 1.0) + 0.5;
+    }
+    if (kind < 2.5) {
+        return length(local / max(half, vec2<f32>(1.0)));
+    }
+    return fract(atan2(local.x, -local.y) / 6.2831853 - radians / 6.2831853 + 1.0);
 }
 
 // Toward a clip's foot, everything fades: alpha and colour, premultiplied.
