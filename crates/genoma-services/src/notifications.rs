@@ -102,6 +102,38 @@ struct Server {
     open: Arc<Mutex<HashSet<u32>>>,
 }
 
+/// The vendor is the shell, not the toolkit: the program Genoma runs as
+/// (`exec -a bioma genoma …` answers "Bioma"), and "Genoma" when started
+/// under its own name.
+fn vendor() -> String {
+    let name = std::env::args_os()
+        .next()
+        .and_then(|a| std::path::Path::new(&a).file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    vendor_of(&name)
+}
+
+fn vendor_of(name: &str) -> String {
+    if name.is_empty() || name == "genoma" {
+        return "Genoma".into();
+    }
+    let mut chars = name.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vendor_of;
+
+    #[test]
+    fn vendor_is_the_program() {
+        assert_eq!(vendor_of("bioma"), "Bioma");
+        assert_eq!(vendor_of("genoma"), "Genoma");
+        assert_eq!(vendor_of(""), "Genoma");
+        assert_eq!(vendor_of("my-shell"), "My-shell");
+    }
+}
+
 fn hint<T: TryFrom<OwnedVariant>>(hints: &HashMap<String, OwnedVariant>, keys: &[&str]) -> Option<T> {
     keys.iter().find_map(|k| hints.get(*k).and_then(|v| T::try_from(v.clone()).ok()))
 }
@@ -113,8 +145,8 @@ impl Server {
     }
 
     #[zbus(out_args("name", "vendor", "version", "spec_version"))]
-    fn get_server_information(&self) -> (&'static str, &'static str, &'static str, &'static str) {
-        ("Genoma", "Bioma", env!("CARGO_PKG_VERSION"), "1.2")
+    fn get_server_information(&self) -> (&'static str, String, &'static str, &'static str) {
+        ("Genoma", vendor(), env!("CARGO_PKG_VERSION"), "1.2")
     }
 
     #[allow(clippy::too_many_arguments)]

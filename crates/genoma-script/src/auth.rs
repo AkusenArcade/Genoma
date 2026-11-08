@@ -33,7 +33,7 @@ impl UserData for Auth {
     }
 }
 
-/// `g.pam.start { service = "bioma-lock", directory = "~/…/assets/pam",
+/// `g.pam.start { service = "my-lock", directory = "~/…/assets/pam",
 /// user = …, on_prompt = function(message, echo) … end, on_message =
 /// function(message, error) … end, on_done = function(result) … end }`.
 /// `result` is "success", "failure", "max-tries" or "error: …".

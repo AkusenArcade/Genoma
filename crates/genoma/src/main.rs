@@ -352,12 +352,16 @@ impl genoma_script::io::Host for LoopHost {
     }
 }
 
-/// `genoma pam [service] [directory]`: one authentication of the current
-/// user, the answers read from the terminal without echo, and only the
-/// outcome printed. Bioma's lock screen is `bioma-lock` in its `assets/pam`.
+/// `genoma pam <service> [directory]`: one authentication of the current
+/// user against a PAM service (a shell's lock screen ships its own, as
+/// Bioma's `bioma-lock` in `assets/pam`), the answers read from the terminal
+/// without echo, and only the outcome printed.
 fn pam_check(service: Option<String>, directory: Option<String>) {
     use genoma_services::pam::{Event, authenticate};
-    let service = service.unwrap_or_else(|| "bioma-lock".into());
+    let Some(service) = service else {
+        eprintln!("usage: genoma pam <service> [directory]");
+        std::process::exit(2);
+    };
     let user = std::env::var("USER").unwrap_or_default();
     let (answers, receiver) = std::sync::mpsc::channel();
     let started = std::time::Instant::now();
