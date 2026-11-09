@@ -44,7 +44,8 @@ GENOMA_OUTPUT=DP-1 genoma examples/bar
 
 [`examples/bar`](examples/bar/shell.luau) is a classic top bar in about 200
 lines: workspaces, the focused window's title, CPU, memory, volume (wheel to
-change, click to mute), battery, and the time. Edit `shell.luau` while it
+change, click to mute), battery, and the time, which opens the date in a
+popup. Edit `shell.luau` while it
 runs and the bar reloads; values kept with `g.state` survive the reload. An
 error keeps the last good tree on screen and is logged.
 
@@ -91,6 +92,13 @@ return g.surface {
   timing to use, so retiming a shell is one table.
 - **Input:** `on_click`, `on_wheel`, `on_drag`, `on_key`, `on_hover`,
   `on_fling` and others. The input region follows the nodes that take input.
+- **Popups:** `g.popup { anchor = "clock", side = "bottom", align = "end",
+  present = …, on_dismiss = … }` opens beside the node with `id = "clock"`
+  on another surface, over everything. The compositor turns it to the other
+  side or slides it along when it would leave the screen. Opened by a press
+  or a key, it takes the keyboard (keys reach a `catch` node's `on_key`) and
+  a press elsewhere closes it, calling `on_dismiss`. `anchor` may be a
+  function, so one menu serves every item of a tray.
 - **Living layer:** threads that grow between nodes, budding panels joined by
   a narrowing neck, springs, and 3D tilt and depth (`rotate_x`, `rotate_y`,
   `depth`, `perspective`). See `examples/living`, `examples/budding`.

@@ -2,7 +2,8 @@
 -- A classic top bar, the shape most shells start from, written against
 -- Genoma alone: workspaces on the left, the focused window's title in the
 -- middle, system readings and the time on the right. It reserves its height,
--- so windows tile below it.
+-- so windows tile below it. A press on the time opens the date beside it, a
+-- popup the compositor keeps on screen; a press elsewhere or Escape closes it.
 --
 --   GENOMA_OUTPUT=DP-1 genoma examples/bar
 --
@@ -154,6 +155,9 @@ local function two(n: number): string
     return string.format("%02d", n)
 end
 
+-- Whether the date is open beside the clock.
+local dated = g.signal(false)
+
 local right = g.box {
     gap = 18,
     reading("CPU", function() return percent(vitals.cpu) end, { role = "status", name = "Processor" }),
@@ -161,8 +165,11 @@ local right = g.box {
     volume,
     battery,
     g.text {
+        id = "clock",
         role = "timer",
         name = "Clock",
+        cursor = "pointer",
+        on_click = function() dated.value = not dated.value end,
         size = 13,
         weight = 600,
         tabular = true,
@@ -171,9 +178,52 @@ local right = g.box {
     },
 }
 
+-- ---- The date ------------------------------------------------------------
+
+-- A popup beside the node whose id is "clock": below it, its right edge on
+-- the clock's, turned or slid by the compositor if it would leave the screen.
+-- Opened by a press, it takes the keyboard, and a press anywhere else closes
+-- it (on_dismiss), as a menu does.
+local date = g.popup {
+    anchor = "clock",
+    side = "bottom",
+    align = "end",
+    gap = 8,
+    present = function() return dated.value end,
+    on_dismiss = function() dated.value = false end,
+
+    g.capsule {
+        -- Catching, it hears the keys.
+        catch = true,
+        on_key = function(name: string)
+            if name == "Escape" then dated.value = false end
+        end,
+        direction = "column",
+        gap = 2,
+        padding = 14,
+        radius = 10,
+        fill = theme.background,
+        rim_top = theme.line,
+        g.text {
+            size = 12,
+            weight = 600,
+            tracking = 0.06,
+            color = theme.faint,
+            -- Read again each hour: the day changes on one of them.
+            text = function() return clock.hour >= 0 and string.upper(os.date("%A")) or "" end,
+        },
+        g.text {
+            size = 15,
+            weight = 600,
+            color = theme.text,
+            text = function() return clock.hour >= 0 and os.date("%d %B %Y") or "" end,
+        },
+    },
+}
+
 -- ---- The bar -------------------------------------------------------------
 
-return g.surface {
+local bar = g.surface {
     anchor = { "top", "left", "right" },
     namespace = "genoma-bar",
     reserve = true,
@@ -191,3 +241,5 @@ return g.surface {
         right,
     },
 }
+
+return { bar, date }

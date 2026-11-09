@@ -17,6 +17,10 @@ use genoma_render::{Fonts, Renderer, SurfaceId};
 use genoma_scene::{Blur, NodeId, Scene};
 use genoma_script::{Input, SurfaceSpec, Target, Wish};
 use smithay_client_toolkit::{
+    registry::SimpleGlobal,
+    reexports::protocols::xdg::shell::client::xdg_wm_base::XdgWmBase,
+};
+use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_registry,
@@ -75,6 +79,10 @@ use smithay_client_toolkit::{
     },
     shell::{
         WaylandSurface,
+        xdg::{
+            XdgPositioner,
+            popup::{Popup, PopupConfigure, PopupHandler},
+        },
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
@@ -88,21 +96,40 @@ enum Role {
     /// Over everything, on one output, while the session is locked; sized
     /// by the compositor alone.
     Lock(SessionLockSurface),
+    /// Beside a node of a layer surface, over everything, while its
+    /// description is present: `None` while closed. Each opening is a new
+    /// Wayland surface, the scene and its tree staying.
+    Popup(Option<PopupRole>),
+}
+
+/// An open popup's own Wayland objects.
+struct PopupRole {
+    popup: Popup,
+    fraction: Option<WpFractionalScaleV1>,
+    /// The layer surface it opened from, and the anchor's rectangle there
+    /// as the positioner was last given it.
+    parent: SurfaceId,
+    anchor: [i32; 4],
 }
 
 impl Role {
-    fn wl_surface(&self) -> &wl_surface::WlSurface {
+    fn wl_surface(&self) -> Option<&wl_surface::WlSurface> {
         match self {
-            Role::Layer(layer) => layer.wl_surface(),
-            Role::Lock(lock) => lock.wl_surface(),
+            Role::Layer(layer) => Some(layer.wl_surface()),
+            Role::Lock(lock) => Some(lock.wl_surface()),
+            Role::Popup(open) => open.as_ref().map(|p| p.popup.wl_surface()),
         }
     }
 
     fn layer(&self) -> Option<&LayerSurface> {
         match self {
             Role::Layer(layer) => Some(layer),
-            Role::Lock(_) => None,
+            Role::Lock(_) | Role::Popup(_) => None,
         }
+    }
+
+    fn is_popup(&self) -> bool {
+        matches!(self, Role::Popup(_))
     }
 }
 
@@ -187,6 +214,67 @@ struct Surface {
     /// The strip its `reserve` function asks for, in place of the
     /// description's; `None` while it has none.
     reserve_wish: Option<Option<i32>>,
+    /// A popup the compositor closed: it stays closed until its
+    /// description lets it go and asks for it again.
+    dismissed: bool,
+    /// A popup's anchor as its function gives it now.
+    anchor_wish: Option<String>,
+}
+
+impl Surface {
+    /// A surface as it is made: nothing configured, drawn or pressed yet.
+    #[allow(clippy::too_many_arguments)]
+    fn blank(
+        id: SurfaceId,
+        spec: usize,
+        output: Option<String>,
+        scene: Rc<RefCell<Scene>>,
+        role: Role,
+        viewport: Option<WpViewport>,
+        effect: Option<ExtBackgroundEffectSurfaceV1>,
+        output_size: Option<(u32, u32)>,
+    ) -> Surface {
+        Surface {
+            id,
+            spec,
+            output,
+            scene,
+            role,
+            viewport,
+            effect,
+            target_made: false,
+            logical: (1, 1),
+            wanted: (1, 1),
+            scale: 1.0,
+            configured: false,
+            dirty: false,
+            frame_pending: false,
+            frames: 0,
+            tally: (0, Duration::ZERO, Instant::now()),
+            blurred: Vec::new(),
+            inputs: None,
+            holes: Vec::new(),
+            inhibitor: None,
+            keyboard: false,
+            hovered: None,
+            focused: None,
+            pressed: None,
+            pressed_at: (0.0, 0.0),
+            asleep: false,
+            reserve_wish: None,
+            dismissed: false,
+            anchor_wish: None,
+            strokes: Vec::new(),
+            tall: false,
+            output_size,
+            area: None,
+            built: None,
+            wake: None,
+            access: crate::access::Access::new(),
+            access_checked: None,
+            held: None,
+        }
+    }
 }
 
 pub struct App {
@@ -271,6 +359,17 @@ pub struct App {
     data_device: Option<ExtDataControlDeviceV1>,
     clip_offer: Option<ExtDataControlOfferV1>,
     clipboard: Option<std::rc::Rc<genoma_services::clipboard::Clipboard>>,
+    /// `xdg-shell`, for popups: only its base, bound by hand, since sctk's
+    /// whole shell would ask for windows too.
+    xdg_shell: Option<XdgWmBase>,
+    /// The serial of the last press or key on one of the shell's surfaces:
+    /// a popup takes the keyboard with it, and only in answer to one.
+    input_serial: u32,
+    /// The surface the keyboard is on, as the compositor says.
+    keyboard_on: Option<wl_surface::WlSurface>,
+    /// Popups the compositor closed, by description and output, for the
+    /// interface to hear.
+    dismissed: Vec<(usize, Option<String>)>,
 }
 
 impl App {
@@ -326,8 +425,13 @@ impl App {
             data_device: None,
             clip_offer: None,
             clipboard: None,
+            xdg_shell: None,
+            input_serial: 0,
+            keyboard_on: None,
+            dismissed: Vec::new(),
             globals,
         };
+        app.xdg_shell = app.globals.bind(&app.qh, 1..=6, smithay_client_toolkit::globals::GlobalData).ok();
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
         match app.dmabuf.get_default_feedback(&qh) {
@@ -535,6 +639,248 @@ impl App {
         if let Err(e) = inserted {
             log::warn!("clipboard: {e}");
         }
+    }
+
+    /// Each popup as its description wants it now: opened once what it
+    /// opens from is on screen, closed when let go, moved when its anchor
+    /// moved or its content changed size.
+    fn sync_popups(&mut self) {
+        for i in 0..self.surfaces.len() {
+            if !self.surfaces[i].role.is_popup() {
+                continue;
+            }
+            let s = &self.surfaces[i];
+            let wanted = !s.asleep && !s.dismissed;
+            match (&s.role, wanted) {
+                (Role::Popup(None), true) => self.open_popup(i),
+                (Role::Popup(Some(_)), false) => self.close_popup(i),
+                (Role::Popup(Some(p)), true) => {
+                    let (parent, anchor) = (p.parent, p.anchor);
+                    if self.anchor_of(i).is_some_and(|(j, _, rect)| self.surfaces[j].id == parent && rect != anchor) {
+                        self.reposition(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Where popup `i` opens from: the layer surface on its output (any,
+    /// for a popup with none) holding the node its anchor names, as last
+    /// drawn, and that node's rectangle there.
+    fn anchor_of(&self, i: usize) -> Option<(usize, LayerSurface, [i32; 4])> {
+        let spec = self.specs.get(self.surfaces[i].spec)?.popup.as_ref()?;
+        let id = spec.anchor.as_ref().or(self.surfaces[i].anchor_wish.as_ref())?;
+        let output = &self.surfaces[i].output;
+        self.surfaces.iter().enumerate().find_map(|(j, p)| {
+            let Role::Layer(layer) = &p.role else { return None };
+            if j == i || !p.configured || p.asleep || p.frames == 0 || (output.is_some() && &p.output != output) {
+                return None;
+            }
+            let scene = p.scene.borrow();
+            let [x, y, w, h] = scene.extent(scene.find(id)?)?;
+            Some((j, layer.clone(), [x.floor() as i32, y.floor() as i32, w.ceil().max(1.0) as i32, h.ceil().max(1.0) as i32]))
+        })
+    }
+
+    /// The positioner for popup `i` at `anchor`: opened on its side of the
+    /// node, aligned along it, the gap kept as part of the anchor so that a
+    /// popup turned to the other side keeps it too; turned when it would
+    /// leave the output, slid along when it still would.
+    fn positioner(&self, i: usize, anchor: [i32; 4]) -> Option<XdgPositioner> {
+        use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_positioner::{
+            Anchor as A, ConstraintAdjustment as C, Gravity as G,
+        };
+        let spec = self.specs.get(self.surfaces[i].spec)?.popup.as_ref()?;
+        let base = SimpleGlobal::<XdgWmBase, 6>::from_bound(self.xdg_shell.clone()?);
+        let positioner = XdgPositioner::new(&base).ok()?;
+        let (w, h) = self.surfaces[i].wanted;
+        positioner.set_size(w.max(1) as i32, h.max(1) as i32);
+        let [mut x, mut y, mut aw, mut ah] = anchor;
+        let gap = spec.gap.max(0);
+        let vertical = matches!(spec.side.as_str(), "bottom" | "top");
+        if vertical {
+            y -= gap;
+            ah += 2 * gap;
+        } else {
+            x -= gap;
+            aw += 2 * gap;
+        }
+        positioner.set_anchor_rect(x, y, aw, ah);
+        let (a, g) = match (spec.side.as_str(), spec.align.as_str()) {
+            ("bottom", "start") => (A::BottomLeft, G::BottomRight),
+            ("bottom", "end") => (A::BottomRight, G::BottomLeft),
+            ("bottom", _) => (A::Bottom, G::Bottom),
+            ("top", "start") => (A::TopLeft, G::TopRight),
+            ("top", "end") => (A::TopRight, G::TopLeft),
+            ("top", _) => (A::Top, G::Top),
+            ("right", "start") => (A::TopRight, G::BottomRight),
+            ("right", "end") => (A::BottomRight, G::TopRight),
+            ("right", _) => (A::Right, G::Right),
+            ("left", "start") => (A::TopLeft, G::BottomLeft),
+            ("left", "end") => (A::BottomLeft, G::TopLeft),
+            (_, _) => (A::Left, G::Left),
+        };
+        positioner.set_anchor(a);
+        positioner.set_gravity(g);
+        positioner.set_constraint_adjustment(if vertical {
+            C::FlipY | C::SlideX | C::SlideY
+        } else {
+            C::FlipX | C::SlideX | C::SlideY
+        });
+        if positioner.version() >= 3 {
+            positioner.set_reactive();
+        }
+        Some(positioner)
+    }
+
+    fn open_popup(&mut self, i: usize) {
+        let Some(spec) = self.specs.get(self.surfaces[i].spec).and_then(|s| s.popup.clone()) else { return };
+        let Some(base) = self.xdg_shell.clone().map(SimpleGlobal::<XdgWmBase, 5>::from_bound) else {
+            log::warn!("g.popup: the compositor offers no xdg-shell");
+            self.surfaces[i].dismissed = true;
+            return;
+        };
+        // Until what it opens from is drawn: tried again after the next
+        // batch of events.
+        let Some((j, layer, anchor)) = self.anchor_of(i) else { return };
+        self.surfaces[i].wanted = self.measure(i);
+        let Some(positioner) = self.positioner(i, anchor) else { return };
+        let qh = self.qh.clone();
+        let id = self.surfaces[i].id;
+        let wl = self.compositor.create_surface(&qh);
+        let fraction = self.fractional.as_ref().map(|f| f.get_fractional_scale(&wl, &qh, ScaleData(id)));
+        let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&wl, &qh, Ignore));
+        let effect = self.effects.get_background_effect(&wl, &qh).ok();
+        let popup = match Popup::from_surface(None, &positioner, &qh, wl, &base) {
+            Ok(popup) => popup,
+            Err(e) => {
+                log::warn!("g.popup: {e}");
+                self.surfaces[i].dismissed = true;
+                return;
+            }
+        };
+        // The keyboard, and closing on a press elsewhere, only in answer to
+        // a press or a key on the shell: a popup opened by anything else
+        // (a timer, a call from outside) is shown without a grab. The
+        // compositor gives a grabbing popup the keyboard only if what it
+        // opened from could take it: the layer surface may, while it is open.
+        let seat = self.seat.clone().or_else(|| self.seats.seats().next());
+        let grab = spec.grab && self.input_serial != 0 && seat.is_some();
+        if grab && !self.surfaces[j].keyboard {
+            layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+            layer.commit();
+        }
+        layer.get_popup(popup.xdg_popup());
+        if let (true, Some(seat)) = (grab, seat) {
+            popup.xdg_popup().grab(&seat, self.input_serial);
+        }
+        popup.wl_surface().commit();
+        let scale = self.surfaces[j].scale;
+        let parent = self.surfaces[j].id;
+        let s = &mut self.surfaces[i];
+        s.role = Role::Popup(Some(PopupRole { popup, fraction, parent, anchor }));
+        s.viewport = viewport;
+        s.effect = effect;
+        s.scale = scale;
+        s.configured = false;
+        s.target_made = false;
+        s.frame_pending = false;
+        s.frames = 0;
+        s.blurred.clear();
+        s.inputs = None;
+        s.holes.clear();
+        log::debug!("popup {id}: open beside {anchor:?} on surface {parent}");
+    }
+
+    /// Closes popup `i`: its renderer target first, then its Wayland
+    /// objects, its scene and tree staying for the next opening.
+    fn close_popup(&mut self, i: usize) {
+        let s = &mut self.surfaces[i];
+        let Role::Popup(Some(open)) = std::mem::replace(&mut s.role, Role::Popup(None)) else { return };
+        if s.target_made {
+            if let Some(renderer) = &self.renderer {
+                renderer.destroy_target_now(s.id);
+            }
+            s.target_made = false;
+        }
+        if let Some(viewport) = s.viewport.take() {
+            viewport.destroy();
+        }
+        if let Some(effect) = s.effect.take() {
+            effect.destroy();
+        }
+        if let Some(inhibitor) = s.inhibitor.take() {
+            inhibitor.destroy();
+        }
+        if let Some(fraction) = open.fraction {
+            fraction.destroy();
+        }
+        if let (Some(wake), Some(handle)) = (s.wake.take(), &self.handle) {
+            handle.remove(wake);
+        }
+        if self.keyboard_on.as_ref() == Some(open.popup.wl_surface()) {
+            self.keyboard_on = None;
+        }
+        // What it opened from takes the keyboard again only if it catches,
+        // and says so before the popup goes: the compositor would otherwise
+        // hand it the keyboard the popup leaves, away from the window that
+        // had it before.
+        let parent = self.surfaces.iter().find(|p| p.id == open.parent);
+        if let Some(layer) = parent.filter(|p| !p.keyboard).and_then(|p| p.role.layer()) {
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            layer.commit();
+        }
+        // The popup, its xdg surface, then its surface.
+        drop(open.popup);
+        let s = &mut self.surfaces[i];
+        s.configured = false;
+        s.frame_pending = false;
+        s.pressed = None;
+        let hovered = s.hovered.take();
+        let focused = s.focused.take();
+        let id = s.id;
+        if self.drag.is_some_and(|d| d.0 == i) {
+            self.drag = None;
+        }
+        // What the pointer was over is left, as on a leave.
+        if let Some(node) = hovered {
+            self.deliver(i, node, Input::Hover(false));
+        }
+        if let Some(node) = focused {
+            self.deliver(i, node, Input::Focus(false));
+        }
+        let _ = self.conn.flush();
+        log::debug!("popup {id}: closed");
+    }
+
+    /// Popup `i` placed again (its anchor moved, its content changed
+    /// size): moved by the compositor where it can, opened again where not.
+    fn reposition(&mut self, i: usize) {
+        let Role::Popup(Some(open)) = &self.surfaces[i].role else { return };
+        let parent = open.parent;
+        let Some((j, _, anchor)) = self.anchor_of(i) else { return };
+        if self.surfaces[j].id != parent {
+            self.close_popup(i);
+            return;
+        }
+        let Some(positioner) = self.positioner(i, anchor) else { return };
+        let Role::Popup(Some(open)) = &mut self.surfaces[i].role else { return };
+        if open.popup.xdg_popup().version() >= 3 {
+            open.anchor = anchor;
+            open.popup.reposition(&positioner, 0);
+            open.popup.wl_surface().commit();
+        } else {
+            // Opened again, at once, where it is now: without the grab.
+            self.close_popup(i);
+            self.open_popup(i);
+        }
+    }
+
+    /// The popups the compositor closed since the last look, by description
+    /// and output.
+    pub fn take_dismissed(&mut self) -> Vec<(usize, Option<String>)> {
+        std::mem::take(&mut self.dismissed)
     }
 
     /// The lock as the interface wants it: asked for, the compositor is
@@ -770,7 +1116,9 @@ impl App {
         // A surface whose layer or namespace changed is made again: a layer
         // surface keeps both for its life.
         let changed = |i: usize, old: &[SurfaceSpec]| {
-            old.get(i).is_none_or(|o| specs.get(i).is_none_or(|n| o.layer != n.layer || o.namespace != n.namespace))
+            old.get(i).is_none_or(|o| {
+                specs.get(i).is_none_or(|n| o.layer != n.layer || o.namespace != n.namespace || o.popup.is_some() != n.popup.is_some())
+            })
         };
         let old = std::mem::take(&mut self.specs);
         let gone: Vec<SurfaceId> = self
@@ -779,6 +1127,17 @@ impl App {
             .filter(|s| !wanted.contains(&(s.spec, s.output.clone())) || changed(s.spec, &old))
             .map(|s| s.id)
             .collect();
+        // A popup goes before the surface it opened from: it opens again,
+        // on what is made now, if it is still asked for.
+        for i in 0..self.surfaces.len() {
+            let parent = match &self.surfaces[i].role {
+                Role::Popup(Some(p)) => p.parent,
+                _ => continue,
+            };
+            if gone.contains(&parent) || gone.contains(&self.surfaces[i].id) {
+                self.close_popup(i);
+            }
+        }
         if let Some(renderer) = &self.renderer {
             for id in &gone {
                 renderer.destroy_target(*id);
@@ -821,6 +1180,20 @@ impl App {
         let qh = self.qh.clone();
         let id = self.next_id;
         self.next_id += 1;
+        let output = output_name.as_ref().and_then(|name| {
+            self.outputs.outputs().find(|o| self.outputs.info(o).and_then(|i| i.name).as_deref() == Some(name.as_str()))
+        });
+        let output_size = output
+            .as_ref()
+            .and_then(|o| self.outputs.info(o))
+            .and_then(|i| i.logical_size)
+            .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
+        // A popup has no Wayland surface until it opens.
+        if spec.popup.is_some() {
+            let scene = Rc::new(RefCell::new(Scene::new(fonts)));
+            self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, Role::Popup(None), None, None, output_size));
+            return;
+        }
         let wl = self.compositor.create_surface(&qh);
         if let Some(fractional) = &self.fractional {
             fractional.get_fractional_scale(&wl, &qh, ScaleData(id));
@@ -830,14 +1203,6 @@ impl App {
         if effect.is_none() {
             log::warn!("the compositor offers no ext-background-effect: no blur");
         }
-        let output = output_name.as_ref().and_then(|name| {
-            self.outputs.outputs().find(|o| self.outputs.info(o).and_then(|i| i.name).as_deref() == Some(name.as_str()))
-        });
-        let output_size = output
-            .as_ref()
-            .and_then(|o| self.outputs.info(o))
-            .and_then(|i| i.logical_size)
-            .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
         let role = if spec.layer == "lock" {
             let (Some(session_lock), Some(output)) = (&self.session_lock, output.as_ref()) else { return };
             Role::Lock(session_lock.create_lock_surface(wl, output, &qh))
@@ -852,44 +1217,8 @@ impl App {
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
             Role::Layer(layer)
         };
-        self.surfaces.push(Surface {
-            id,
-            spec: spec_index,
-            output: output_name,
-            scene: Rc::new(RefCell::new(Scene::new(fonts))),
-            role,
-            viewport,
-            effect,
-            target_made: false,
-            logical: (1, 1),
-            wanted: (1, 1),
-            scale: 1.0,
-            configured: false,
-            dirty: false,
-            frame_pending: false,
-            frames: 0,
-            tally: (0, Duration::ZERO, Instant::now()),
-            blurred: Vec::new(),
-            inputs: None,
-            holes: Vec::new(),
-            inhibitor: None,
-            keyboard: false,
-            hovered: None,
-            focused: None,
-            pressed: None,
-            pressed_at: (0.0, 0.0),
-            asleep: false,
-            reserve_wish: None,
-            strokes: Vec::new(),
-            tall: false,
-            output_size,
-            area: None,
-            built: None,
-            wake: None,
-            access: crate::access::Access::new(),
-            access_checked: None,
-            held: None,
-        });
+        let scene = Rc::new(RefCell::new(Scene::new(fonts)));
+        self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, role, viewport, effect, output_size));
     }
 
     /// A surface anchored to both left and right spans its edge, as a
@@ -906,6 +1235,11 @@ impl App {
     fn measure(&mut self, i: usize) -> (u32, u32) {
         if self.surfaces[i].asleep {
             return (1, 1);
+        }
+        // A popup is its content's size, whatever it catches.
+        if self.surfaces[i].role.is_popup() {
+            let size = self.surfaces[i].scene.borrow_mut().layout(None, None);
+            return (size.0.ceil().max(1.0) as u32, size.1.ceil().max(1.0) as u32);
         }
         let spans = self.spans(i);
         let s = &mut self.surfaces[i];
@@ -944,6 +1278,12 @@ impl App {
         let Some(spec) = self.specs.get(self.surfaces[i].spec).cloned() else { return };
         let s = &mut self.surfaces[i];
         s.wanted = wanted;
+        if s.role.is_popup() {
+            s.dirty = true;
+            self.reposition(i);
+            return;
+        }
+        let s = &mut self.surfaces[i];
         // A lock surface is the size of its output, and the compositor's
         // to place: there is nothing to ask for.
         let Some(layer) = s.role.layer() else {
@@ -997,10 +1337,15 @@ impl App {
         for (i, wish) in wishes.iter().enumerate() {
             let Some(s) = self.surfaces.get_mut(i) else { break };
             let asleep = !wish.present;
+            // A popup's anchor moves it at the next batch (sync_popups).
+            s.anchor_wish = wish.anchor.clone();
             if s.asleep == asleep && s.reserve_wish == wish.reserve {
                 continue;
             }
             log::debug!("surface {}: {}", s.id, if asleep { "asleep" } else { "awake" });
+            if asleep {
+                s.dismissed = false;
+            }
             s.asleep = asleep;
             s.reserve_wish = wish.reserve;
             self.place(i);
@@ -1033,6 +1378,7 @@ impl App {
     pub fn after_events(&mut self) {
         self.flush_drag();
         self.sync_idle();
+        self.sync_popups();
         for i in 0..self.surfaces.len() {
             let changed = self.surfaces[i].scene.borrow_mut().take_dirty();
             let s = &self.surfaces[i];
@@ -1112,7 +1458,7 @@ impl App {
                 }
             }
         }
-        let surface = s.role.wl_surface().clone();
+        let Some(surface) = s.role.wl_surface().cloned() else { return };
         if !s.target_made {
             let wl = NonNull::new(surface.id().as_ptr() as *mut c_void).unwrap();
             // Safety: the display lives as long as the connection, the surface
@@ -1318,7 +1664,7 @@ impl App {
     }
 
     fn by_wl(&self, wl: &wl_surface::WlSurface) -> Option<usize> {
-        self.surfaces.iter().position(|s| s.role.wl_surface() == wl)
+        self.surfaces.iter().position(|s| s.role.wl_surface() == Some(wl))
     }
 
     fn flush_drag(&mut self) {
@@ -1334,15 +1680,16 @@ impl App {
     }
 
     fn key(&mut self, event: &KeyEvent) {
-        // The keys go to the cell that is catching, on whichever output.
-        let Some((i, catcher)) = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .find_map(|(i, s)| s.scene.borrow().catcher().map(|c| (i, c)))
-        else {
+        // The keys go to what is catching on the surface the keyboard is on
+        // (an open popup), else to the cell catching on whichever output.
+        let on = self.keyboard_on.as_ref().and_then(|wl| self.by_wl(wl));
+        let held = on.and_then(|i| self.surfaces[i].scene.borrow().catcher().map(|c| (i, c)));
+        let Some((i, catcher)) = held.or_else(|| {
+            self.surfaces.iter().enumerate().find_map(|(i, s)| s.scene.borrow().catcher().map(|c| (i, c)))
+        }) else {
             return;
         };
+        log::trace!("key {:?} to surface {} node {catcher:?}", event.keysym, self.surfaces[i].id);
         let name = event.keysym.name().unwrap_or_default();
         let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
         // The text the key types, as the keymap and its layout make it; none
@@ -1569,6 +1916,12 @@ impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         // The compositor took the surface away (its output went): drop it.
         if let Some(i) = self.by_wl(layer.wl_surface()) {
+            let id = self.surfaces[i].id;
+            for j in 0..self.surfaces.len() {
+                if matches!(&self.surfaces[j].role, Role::Popup(Some(p)) if p.parent == id) {
+                    self.close_popup(j);
+                }
+            }
             let s = self.surfaces.remove(i);
             self.drag = None;
             if let Some(renderer) = &self.renderer {
@@ -1599,6 +1952,26 @@ impl LayerShellHandler for App {
         // A configure must be answered with a buffer, frame callback or not.
         s.frame_pending = false;
         self.draw(i);
+    }
+}
+
+impl PopupHandler for App {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup, config: PopupConfigure) {
+        let Some(i) = self.by_wl(popup.wl_surface()) else { return };
+        let s = &mut self.surfaces[i];
+        s.logical = (config.width.max(1) as u32, config.height.max(1) as u32);
+        s.configured = true;
+        // A configure must be answered with a buffer, frame callback or not.
+        s.frame_pending = false;
+        self.draw(i);
+    }
+
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {
+        let Some(i) = self.by_wl(popup.wl_surface()) else { return };
+        self.close_popup(i);
+        let s = &mut self.surfaces[i];
+        s.dismissed = true;
+        self.dismissed.push((s.spec, s.output.clone()));
     }
 }
 
@@ -1682,11 +2055,20 @@ impl SeatHandler for App {
 }
 
 impl KeyboardHandler for App {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, wl: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {
+        self.keyboard_on = Some(wl.clone());
+        log::debug!("keyboard on surface {:?}", self.by_wl(wl).map(|i| self.surfaces[i].id));
+    }
 
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, wl: &wl_surface::WlSurface, _: u32) {
+        if self.keyboard_on.as_ref() == Some(wl) {
+            self.keyboard_on = None;
+        }
+        log::debug!("keyboard off surface {:?}", self.by_wl(wl).map(|i| self.surfaces[i].id));
+    }
 
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, event: KeyEvent) {
+        self.input_serial = serial;
         self.key(&event);
     }
 
@@ -1748,7 +2130,8 @@ impl PointerHandler for App {
                         self.drag = Some((i, node, x - ox, y - oy));
                     }
                 }
-                K::Press { button, .. } => {
+                K::Press { button, serial, .. } => {
+                    self.input_serial = serial;
                     let catcher = scene.borrow().catcher();
                     if let Some(c) = catcher {
                         if hit.is_none_or(|h| !scene.borrow().within(h, c)) {

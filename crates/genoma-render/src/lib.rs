@@ -473,7 +473,8 @@ unsafe impl Send for Raw {}
 enum Message {
     Create { id: SurfaceId, display: Raw, surface: Raw },
     Draw { id: SurfaceId, width: u32, height: u32, list: DrawList },
-    Destroy { id: SurfaceId },
+    /// With a sender, answered once the swapchain is gone.
+    Destroy { id: SurfaceId, done: Option<std::sync::mpsc::Sender<()>> },
 }
 
 /// The main thread's handle on the render thread.
@@ -512,7 +513,12 @@ impl Renderer {
                         Message::Draw { id, width, height, list } => {
                             gpu.draw(id, width, height, list)
                         }
-                        Message::Destroy { id } => gpu.destroy_target(id),
+                        Message::Destroy { id, done } => {
+                            gpu.destroy_target(id);
+                            if let Some(done) = done {
+                                let _ = done.send(());
+                            }
+                        }
                     }
                 }
             })
@@ -542,7 +548,18 @@ impl Renderer {
     }
 
     pub fn destroy_target(&self, id: SurfaceId) {
-        let _ = self.tx.send(Message::Destroy { id });
+        let _ = self.tx.send(Message::Destroy { id, done: None });
+    }
+
+    /// Destroys the target and waits until the renderer has let go of the
+    /// surface, every frame sent before included: the surface itself can
+    /// then be destroyed. A surface destroyed while the renderer still
+    /// presents to it is a protocol error, and the end of the connection.
+    pub fn destroy_target_now(&self, id: SurfaceId) {
+        let (done, wait) = std::sync::mpsc::channel();
+        if self.tx.send(Message::Destroy { id, done: Some(done) }).is_ok() {
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
+        }
     }
 }
 

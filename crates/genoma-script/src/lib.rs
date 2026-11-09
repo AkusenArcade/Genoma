@@ -174,6 +174,25 @@ pub struct SurfaceSpec {
     /// niri decides blur xray by it (Bioma's `bioma.kdl`), so a surface keeps
     /// its compositor behaviour by keeping its name.
     pub namespace: String,
+    /// A popup (`g.popup`) rather than a layer surface: where it opens.
+    pub popup: Option<PopupSpec>,
+}
+
+/// Where a popup opens: beside a node of another surface on its output,
+/// the compositor turning or sliding it to keep it on screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PopupSpec {
+    /// The `id` of the node it opens from; `None` when a function gives
+    /// it (the runtime then reads it from the surface's wish).
+    pub anchor: Option<String>,
+    /// The side of that node it opens on: "bottom", "top", "left", "right".
+    pub side: String,
+    /// Along that side: "start", "center", "end".
+    pub align: String,
+    /// Logical units between the node and the popup.
+    pub gap: i32,
+    /// Takes the keyboard, and a press anywhere else closes it.
+    pub grab: bool,
 }
 
 /// An output as the compositor describes it, for `g.outputs()`.
@@ -1075,6 +1094,9 @@ pub struct Script {
     /// By surface description: whether its content takes its size as it
     /// changes (`fluid = true`); and by target, that size, for those that do.
     fluid: Vec<bool>,
+    /// By surface description: a popup's `on_dismiss`, called when the
+    /// compositor closed it (a press elsewhere).
+    dismissers: Vec<Option<Function>>,
     sizes: Vec<Option<Signal<(f64, f64)>>>,
 }
 
@@ -1083,15 +1105,18 @@ pub struct Script {
 /// taking the pointer; its tree stays mounted), and `reserve`, when the
 /// function gave one, is the strip to keep windows out of (`None` for
 /// none) in place of the description's.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Wish {
     pub present: bool,
     pub reserve: Option<Option<i32>>,
+    /// A popup's anchor, when its description gave a function for it: the
+    /// id of the node it opens from now.
+    pub anchor: Option<String>,
 }
 
 impl Default for Wish {
     fn default() -> Self {
-        Wish { present: true, reserve: None }
+        Wish { present: true, reserve: None, anchor: None }
     }
 }
 
@@ -1133,6 +1158,7 @@ impl Script {
             target_scopes: Vec::new(),
             load_owner: None,
             fluid: Vec::new(),
+            dismissers: Vec::new(),
             sizes: Vec::new(),
         }
     }
@@ -1264,6 +1290,16 @@ impl Script {
         })
     }
 
+    /// The compositor closed a popup (description `spec`, on `output`): its
+    /// `on_dismiss` is told, and is where the interface lets it go.
+    pub fn dismissed(&self, spec: usize, output: Option<String>) {
+        if let Some(Some(f)) = self.dismissers.get(spec) {
+            if let Err(e) = f.call::<()>(output) {
+                log::error!("g.popup on_dismiss: {e}");
+            }
+        }
+    }
+
     /// Whether an interface has required the service (`"clock"`, `"niri"`,
     /// `"vitals"`): a service nobody required has no source running.
     pub fn wants(&self, service: &str) -> bool {
@@ -1345,6 +1381,7 @@ impl Script {
         let handlers: Handlers = Rc::default();
         let (wishes, wishes_changed) = (self.wishes.clone(), self.wishes_changed.clone());
         let fluid: Vec<bool> = surfaces.iter().map(|t| t.get::<Option<bool>>("fluid").ok().flatten() == Some(true)).collect();
+        let dismissers: Vec<Option<Function>> = surfaces.iter().map(|t| t.get::<Option<Function>>("on_dismiss").ok().flatten()).collect();
         let (scope, result) = Scope::new(|| -> mlua::Result<(Vec<genoma_scene::NodeId>, Vec<Scope>, Option<usize>, Vec<Option<Signal<(f64, f64)>>>)> {
             let load_owner = current_owner();
             let mut holders = Vec::new();
@@ -1382,7 +1419,11 @@ impl Script {
                     LuaValue::Function(f) => Some(f),
                     _ => None,
                 };
-                if present.is_none() && reserve.is_none() {
+                let anchor = match surface.get::<LuaValue>("anchor")? {
+                    LuaValue::Function(f) if surface.get::<Option<bool>>("__popup")? == Some(true) => Some(f),
+                    _ => None,
+                };
+                if present.is_none() && reserve.is_none() && anchor.is_none() {
                     continue;
                 }
                 let (wishes, changed, output) = (wishes.clone(), wishes_changed.clone(), output.clone());
@@ -1403,7 +1444,14 @@ impl Script {
                             None
                         }
                     });
-                    let wish = Wish { present: is_present, reserve: reserving };
+                    let anchoring = anchor.as_ref().and_then(|f| match f.call::<Option<String>>(output.clone()) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!("g.popup anchor: {e}");
+                            None
+                        }
+                    });
+                    let wish = Wish { present: is_present, reserve: reserving, anchor: anchoring };
                     let mut all = wishes.borrow_mut();
                     if let Some(w) = all.get_mut(index) {
                         if *w != wish {
@@ -1419,6 +1467,7 @@ impl Script {
             Ok((holders, target_scopes, load_owner, sizes)) => {
                 self.sizes = sizes;
                 self.fluid = fluid;
+                self.dismissers = dismissers;
                 self.target_scopes = target_scopes.into_iter().map(Some).collect();
                 self.load_owner = load_owner;
                 if let Some(old) = self.scope.take() {
@@ -1829,6 +1878,17 @@ impl Script {
                 Ok(t)
             })?,
         )?;
+        // g.popup { anchor = "clock", side = "bottom", … }: a surface that
+        // opens beside a node of another one, over everything, for as long
+        // as its `present` says.
+        g.set(
+            "popup",
+            lua.create_function(|_, t: Table| {
+                t.set("__surface", true)?;
+                t.set("__popup", true)?;
+                Ok(t)
+            })?,
+        )?;
         // g.timing { open = { duration = 0.25, curve = { … } }, … }: the one
         // place a duration may be written.
         g.set(
@@ -2005,7 +2065,10 @@ impl Script {
 }
 
 fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
+    // A popup's anchor is a node, read by popup_spec.
+    let is_popup = t.get::<Option<bool>>("__popup")? == Some(true);
     let anchor = match t.get::<LuaValue>("anchor")? {
+        _ if is_popup => Vec::new(),
         LuaValue::String(s) => vec![s.to_string_lossy()],
         LuaValue::Table(list) => list.sequence_values::<String>().collect::<mlua::Result<_>>()?,
         LuaValue::Nil => vec!["top".into()],
@@ -2041,7 +2104,34 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
             LuaValue::Table(list) => Some(list.sequence_values::<String>().collect::<mlua::Result<_>>()?),
             _ => None,
         },
+        popup: popup_spec(t)?,
     })
+}
+
+fn popup_spec(t: &Table) -> mlua::Result<Option<PopupSpec>> {
+    if t.get::<Option<bool>>("__popup")? != Some(true) {
+        return Ok(None);
+    }
+    let anchor = match t.get::<LuaValue>("anchor")? {
+        LuaValue::String(s) => Some(s.to_string_lossy()),
+        LuaValue::Function(_) => None,
+        _ => return Err(err("g.popup needs an anchor: the id of the node it opens from, or a function giving it")),
+    };
+    let side = t.get::<Option<String>>("side")?.unwrap_or_else(|| "bottom".into());
+    if !matches!(side.as_str(), "bottom" | "top" | "left" | "right") {
+        return Err(err(format!("g.popup side: no side {side} (bottom, top, left, right)")));
+    }
+    let align = t.get::<Option<String>>("align")?.unwrap_or_else(|| "center".into());
+    if !matches!(align.as_str(), "start" | "center" | "end") {
+        return Err(err(format!("g.popup align: no alignment {align} (start, center, end)")));
+    }
+    Ok(Some(PopupSpec {
+        anchor,
+        side,
+        align,
+        gap: t.get::<Option<f64>>("gap")?.map_or(0, |g| g.round() as i32),
+        grab: t.get::<Option<bool>>("grab")?.unwrap_or(true),
+    }))
 }
 
 fn kind_of(t: &Table) -> mlua::Result<Kind> {
@@ -2255,6 +2345,11 @@ fn mount(
     let role = role_of(t.get("role")?)?;
     let node = scene.borrow_mut().create(kind, role);
     scene.borrow_mut().set_name(node, t.get("name")?);
+    // Only a string names a node for the runtime; an interface may keep
+    // other ids of its own there.
+    if let LuaValue::String(id) = t.get::<LuaValue>("id")? {
+        scene.borrow_mut().set_id(node, Some(id.to_string_lossy()));
+    }
     scene.borrow_mut().append(parent, node);
 
     // transition = { fill = "theme" }: names from the timing set, never
@@ -2487,4 +2582,43 @@ fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Fu
             Err(e) => log::error!("binding {prop:?}: {e}"),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(source: &str) -> mlua::Result<SurfaceSpec> {
+        let lua = Lua::new();
+        let t: Table = lua.load(source).eval()?;
+        surface_spec(&t)
+    }
+
+    #[test]
+    fn a_popup_reads_its_anchor_as_a_node() {
+        let s = spec(r#"return { __surface = true, __popup = true, anchor = "clock", side = "left", align = "end", gap = 6.4 }"#).unwrap();
+        assert!(s.anchor.is_empty(), "no edges: the anchor is a node");
+        assert_eq!(
+            s.popup,
+            Some(PopupSpec { anchor: Some("clock".into()), side: "left".into(), align: "end".into(), gap: 6, grab: true })
+        );
+        // A function gives the anchor at run time.
+        let s = spec(r#"return { __surface = true, __popup = true, anchor = function() return "tray" end }"#).unwrap();
+        let popup = s.popup.unwrap();
+        assert_eq!((popup.anchor, popup.side.as_str(), popup.align.as_str()), (None, "bottom", "center"));
+    }
+
+    #[test]
+    fn a_popup_without_a_place_is_refused() {
+        assert!(spec(r#"return { __surface = true, __popup = true }"#).is_err());
+        assert!(spec(r#"return { __surface = true, __popup = true, anchor = "a", side = "under" }"#).is_err());
+        assert!(spec(r#"return { __surface = true, __popup = true, anchor = "a", align = "middle" }"#).is_err());
+    }
+
+    #[test]
+    fn a_surface_is_no_popup() {
+        let s = spec(r#"return { __surface = true, anchor = { "top", "left" } }"#).unwrap();
+        assert_eq!(s.anchor, vec!["top".to_string(), "left".to_string()]);
+        assert_eq!(s.popup, None);
+    }
 }

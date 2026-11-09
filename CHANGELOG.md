@@ -25,6 +25,13 @@ changes what a shell sees.
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
 - `examples/bar`: a classic top bar written against Genoma alone.
+- `g.popup`, a surface that opens beside a node of another one
+  (`xdg_popup`): `anchor` (a node's `id`, or a function giving one), `side`,
+  `align`, `gap`, `grab`, `present`, `on_dismiss`. The compositor flips or
+  slides it to keep it on screen, and moves it when its anchor moves or its
+  content changes size. Opened by a press or a key, it takes the keyboard and
+  closes on a press elsewhere. `examples/bar` opens the date from the clock.
+- Nodes take an `id` (a string), which is what a popup's anchor names.
 - `@genoma/clipboard`, the clipboard without `wl-copy`/`wl-paste`, through
   `ext-data-control-v1`: `types` and `text` of every copy (text up to
   1 MiB), `changed` moving on each copy, the same text twice included;

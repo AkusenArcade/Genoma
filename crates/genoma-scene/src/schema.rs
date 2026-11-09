@@ -250,7 +250,7 @@ pub const PROPS: &[PropInfo] = &[
     p("wrap", Prop::Wrap, Ty::Bool, false, "Text past its max_width goes on to the next line, at a word, instead of ending in an ellipsis: a sentence, not a name."),
     p("weight", Prop::Weight, Ty::Number, false, "Font weight, 100 to 900 (400 regular, 500 medium, 700 bold)."),
     p("tracking", Prop::Tracking, Ty::Number, false, "Letter spacing, in em (0.06 opens small upper-case labels)."),
-    p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
+    p("catch", Prop::Catch, Ty::Bool, false, "While true, the surface covers its output (a popup keeps its size) and takes the pointer and the keyboard: a click outside reaches on_outside, keys reach on_key."),
     p("decode_width", Prop::DecodeWidth, Ty::Number, false, "An image decoded at this width, logical units, rather than its box's: a box narrower shows the middle of it. For a box whose size moves."),
     p("decode_height", Prop::DecodeHeight, Ty::Number, false, "An image decoded at this height, logical units."),
     p("soften", Prop::Soften, Ty::Number, false, "An image blurred once, as it is decoded, by this radius in logical units: a backdrop behind niri's overview. Nothing is spent on it per frame; a decode smaller than the box blurs it further as it is drawn up."),
@@ -292,7 +292,9 @@ pub fn luau_definitions() -> String {
         out.push_str(&format!("    -- {}\n    {}: Binding<{ty}>?,\n", info.doc, info.name));
     }
     out.push_str(
-        "    role: Role?,\n    name: string?,\n    id: string?,\n\
+        "    role: Role?,\n    name: string?,\n\
+         \x20   -- What a g.popup's anchor calls the node by.\n\
+         \x20   id: string?,\n\
          \x20   -- Property name to a timing set entry. Never a number.\n\
          \x20   transition: { [string]: string }?,\n\
          \x20   [number]: Node,\n}\n\n\

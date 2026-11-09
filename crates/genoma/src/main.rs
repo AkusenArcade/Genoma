@@ -759,6 +759,11 @@ fn run(dir: PathBuf, entry: Option<String>) {
                     Err(e) => log::error!("surface {i}: building again failed, its last tree stays: {e}"),
                 }
             }
+            // Popups the compositor closed: the interface hears it before its
+            // wishes are read, so a popup it lets go stays closed.
+            for (spec, output) in app.take_dismissed() {
+                script.borrow().dismissed(spec, output);
+            }
             if let Some(wishes) = script.borrow().take_wishes() {
                 app.apply_wishes(&wishes);
             }

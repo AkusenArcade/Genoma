@@ -107,6 +107,9 @@ pub struct Node {
     kind: Kind,
     pub role: Role,
     pub name: Option<String>,
+    /// What the interface calls the node (`id = "clock"`): where a popup
+    /// is anchored.
+    pub id: Option<String>,
     present: bool,
     radius: Option<f32>,
     fill: [f32; 4],
@@ -235,6 +238,7 @@ impl Node {
             kind,
             role,
             name: None,
+            id: None,
             present: true,
             radius: None,
             fill: [0.0; 4],
@@ -869,6 +873,23 @@ impl Scene {
         for child in self.tree.children(self.root).unwrap_or_default() {
             self.remove(child);
         }
+    }
+
+    pub fn set_id(&mut self, node: NodeId, id: Option<String>) {
+        if let Some(n) = self.tree.get_node_context_mut(node) {
+            n.id = id;
+        }
+    }
+
+    /// The node the interface called `id`, if this scene holds one, shown.
+    pub fn find(&self, id: &str) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(self.root, &mut |node, n| {
+            if found.is_none() && n.id.as_deref() == Some(id) {
+                found = Some(node);
+            }
+        });
+        found
     }
 
     pub fn set_name(&mut self, node: NodeId, name: Option<String>) {
@@ -2613,6 +2634,23 @@ mod tests {
 
     fn offset(scene: &Scene, n: NodeId) -> f32 {
         scene.tree.get_node_context(n).unwrap().offset[0]
+    }
+
+    #[test]
+    fn a_node_is_found_by_its_id_while_shown() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let row = scene.create(Kind::Box, Role::None);
+        let tray = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, row);
+        scene.append(row, tray);
+        scene.set_id(tray, Some("tray".into()));
+        assert_eq!(scene.find("tray"), Some(tray));
+        assert_eq!(scene.find("clock"), None);
+        // Inside something absent, it is not there to open beside.
+        scene.set(row, Prop::Present, Value::Bool(false), None).unwrap();
+        assert_eq!(scene.find("tray"), None);
     }
 
     #[test]
