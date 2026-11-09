@@ -92,7 +92,10 @@ return g.surface {
 - **Shaders:** `g.shader { src = "field.wgsl", values = … }` draws a
   rectangle whose every pixel is your `fn shade(p: vec2<f32>) ->
   vec4<f32>`, fed `shader.size`, `shader.scale`, `shader.time` (with
-  `clock = true`) and `value(i)`, the numbers bound. Every shader also has
+  `clock = true`), `shader.pointer` (x, y from the node's corner; z 1 over
+  the surface; w 1 while a button is held: a shader that reads it takes the
+  pointer and is drawn again as it moves) and `value(i)`, the numbers
+  bound: a theme's palette goes there. Every shader also has
   Genoma's library, prefixed `g_`: noise (`g_noise`, `g_noise3`,
   `g_simplex`, `g_worley`, `g_fbm`, `g_fbm3`, `g_value_noise`,
   `g_hash`…), distance fields (`g_smin`, `g_smax`, `g_sd_circle`,

@@ -2518,6 +2518,20 @@ impl PointerHandler for App {
                 self.cursor_serial = serial;
                 self.cursor_shape = None;
             }
+            // Where it is, for shaders that read it.
+            let held = match event.kind {
+                K::Press { .. } => Some(true),
+                K::Release { .. } => Some(false),
+                _ => None,
+            };
+            let now = match event.kind {
+                K::Leave { .. } => None,
+                _ => {
+                    let was = scene.borrow().pointer_held();
+                    Some((x, y, held.unwrap_or(was)))
+                }
+            };
+            scene.borrow_mut().set_pointer(now);
             // Where it is, to what it is over: on entering too, since a
             // surface that starts taking input under a pointer that has not
             // moved is told where that pointer is only then (summoning a

@@ -24,6 +24,10 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `shader.pointer` in every `g.shader`: where the pointer is from the
+  node's corner, whether it is over the surface and whether a button is
+  held. A shader that reads it takes the pointer and is drawn again as it
+  moves; the others are not. `examples/effects` has a spotlight.
 - `@genoma/session`, logind: `session.can` (each action "yes", "no",
   "challenge" or "na"), `suspend`, `hibernate`, `hybrid_sleep`, `reboot`,
   `power_off`, `preparing_for_sleep` and `preparing_for_shutdown`,

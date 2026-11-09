@@ -66,6 +66,11 @@ return g.surface {
                 effects.noise { overlay = true, attach = "corner", width = 200, height = 140, from = "#2a1d10", to = "#e6b062", size = 50, contrast = 1.2 },
                 effects.vignette { overlay = true, attach = "corner", width = 200, height = 140, strength = 0.85, start = 0.3, softness = 0.7 },
             }),
+            panel("spotlight (follows the pointer)", g.shader {
+                width = 200,
+                height = 140,
+                src = g.dir .. "/spotlight.wgsl",
+            }),
             panel("grain over noise", g.box {
                 width = 200,
                 height = 140,

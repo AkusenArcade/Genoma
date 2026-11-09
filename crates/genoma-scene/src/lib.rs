@@ -602,6 +602,10 @@ pub struct Scene {
     highlight: Option<NodeId>,
     /// The node the keyboard is on inside a `navigate` node, ringed.
     focus_ring: Option<NodeId>,
+    /// Where the pointer is on the surface (logical units), whether a button
+    /// is held; none while it is elsewhere. What shaders read as
+    /// `shader.pointer`.
+    pointer: Option<(f32, f32, bool)>,
     /// Counts the frames drawn, for `drawn_frame`.
     frame: u64,
 }
@@ -648,6 +652,7 @@ impl Scene {
             newly_sized: Vec::new(),
             highlight: None,
             focus_ring: None,
+            pointer: None,
             frame: 0,
         }
     }
@@ -1180,6 +1185,27 @@ impl Scene {
         self.tree.get_node_context(node).is_some_and(|n| n.role == Role::Slider)
     }
 
+    /// Where the pointer is now. A shader that reads `shader.pointer` is
+    /// drawn again; nothing else is.
+    pub fn set_pointer(&mut self, pointer: Option<(f32, f32, bool)>) {
+        if pointer == self.pointer {
+            return;
+        }
+        self.pointer = pointer;
+        let mut reads = false;
+        self.walk(self.root, &mut |_, n| {
+            reads |= n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"));
+        });
+        if reads {
+            self.dirty = true;
+        }
+    }
+
+    /// Whether a button is held, as the pointer last said.
+    pub fn pointer_held(&self) -> bool {
+        self.pointer.is_some_and(|p| p.2)
+    }
+
     /// Rings `node` as the keyboard's, or nothing.
     pub fn set_focus_ring(&mut self, node: Option<NodeId>) {
         if node != self.focus_ring {
@@ -1577,6 +1603,11 @@ impl Scene {
                         None
                     }
                 };
+                // One that reads the pointer takes it, or the surface would
+                // let it through to what is under.
+                if n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer")) {
+                    n.interactive = true;
+                }
             }
             Prop::Src => n.src = Some(take!(text)),
             Prop::Values => {
@@ -1962,7 +1993,7 @@ impl Scene {
         self.frame += 1;
         let others = self.combined_shapes();
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        let mut out = Out { frame: self.frame, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2358,6 +2389,8 @@ fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32;
 
 struct Out<'a> {
     frame: u64,
+    /// The pointer on the surface, logical units, and a button held.
+    pointer: Option<(f32, f32, bool)>,
     /// The shapes a `combine_with` names, by id: where each was drawn and
     /// its radius, logical units.
     others: std::collections::HashMap<String, [f32; 5]>,
@@ -2963,6 +2996,10 @@ fn collect_node(
                     fade: out.fade_of(),
                     values: n.shown.clone(),
                     transform: out.transform,
+                    pointer: match out.pointer {
+                        Some((x, y, held)) => [x - origin[0], y - origin[1], 1.0, if held { 1.0 } else { 0.0 }],
+                        None => [-1.0e6, -1.0e6, 0.0, 0.0],
+                    },
                 });
             }
         }

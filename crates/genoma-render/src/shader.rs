@@ -12,8 +12,10 @@
 //! `p` in logical units from the node's top-left corner; the result
 //! premultiplied, sRGB-encoded as every other colour. The prelude gives it
 //! `shader.size` (logical), `shader.scale` (physical pixels per logical
-//! unit), `shader.time` (seconds its clock has run) and `value(i)`, the
-//! numbers bound, eased as the node asks. Derivatives (`dpdx`) are per
+//! unit), `shader.time` (seconds its clock has run), `shader.pointer`
+//! (x, y from the node's corner; z 1 over the surface; w 1 while a button
+//! is held: a shader that reads it is drawn again as the pointer moves)
+//! and `value(i)`, the numbers bound, eased as the node asks. Derivatives (`dpdx`) are per
 //! physical pixel. The node's opacity and clip are applied after it.
 //!
 //! A file that does not compile draws nothing and says why, once.
@@ -44,6 +46,9 @@ pub struct Shader {
     pub values: Vec<f32>,
     /// Depth, as a rect's (see [`crate::Rect::transform`]).
     pub transform: [[f32; 4]; 4],
+    /// The pointer from the node's corner, logical units; whether it is
+    /// over the surface; whether a button is held.
+    pub pointer: [f32; 4],
 }
 
 pub const VALUES: usize = 1024;
@@ -86,6 +91,7 @@ struct Uniforms {
     fade_end: f32,
     fade_span: f32,
     _pad: f32,
+    pointer: [f32; 4],
     transform: [[f32; 4]; 4],
     values: [[f32; 4]; VALUES / 4],
 }
@@ -105,6 +111,9 @@ struct Shader {
     alpha: f32,
     fade_end: f32,
     fade_span: f32,
+    // The pointer: x, y from the node's corner, logical units; z 1 while it
+    // is over the surface; w 1 while a button is held.
+    pointer: vec4<f32>,
     transform: mat4x4<f32>,
     values: array<vec4<f32>, 256>,
 };
@@ -315,6 +324,7 @@ impl Pipeline {
                 fade_end: s.fade[0],
                 fade_span: s.fade[1],
                 _pad: 0.0,
+                pointer: s.pointer,
                 transform: s.transform,
                 values,
             };
