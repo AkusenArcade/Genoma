@@ -1059,28 +1059,7 @@ impl App {
         let requests: Vec<FocusRequest> = std::mem::take(&mut *queue.borrow_mut());
         for request in requests {
             match request {
-                FocusRequest::Move(step) => {
-                    let list = self.surfaces[i].scene.borrow().focusables(catcher);
-                    if list.is_empty() {
-                        continue;
-                    }
-                    let now = self.surfaces[i].focused.and_then(|f| list.iter().position(|&n| n == f));
-                    let next = match now {
-                        Some(at) => (at as i64 + step as i64).rem_euclid(list.len() as i64) as usize,
-                        None if step < 0 => list.len() - 1,
-                        None => 0,
-                    };
-                    let node = list[next];
-                    if let Some(old) = self.surfaces[i].focused.take() {
-                        self.deliver(i, old, Input::Focus(false));
-                    }
-                    self.surfaces[i].focused = Some(node);
-                    self.deliver(i, node, Input::Focus(true));
-                    let extent = self.surfaces[i].scene.borrow().extent(node);
-                    if let Some([x, y, w, h]) = extent {
-                        self.deliver(i, node, Input::FocusWithin(x, y, w, h));
-                    }
-                }
+                FocusRequest::Move(step) => self.focus_step(i, catcher, step),
                 FocusRequest::Press => {
                     if let Some(node) = self.surfaces[i].focused {
                         let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(node).unwrap_or([0.0; 4]);
@@ -1095,6 +1074,84 @@ impl App {
             }
         }
         held.set(self.surfaces[i].focused.is_some());
+    }
+
+    /// The keyboard's focus `step` places on among what it can reach in
+    /// `within`, round from the end to the start; told to the node left and
+    /// the node reached, and to the wells around it (FocusWithin) so they
+    /// can bring it into view.
+    fn focus_step(&mut self, i: usize, within: NodeId, step: i32) {
+        let list = self.surfaces[i].scene.borrow().focusables(within);
+        if list.is_empty() {
+            return;
+        }
+        let now = self.surfaces[i].focused.and_then(|f| list.iter().position(|&n| n == f));
+        let next = match now {
+            Some(at) => (at as i64 + step as i64).rem_euclid(list.len() as i64) as usize,
+            None if step < 0 => list.len() - 1,
+            None => 0,
+        };
+        let node = list[next];
+        if let Some(old) = self.surfaces[i].focused.take() {
+            self.deliver(i, old, Input::Focus(false));
+        }
+        self.surfaces[i].focused = Some(node);
+        self.deliver(i, node, Input::Focus(true));
+        let extent = self.surfaces[i].scene.borrow().extent(node);
+        if let Some([x, y, w, h]) = extent {
+            self.deliver(i, node, Input::FocusWithin(x, y, w, h));
+        }
+    }
+
+    /// Where the keyboard walks on surface `i`, if it does: the `navigate`
+    /// node around the focused one, else around what catches, else the
+    /// first one in the surface.
+    fn walk_scope(&self, i: usize) -> Option<NodeId> {
+        let scene = self.surfaces[i].scene.borrow();
+        let from = self.surfaces[i].focused.or_else(|| scene.catcher());
+        from.and_then(|n| scene.navigate_scope(n)).or_else(|| scene.first_navigate())
+    }
+
+    /// A key inside a `navigate` node: the walk takes Tab, the arrows and
+    /// the press keys; the rest goes to the focused node and on up.
+    fn walk_key(&mut self, i: usize, scope: NodeId, event: &KeyEvent) {
+        let key = self.key_of(event);
+        let focused = {
+            let scene = self.surfaces[i].scene.borrow();
+            self.surfaces[i].focused.filter(|f| scene.within(*f, scope))
+        };
+        let slider = focused.is_some_and(|f| self.surfaces[i].scene.borrow().is_slider(f));
+        match key.name.as_str() {
+            "Tab" | "ISO_Left_Tab" => {
+                let back = key.shift || key.name == "ISO_Left_Tab";
+                self.focus_step(i, scope, if back { -1 } else { 1 });
+            }
+            "Left" | "Right" if slider => {
+                if let Some(f) = focused {
+                    self.deliver(i, f, Input::Key(key));
+                }
+            }
+            "Down" | "Right" => self.focus_step(i, scope, 1),
+            "Up" | "Left" => self.focus_step(i, scope, -1),
+            "Return" | "KP_Enter" | "space" if focused.is_some() => {
+                if let Some(f) = focused {
+                    let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(f).unwrap_or([0.0; 4]);
+                    self.deliver(i, f, Input::Click(272, w / 2.0, h / 2.0));
+                }
+            }
+            _ => {
+                // Escape lets the focus go, and is still heard.
+                if key.name == "Escape"
+                    && let Some(f) = self.surfaces[i].focused.take()
+                {
+                    self.deliver(i, f, Input::Focus(false));
+                }
+                self.deliver(i, focused.unwrap_or(scope), Input::Key(key));
+            }
+        }
+        self.serve_focus(i, scope);
+        let ring = self.surfaces[i].focused;
+        self.surfaces[i].scene.borrow_mut().set_focus_ring(ring);
     }
 
     pub fn start(&mut self, renderer: Renderer, fonts: Fonts, handle: LoopHandle<'static, App>) {
@@ -1905,6 +1962,14 @@ impl App {
         if field.is_some_and(|(i, f)| self.field_key(i, f, event)) {
             return;
         }
+        // Inside a `navigate` node, on the surface with the keys, the
+        // keyboard walks.
+        if let Some(i) = on
+            && let Some(scope) = self.walk_scope(i)
+        {
+            self.walk_key(i, scope, event);
+            return;
+        }
         // The keys go to what is catching on the surface the keyboard is on
         // (an open popup), else to the cell catching on whichever output.
         let held = on.and_then(|i| self.surfaces[i].scene.borrow().catcher().map(|c| (i, c)));
@@ -2478,6 +2543,14 @@ impl PointerHandler for App {
                 }
                 K::Press { button, serial, .. } => {
                     self.input_serial = serial;
+                    // The pointer takes over from the keyboard's walk: its
+                    // ring goes.
+                    if self.walk_scope(i).is_some()
+                        && let Some(f) = self.surfaces[i].focused.take()
+                    {
+                        self.deliver(i, f, Input::Focus(false));
+                        scene.borrow_mut().set_focus_ring(None);
+                    }
                     let catcher = scene.borrow().catcher();
                     if let Some(c) = catcher {
                         if hit.is_none_or(|h| !scene.borrow().within(h, c)) {

@@ -68,6 +68,10 @@ local panel = g.surface {
     namespace = "genoma-kit",
 
     g.capsule {
+        -- Once the panel has the keys (a click on it), Tab and the arrows
+        -- walk its controls, Return and space press them.
+        navigate = true,
+        focus_color = function() return theme.get("accent") end,
         direction = "column",
         align = "start",
         gap = 14,

@@ -24,6 +24,12 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- Keyboard navigation: `navigate = true` on a node lets Tab, Shift+Tab
+  and the arrows walk its buttons and sliders, a ring (`focus_color`)
+  round the focused one, Return and space press it; a focused slider takes
+  Left and Right (the kit's steps by its `step`). Keys the walk leaves go
+  to the focused node and up. Opt-in: interfaces without it behave as
+  before.
 - An inspector: `genoma ipc genoma tree` gives a running interface's
   surfaces and nodes (kind, role, id, text, where drawn, the properties
   set) as JSON, `genoma ipc genoma highlight <surface> <node>` outlines a

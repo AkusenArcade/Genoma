@@ -140,6 +140,14 @@ return g.surface {
   [`kit/`](kit). Its times are `kit_quick`, `kit_move` and `kit_open`,
   defined with `g.timing_default`, so a shell retimes them with
   `g.timing` before or after requiring the kit. See `examples/kit`.
+- **Keyboard:** a node with `navigate = true` is walked by the keyboard
+  once its surface has the keys: Tab and Shift+Tab, or the arrows, move
+  the focus among its buttons and sliders, ringed in `focus_color`; a
+  focused slider takes Left and Right; Return and space press; Escape lets
+  the focus go. Other keys reach the focused node and its ancestors'
+  `on_key`. A press of the pointer takes the ring away. Without
+  `navigate`, keys go to what catches, as `g.focus_move` and
+  `g.focus_press` walk it.
 - **Inspector:** `GENOMA_IPC=inspector GENOMA_INSPECT=<name> genoma
   examples/inspector` opens a panel beside another running interface (its
   `GENOMA_IPC`, `genoma` by default): its surfaces, its tree of nodes as

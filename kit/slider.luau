@@ -8,7 +8,7 @@
 --            on_change = function(v) volume.value = v end }
 --
 -- value: 0 to 1, a value or a function; on_change(v) is asked to change
--- it. step (default 0.05) is what a wheel notch moves, and the value is
+-- it. Focused inside a `navigate` node, Left and Right step it. step (default 0.05) is what a wheel notch moves, and the value is
 -- kept to multiples of it when `snap` is true. name says what it sets.
 local g = require("@genoma")
 local theme = require("@genoma/kit/theme")
@@ -67,6 +67,17 @@ return function(t: Slider): any
         on_release = function() held.value = false end,
         -- The press is the slider's: it does not reach a node under it.
         on_click = function() end,
+        -- Focused inside a `navigate` node: Left and Right step it, Home and
+        -- End take it to either end.
+        on_key = function(name: string)
+            if g.untracked(disabled) then return end
+            local now = g.untracked(value)
+            if name == "Left" then report(now - step)
+            elseif name == "Right" then report(now + step)
+            elseif name == "Home" then report(0)
+            elseif name == "End" then report(1)
+            end
+        end,
         on_wheel = function(_dx: number, dy: number, steps: boolean?)
             if g.untracked(disabled) then return end
             local by = if steps then -dy * step else -dy / g.untracked(travel)

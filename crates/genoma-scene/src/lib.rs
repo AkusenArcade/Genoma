@@ -262,6 +262,9 @@ pub struct Node {
     combine_with: Option<String>,
     combine: u8,
     combine_soft: f32,
+    /// The keyboard walks inside it, the focused node ringed in this.
+    navigate: bool,
+    focus_color: [f32; 4],
 }
 
 impl Node {
@@ -380,6 +383,8 @@ impl Node {
             combine_with: None,
             combine: 0,
             combine_soft: 0.0,
+            navigate: false,
+            focus_color: [0.478, 0.635, 0.969, 1.0],
         }
     }
 
@@ -595,6 +600,8 @@ pub struct Scene {
     newly_sized: Vec<(NodeId, f32, f32)>,
     /// The node an inspector points at, outlined over everything.
     highlight: Option<NodeId>,
+    /// The node the keyboard is on inside a `navigate` node, ringed.
+    focus_ring: Option<NodeId>,
     /// Counts the frames drawn, for `drawn_frame`.
     frame: u64,
 }
@@ -640,6 +647,7 @@ impl Scene {
             sized: Default::default(),
             newly_sized: Vec::new(),
             highlight: None,
+            focus_ring: None,
             frame: 0,
         }
     }
@@ -1144,6 +1152,42 @@ impl Scene {
         }
     }
 
+    /// The first `navigate` node shown, in tree order.
+    pub fn first_navigate(&self) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(self.root, &mut |node, n| {
+            if found.is_none() && n.navigate {
+                found = Some(node);
+            }
+        });
+        found
+    }
+
+    /// The nearest `navigate` node at or above `node`.
+    pub fn navigate_scope(&self, node: NodeId) -> Option<NodeId> {
+        let mut at = Some(node);
+        while let Some(id) = at {
+            if self.tree.get_node_context(id).is_some_and(|n| n.navigate) {
+                return Some(id);
+            }
+            at = self.parent(id);
+        }
+        None
+    }
+
+    /// Whether `node` is a slider: the arrows along it are its own.
+    pub fn is_slider(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.role == Role::Slider)
+    }
+
+    /// Rings `node` as the keyboard's, or nothing.
+    pub fn set_focus_ring(&mut self, node: Option<NodeId>) {
+        if node != self.focus_ring {
+            self.focus_ring = node;
+            self.dirty = true;
+        }
+    }
+
     /// Outlines `node` over everything this surface draws, or nothing.
     pub fn set_highlight(&mut self, node: Option<u64>) {
         let node = node.map(NodeId::from).filter(|n| self.tree.get_node_context(*n).is_some());
@@ -1590,6 +1634,8 @@ impl Scene {
                 }
             }
             Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
+            Prop::Navigate => n.navigate = take!(flag),
+            Prop::FocusColor => n.focus_color = take!(colour),
             Prop::Hollow => n.hollow = take!(flag),
             Prop::Blur => n.blur = take!(flag),
             Prop::Wave => n.wave = take!(number),
@@ -1915,8 +1961,26 @@ impl Scene {
         let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
         self.frame += 1;
         let others = self.combined_shapes();
+        let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
         let mut out = Out { frame: self.frame, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
+        // The keyboard's ring: round the focused node, a little outside it,
+        // in its walk's colour.
+        if let Some(node) = self.focus_ring
+            && let (Some(n), Some(colour)) = (self.tree.get_node_context(node), ring_colour)
+            && n.present
+        {
+            {
+                let [x, y, w, h] = n.extent;
+                let gap = 3.0;
+                let radius = n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0) + gap;
+                let mut ring = flat([(x - gap) * scale, (y - gap) * scale], [(w + 2.0 * gap) * scale, (h + 2.0 * gap) * scale], radius * scale, [0.0; 4], &out);
+                ring.rim = (2.0 * scale).round().max(1.0);
+                ring.rim_top = colour;
+                ring.rim_bottom = colour;
+                out.list.push_rect(ring);
+            }
+        }
         // An inspector's mark: the node's box, outlined in magenta, a
         // translucent wash inside.
         if let Some([x, y, w, h]) = self.highlight.and_then(|n| self.tree.get_node_context(n)).map(|n| n.extent) {
