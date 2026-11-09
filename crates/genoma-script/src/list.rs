@@ -513,7 +513,7 @@ mod tests {
         let handlers: Handlers = Rc::new(RefCell::new(HashMap::new()));
         // Items 1 to `count`, newest first: what a notification list does.
         let count = Signal::new(5usize);
-        let c = count.clone();
+        let c = count;
         let items = lua
             .create_function(move |lua, ()| {
                 let t = lua.create_table()?;

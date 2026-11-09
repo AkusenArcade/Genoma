@@ -1446,6 +1446,7 @@ impl Script {
             if surfaces.iter().any(|t| !is_surface(t)) {
                 return Err(format!("{} must return g.surface {{ … }}, or a list of them", self.entry));
             }
+            let surfaces = hoist_popups(surfaces).map_err(|e| e.to_string())?;
             let specs = surfaces.iter().map(surface_spec).collect::<mlua::Result<Vec<_>>>().map_err(|e| e.to_string())?;
             Ok((surfaces, specs))
         });
@@ -1997,35 +1998,24 @@ impl Script {
             })?,
         )?;
         // g.timing { open = { duration = 0.25, curve = { … } }, … }: the one
-        // place a duration may be written.
-        g.set(
-            "timing",
-            lua.create_function(|_, set: Table| {
-                for pair in set.pairs::<String, Table>() {
-                    let (name, entry) = pair?;
-                    let spring = match entry.get::<Option<Table>>("spring")? {
-                        Some(t) => Some(genoma_core::timing::Spring {
-                            stiffness: t.get::<Option<f64>>("stiffness")?.unwrap_or(300.0),
-                            damping: t.get::<Option<f64>>("damping")?.unwrap_or(26.0),
-                            mass: t.get::<Option<f64>>("mass")?.unwrap_or(1.0),
-                        }),
-                        None => None,
-                    };
-                    let duration: f64 = match spring {
-                        Some(_) => entry.get::<Option<f64>>("duration")?.unwrap_or(0.0),
-                        None => entry.get("duration")?,
-                    };
-                    let curve = match entry.get::<Option<Vec<f64>>>("curve")? {
-                        Some(c) if c.len() == 4 => Curve { x1: c[0], y1: c[1], x2: c[2], y2: c[3] },
-                        Some(_) => return Err(err(format!("timing {name}: a curve is four numbers"))),
-                        None => Curve::LINEAR,
-                    };
-                    let delay: f64 = entry.get::<Option<f64>>("delay")?.unwrap_or(0.0);
-                    timing::define(&name, Timing { duration, curve, delay, spring });
-                }
-                Ok(())
-            })?,
-        )?;
+        // place a duration may be written. g.timing_default { … } defines
+        // only the names not defined yet: what a library offers, which a
+        // shell may have retimed before requiring it, or retime after.
+        for (name, keep) in [("timing", false), ("timing_default", true)] {
+            g.set(
+                name,
+                lua.create_function(move |_, set: Table| {
+                    for pair in set.pairs::<String, Table>() {
+                        let (name, entry) = pair?;
+                        if keep && timing::get(&name).is_some() {
+                            continue;
+                        }
+                        timing::define(&name, timing_entry(&name, &entry)?);
+                    }
+                    Ok(())
+                })?,
+            )?;
+        }
         // g.icon_dir("~/…/assets/icons"): where icon names are looked up.
         let icon_dirs = self.icon_dirs.clone();
         g.set(
@@ -2144,6 +2134,11 @@ impl Script {
                     };
                     LuaValue::UserData(data)
                 }
+                kit if kit == "@genoma/kit" || kit.starts_with("@genoma/kit/") => {
+                    let part = kit.strip_prefix("@genoma/kit/").unwrap_or("init");
+                    let source = kit_source(part).ok_or_else(|| err(format!("no module {kit}")))?;
+                    owned_by(module_owner.get(), || lua.load(&source).set_name(kit).eval())?
+                }
                 other if other.starts_with('@') => return Err(err(format!("no module {other}"))),
                 relative => {
                     if relative.contains("..") {
@@ -2174,6 +2169,127 @@ impl Script {
         lua.sandbox(true)?;
         Ok(())
     }
+}
+
+/// The component kit's modules, built in. `GENOMA_KIT_DIR` reads them from
+/// a directory instead, for working on the kit itself.
+const KIT: &[(&str, &str)] = &[
+    ("init", include_str!("../../../kit/init.luau")),
+    ("theme", include_str!("../../../kit/theme.luau")),
+    ("button", include_str!("../../../kit/button.luau")),
+    ("toggle", include_str!("../../../kit/toggle.luau")),
+    ("slider", include_str!("../../../kit/slider.luau")),
+    ("progress", include_str!("../../../kit/progress.luau")),
+    ("menu", include_str!("../../../kit/menu.luau")),
+    ("dropdown", include_str!("../../../kit/dropdown.luau")),
+    ("tooltip", include_str!("../../../kit/tooltip.luau")),
+    ("list", include_str!("../../../kit/list.luau")),
+];
+
+fn kit_source(part: &str) -> Option<String> {
+    let (_, built_in) = KIT.iter().find(|(name, _)| *name == part)?;
+    if let Some(dir) = std::env::var_os("GENOMA_KIT_DIR") {
+        let path = Path::new(&dir).join(format!("{part}.luau"));
+        match std::fs::read_to_string(&path) {
+            Ok(source) => return Some(source),
+            Err(e) => log::warn!("{}: {e}; the built-in kit's", path.display()),
+        }
+    }
+    Some((*built_in).to_owned())
+}
+
+/// One entry of `g.timing`: a duration and a curve, or a spring.
+fn timing_entry(name: &str, entry: &Table) -> mlua::Result<Timing> {
+    let spring = match entry.get::<Option<Table>>("spring")? {
+        Some(t) => Some(genoma_core::timing::Spring {
+            stiffness: t.get::<Option<f64>>("stiffness")?.unwrap_or(300.0),
+            damping: t.get::<Option<f64>>("damping")?.unwrap_or(26.0),
+            mass: t.get::<Option<f64>>("mass")?.unwrap_or(1.0),
+        }),
+        None => None,
+    };
+    let duration: f64 = match spring {
+        Some(_) => entry.get::<Option<f64>>("duration")?.unwrap_or(0.0),
+        None => entry.get("duration")?,
+    };
+    let curve = match entry.get::<Option<Vec<f64>>>("curve")? {
+        Some(c) if c.len() == 4 => Curve { x1: c[0], y1: c[1], x2: c[2], y2: c[3] },
+        Some(_) => return Err(err(format!("timing {name}: a curve is four numbers"))),
+        None => Curve::LINEAR,
+    };
+    let delay: f64 = entry.get::<Option<f64>>("delay")?.unwrap_or(0.0);
+    Ok(Timing { duration, curve, delay, spring })
+}
+
+/// The popups written inside a tree, taken out to be surfaces of their own
+/// beside the others: a menu declared in the button that opens it. One
+/// without an `anchor` is anchored to the node it was written in, which is
+/// given an id if it has none. Only the tree as written is searched; a
+/// popup in a row of `g.each` or in a function of the output is refused at
+/// mount.
+fn hoist_popups(surfaces: Vec<Table>) -> mlua::Result<Vec<Table>> {
+    fn is_popup(t: &Table) -> bool {
+        t.raw_get::<Option<bool>>("__popup").ok().flatten() == Some(true)
+    }
+    fn walk(node: &Table, found: &mut Vec<Table>, made: &mut usize) -> mlua::Result<()> {
+        let children: Vec<LuaValue> = node.sequence_values::<LuaValue>().collect::<mlua::Result<_>>()?;
+        if !children.iter().any(|c| matches!(c, LuaValue::Table(t) if is_popup(t))) {
+            for child in &children {
+                if let LuaValue::Table(t) = child {
+                    walk(t, found, made)?;
+                }
+            }
+            return Ok(());
+        }
+        let mut kept = Vec::with_capacity(children.len());
+        for child in children {
+            match child {
+                LuaValue::Table(t) if is_popup(&t) => {
+                    if matches!(t.raw_get::<LuaValue>("anchor")?, LuaValue::Nil) {
+                        let id = match node.raw_get::<LuaValue>("id")? {
+                            LuaValue::String(id) => id.to_string_lossy(),
+                            _ => {
+                                *made += 1;
+                                let id = format!("__popup_anchor_{made}");
+                                node.raw_set("id", id.as_str())?;
+                                id
+                            }
+                        };
+                        t.raw_set("anchor", id)?;
+                    }
+                    found.push(t);
+                }
+                other => kept.push(other),
+            }
+        }
+        let len = node.raw_len();
+        for i in 1..=len {
+            node.raw_set(i, kept.get(i - 1).cloned().unwrap_or(LuaValue::Nil))?;
+        }
+        for child in &kept {
+            if let LuaValue::Table(t) = child {
+                walk(t, found, made)?;
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::with_capacity(surfaces.len());
+    let mut made = 0;
+    let mut queue: std::collections::VecDeque<Table> = surfaces.into();
+    while let Some(surface) = queue.pop_front() {
+        let mut found = Vec::new();
+        // The surface's own content, and below it; a popup's content may
+        // hold popups of its own (a submenu).
+        if let LuaValue::Table(content) = surface.raw_get::<LuaValue>(1)? {
+            if is_popup(&content) {
+                return Err(err("a surface's content is a node, not a g.popup"));
+            }
+            walk(&content, &mut found, &mut made)?;
+        }
+        out.push(surface);
+        queue.extend(found);
+    }
+    Ok(out)
 }
 
 fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
@@ -2252,6 +2368,11 @@ fn popup_spec(t: &Table) -> mlua::Result<Option<PopupSpec>> {
 }
 
 fn kind_of(t: &Table) -> mlua::Result<Kind> {
+    if t.get::<Option<bool>>("__popup")? == Some(true) {
+        return Err(err(
+            "a g.popup inside a g.each row or a function of the output: write it in the tree a surface returns, or beside the surfaces",
+        ));
+    }
     Ok(match t.get::<String>("__kind").map_err(|_| err("a child that is not a node"))?.as_str() {
         // A keyed list is a box whose children are its rows.
         "box" | "each" | "list" => Kind::Box,
@@ -2652,6 +2773,50 @@ mod tests {
         let s = spec(r#"return { __surface = true, __popup = true, anchor = function() return "tray" end }"#).unwrap();
         let popup = s.popup.unwrap();
         assert_eq!((popup.anchor, popup.side.as_str(), popup.align.as_str()), (None, "bottom", "center"));
+    }
+
+    #[test]
+    fn a_popup_written_in_a_tree_becomes_a_surface_anchored_to_its_parent() {
+        let lua = Lua::new();
+        let returned: Table = lua
+            .load(
+                r#"return { __surface = true, {
+                    __kind = "box",
+                    { __kind = "capsule", id = "save",
+                        { __surface = true, __popup = true, { __kind = "box" } } },
+                    { __kind = "capsule",
+                        { __surface = true, __popup = true, side = "right",
+                            { __kind = "box",
+                                { __kind = "capsule", { __surface = true, __popup = true, { __kind = "box" } } } } } },
+                    { __kind = "text" },
+                } }"#,
+            )
+            .eval()
+            .unwrap();
+        let surfaces = hoist_popups(vec![returned]).unwrap();
+        assert_eq!(surfaces.len(), 4, "the surface, two popups, and one inside a popup");
+        let anchors: Vec<String> = surfaces[1..].iter().map(|t| t.get::<String>("anchor").unwrap()).collect();
+        assert_eq!(anchors[0], "save", "an id of its own is kept");
+        assert!(anchors[1].starts_with("__popup_anchor_") && anchors[2].starts_with("__popup_anchor_") && anchors[1] != anchors[2]);
+        // The tree keeps its other children, in order, and loses the popups.
+        let content: Table = surfaces[0].get(1).unwrap();
+        assert_eq!(content.raw_len(), 3);
+        let save: Table = content.get(1).unwrap();
+        assert_eq!(save.raw_len(), 0);
+        let last: Table = content.get(3).unwrap();
+        assert_eq!(last.get::<String>("__kind").unwrap(), "text");
+        for s in &surfaces {
+            surface_spec(s).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_kit_module_compiles() {
+        let lua = Lua::new();
+        for (name, source) in KIT {
+            lua.load(*source).set_name(*name).into_function().unwrap_or_else(|e| panic!("kit/{name}: {e}"));
+        }
+        assert!(kit_source("button").is_some() && kit_source("nothing").is_none());
     }
 
     #[test]

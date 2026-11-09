@@ -97,6 +97,21 @@ return g.surface {
   `on_fling` and others. The input region follows the nodes that take input.
   `on_wheel(dx, dy, steps)` is told whether the movement came in a wheel's
   steps or a touchpad's distance.
+- **Popups inside a tree:** a `g.popup` written as a child of a node is
+  taken out at load and becomes a surface of its own, anchored to that
+  node (which is given an id if it has none): a menu is written inside the
+  button that opens it. Popups written there may hold popups (a submenu).
+  One inside a `g.each` row or a function of the output is refused; write
+  it beside the surfaces with an `anchor` instead.
+- **The kit:** `require("@genoma/kit")` gives `button`, `toggle`,
+  `slider`, `progress`, `menu`, `dropdown`, `tooltip` and `list`, built
+  on the nodes above and drawn in a neutral look of their own.
+  `kit.theme.set { accent = "#e6b062", radius = 10 }` changes it for every
+  component on screen, the colours moving there. Each is also
+  `require("@genoma/kit/button")` and so on, and the sources are in
+  [`kit/`](kit). Its times are `kit_quick`, `kit_move` and `kit_open`,
+  defined with `g.timing_default`, so a shell retimes them with
+  `g.timing` before or after requiring the kit. See `examples/kit`.
 - **Long lists:** `g.list { items = …, key = …, row = …, row_height = 28,
   height = 336, reveal = … }` takes `g.each`'s three functions, but mounts
   only the rows in view and a few beyond, so thousands of items cost what a

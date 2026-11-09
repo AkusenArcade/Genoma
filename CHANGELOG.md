@@ -24,6 +24,15 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `@genoma/kit`, a component kit with a neutral look: `button`,
+  `toggle`, `slider`, `progress`, `menu`, `dropdown`, `tooltip` and `list`,
+  restyled live with `kit.theme.set`. See `examples/kit`.
+- A `g.popup` written as a child of a node becomes a surface of its own
+  anchored to that node, so a menu is written inside its button. Before,
+  every popup had to be returned beside the surfaces with an `anchor`,
+  which still works.
+- `g.timing_default { … }`, which defines only the timing names not
+  defined yet: what a library offers and a shell may retime.
 - `g.list`, a keyed list for thousands of items: only the rows in view
   are mounted, every one `row_height` tall. It scrolls by itself (wheel
   steps glided to, touchpad followed and flung), brings a row into view
