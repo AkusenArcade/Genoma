@@ -359,7 +359,7 @@ impl Gpu {
     /// frame's data, and the surface's frame comes after.
     fn draw_groups(&mut self, id: SurfaceId, format: wgpu::TextureFormat, list: &DrawList) {
         for group in &list.groups {
-            if self.images.as_ref().is_some_and(|i| i.has(group.key)) {
+            if self.images.as_ref().is_some_and(|i| i.has(group.key)) || self.shaders.as_ref().is_some_and(|s| s.has_backdrop(group.key)) {
                 continue;
             }
             let [x0, y0, x1, y1] = group.bounds;
@@ -372,14 +372,23 @@ impl Gpu {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             self.render(&mut encoder, &sheet.view, format, id, size, &moved, &mut viewport, None);
             self.queue.submit([encoder.finish()]);
-            let blur = self.blur.get_or_insert_with(|| blur::Pipeline::new(&self.device, format));
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-            let blurred = blur.blur(&self.device, &mut encoder, sheet, group.sigma);
-            self.queue.submit([encoder.finish()]);
+            // Unblurred, what is under a node for a shader to read.
+            let done = if group.sigma > 0.0 {
+                let blur = self.blur.get_or_insert_with(|| blur::Pipeline::new(&self.device, format));
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                let blurred = blur.blur(&self.device, &mut encoder, sheet, group.sigma);
+                self.queue.submit([encoder.finish()]);
+                blurred
+            } else {
+                sheet
+            };
             if let Some(images) = &mut self.images {
-                images.adopt(&self.device, group.key, &blurred.view);
+                images.adopt(&self.device, group.key, &done.view);
             }
-            log::debug!("surface {id}: blurred a subtree, {}×{} px over {:.1} px", size[0], size[1], group.sigma);
+            if let Some(shaders) = &mut self.shaders {
+                shaders.adopt_backdrop(&self.device, group.key, &done.view);
+            }
+            log::debug!("surface {id}: drew a group, {}×{} px, blurred over {:.1} px", size[0], size[1], group.sigma);
         }
     }
 

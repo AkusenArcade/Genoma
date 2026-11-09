@@ -132,6 +132,7 @@ pub enum Prop {
     FocusColor,
     BlurRadius,
     BackdropBlur,
+    Backdrop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,6 +292,7 @@ pub const PROPS: &[PropInfo] = &[
     p("combine", Prop::Combine, Ty::Choice(&["union", "subtract", "intersect"]), false, "How a capsule with `combine_with` meets the other: joined to it (both drawn, in this one's fill), with the other cut out, or only where both are. The other lends only its outline; give it no fill of its own unless it should be drawn too."),
     p("blur_radius", Prop::BlurRadius, Ty::Number, true, "The node and everything in it drawn blurred, after depth has turned it: the Gaussian's spread, logical units, as CSS's blur(). 0 (the default) costs nothing; a radius at rest is blurred once and kept, a moving one each frame."),
     p("backdrop_blur", Prop::BackdropBlur, Ty::Number, true, "What this surface drew under the node, blurred this much (logical units, as CSS's backdrop-filter: blur()), shows through it inside its shape: frosted glass in the shell, whatever the compositor offers. A flat node's; 0 (the default) costs nothing, and a blur at rest is kept. Windows of other programs are the compositor's (`blur`)."),
+    p("backdrop", Prop::Backdrop, Ty::Bool, false, "A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
     p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),

@@ -21,6 +21,9 @@
 --   vignette  color, strength (0…1), start (0 the centre … 1 a corner),
 --             softness (0…1)
 --   grain     amount (0…1), size (of a speck), rate (changes a second)
+--   glass     radius (corners), bend (how far the rim pulls what is under),
+--             aberration (the colours parting at the rim), frost, tint,
+--             rim (its top edge's light, 0…1); reads what is under it
 --
 -- Each source is also there for a g.shader of one's own to start from; and
 -- every g.shader has the g_ library (noise, distance fields, colour) the
@@ -94,6 +97,19 @@ function M.vignette(t: { [any]: any }): any
         local r, gr, b, a = rgba(read(t.color) or "#000000")
         return { r, gr, b, a, read(t.strength) or 0.5, read(t.start) or 0.4, read(t.softness) or 0.6 }
     end)
+end
+
+-- What is under the pane, bent at its rim, the colours parting there.
+function M.glass(t: { [any]: any }): any
+    local node = effect("glass", t, {}, function()
+        local r, gr, b, a = rgba(read(t.tint) or "#ffffff10")
+        return {
+            read(t.radius) or 16, read(t.bend) or 10, read(t.aberration) or 1.5, read(t.frost) or 1.5,
+            r, gr, b, a, read(t.rim) or 0.25,
+        }
+    end)
+    node.backdrop = true
+    return node
 end
 
 function M.grain(t: { [any]: any }): any

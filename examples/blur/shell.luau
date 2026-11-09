@@ -101,6 +101,22 @@ return g.surface {
                 rim_bottom = "#ffffff11",
                 g.text { size = 13, weight = 600, color = "#ffffff", text = "Frosted" },
             },
+            -- A shader that reads what is under it: a lens's rim, the
+            -- colours parting there.
+            require("@genoma/kit/effects").glass {
+                overlay = true,
+                attach = "corner",
+                offset_x = function() return 264 - slide.value * 264 end,
+                offset_y = 15,
+                width = 160,
+                height = 100,
+                radius = 22,
+                bend = 14,
+                aberration = 2.5,
+                frost = 0.8,
+                tint = "#ffffff12",
+                rim = 0.3,
+            },
         },
         g.box {
             gap = 12,

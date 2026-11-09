@@ -221,6 +221,7 @@ fn same_shader(a: &Shader, b: &Shader) -> bool {
         && a.fade == b.fade
         && a.values == b.values
         && a.transform == b.transform
+        && a.backdrop == b.backdrop
 }
 
 fn same_emitter(a: &Emitter, b: &Emitter) -> bool {
@@ -496,6 +497,7 @@ impl DrawList {
                 v.to_bits().hash(&mut h);
             }
             (sh.scale.to_bits(), sh.time.to_bits(), sh.alpha.to_bits()).hash(&mut h);
+            sh.backdrop.map(|(k, b)| (k, b.map(f32::to_bits))).hash(&mut h);
         }
         for e in &self.emitters {
             (e.key, e.generation).hash(&mut h);

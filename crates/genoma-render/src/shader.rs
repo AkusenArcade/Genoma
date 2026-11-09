@@ -49,6 +49,10 @@ pub struct Shader {
     /// The pointer from the node's corner, logical units; whether it is
     /// over the surface; whether a button is held.
     pub pointer: [f32; 4],
+    /// What is under the node (`backdrop = true`): the drawn group's key,
+    /// and where its texture lies from the node's corner, logical units:
+    /// x, y, width, height.
+    pub backdrop: Option<(u64, [f32; 4])>,
 }
 
 pub const VALUES: usize = 1024;
@@ -65,6 +69,7 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("dissolve", include_str!("shaders/dissolve.wgsl")),
     ("vignette", include_str!("shaders/vignette.wgsl")),
     ("grain", include_str!("shaders/grain.wgsl")),
+    ("glass", include_str!("shaders/glass.wgsl")),
 ];
 
 /// A built-in effect's WGSL, by its name without `genoma:`.
@@ -92,6 +97,7 @@ struct Uniforms {
     fade_span: f32,
     _pad: f32,
     pointer: [f32; 4],
+    backdrop: [f32; 4],
     transform: [[f32; 4]; 4],
     values: [[f32; 4]; VALUES / 4],
 }
@@ -114,10 +120,27 @@ struct Shader {
     // The pointer: x, y from the node's corner, logical units; z 1 while it
     // is over the surface; w 1 while a button is held.
     pointer: vec4<f32>,
+    // What is under it: x, y, width, height from the node's corner, logical
+    // units; a width of 0 is nothing.
+    backdrop: vec4<f32>,
     transform: mat4x4<f32>,
     values: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> shader: Shader;
+@group(1) @binding(0) var genoma_backdrop: texture_2d<f32>;
+@group(1) @binding(1) var genoma_backdrop_sampler: sampler;
+
+// What the surface drew under the node at `p` (logical units from its
+// corner), premultiplied; transparent where there is nothing, or for a
+// shader without `backdrop = true`. Read anywhere: a glass bends it.
+fn g_backdrop(p: vec2<f32>) -> vec4<f32> {
+    let b = shader.backdrop;
+    if (b.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let uv = (p - b.xy) / b.zw;
+    return textureSampleLevel(genoma_backdrop, genoma_backdrop_sampler, uv, 0.0);
+}
 
 // The pixel before the node's matrix rides beside the position: the
 // interface's `shade` is given it, and the clip and the fade are measured
@@ -173,6 +196,15 @@ pub(crate) struct Pipeline {
     group: wgpu::BindGroup,
     capacity: usize,
     draws: Vec<u64>,
+    /// Each draw's backdrop, by the group's key.
+    backdrops: Vec<Option<u64>>,
+    /// What is under a node, drawn: its texture bound for the shader, and
+    /// when last used.
+    under: HashMap<u64, (wgpu::BindGroup, u64)>,
+    under_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// A transparent texel, for a shader that reads nothing under it.
+    nothing: wgpu::BindGroup,
 }
 
 impl Pipeline {
@@ -190,9 +222,49 @@ impl Pipeline {
                 count: None,
             }],
         });
+        let under_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shader backdrop"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shader backdrop"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blank = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shader backdrop nothing"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let nothing = Self::under_group(device, &under_layout, &sampler, &blank.create_view(&Default::default()));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader"),
-            bind_group_layouts: &[Some(&group_layout)],
+            bind_group_layouts: &[Some(&group_layout), Some(&under_layout)],
             ..Default::default()
         });
         let capacity = 4;
@@ -207,7 +279,34 @@ impl Pipeline {
             group,
             capacity,
             draws: Vec::new(),
+            backdrops: Vec::new(),
+            under: HashMap::new(),
+            under_layout,
+            sampler,
+            nothing,
         }
+    }
+
+    fn under_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shader backdrop"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        })
+    }
+
+    /// Whether what is under a node is kept for `key`.
+    pub(crate) fn has_backdrop(&self, key: u64) -> bool {
+        self.under.contains_key(&key)
+    }
+
+    /// What is under a node, drawn into `view`, for the shaders that read it.
+    pub(crate) fn adopt_backdrop(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
+        let group = Self::under_group(device, &self.under_layout, &self.sampler, view);
+        self.under.insert(key, (group, self.uploads));
     }
 
     fn buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -289,10 +388,12 @@ impl Pipeline {
 
     pub(crate) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: [f32; 2], shaders: &[crate::Shader]) {
         self.draws.clear();
+        self.backdrops.clear();
         self.uploads += 1;
         if self.uploads % 256 == 0 {
             let now = self.uploads;
             self.pipelines.retain(|_, (_, used)| now - *used < 1024);
+            self.under.retain(|_, (_, used)| now - *used < 1024);
         }
         if shaders.is_empty() {
             return;
@@ -325,12 +426,19 @@ impl Pipeline {
                 fade_span: s.fade[1],
                 _pad: 0.0,
                 pointer: s.pointer,
+                backdrop: s.backdrop.map_or([0.0; 4], |(_, b)| b),
                 transform: s.transform,
                 values,
             };
             let at = i * STRIDE as usize;
             bytes[at..at + std::mem::size_of::<Uniforms>()].copy_from_slice(bytemuck::bytes_of(&u));
             self.draws.push(s.key);
+            self.backdrops.push(s.backdrop.map(|(k, _)| k));
+            if let Some((k, _)) = s.backdrop
+                && let Some(entry) = self.under.get_mut(&k)
+            {
+                entry.1 = self.uploads;
+            }
         }
         queue.write_buffer(&self.uniforms, 0, &bytes);
     }
@@ -343,6 +451,8 @@ impl Pipeline {
             let Some((Some(pipeline), _)) = self.pipelines.get(key) else { continue };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.group, &[(i as u64 * STRIDE) as u32]);
+            let under = self.backdrops.get(i).copied().flatten().and_then(|k| self.under.get(&k)).map_or(&self.nothing, |(g, _)| g);
+            pass.set_bind_group(1, under, &[]);
             pass.draw(0..4, 0..1);
         }
     }

@@ -24,6 +24,11 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `backdrop = true` on a `g.shader`: it reads what its surface drew under
+  it through `g_backdrop(p)`, 24 logical units beyond its edges too,
+  drawn again only when that changes. `genoma:glass` (and
+  `effects.glass` in the kit) is a pane that bends it at its rim, the
+  colours parting there, frosted, tinted, its top edge lit.
 - `backdrop_blur`: frosted glass inside the shell. What the surface drew
   under a flat node shows through it blurred, inside its rounded shape,
   whatever the compositor offers; re-blurred only when what is under it

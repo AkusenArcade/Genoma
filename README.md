@@ -101,9 +101,11 @@ return g.surface {
   `g_hash`…), distance fields (`g_smin`, `g_smax`, `g_sd_circle`,
   `g_sd_box`, `g_sd_rounded_box`, `g_sd_segment`, `g_cover` for an
   antialiased edge) and colour (`g_rgba`, `g_premul`, `g_over`); see
-  `crates/genoma-render/src/shaders/library.wgsl`. Five effects come
-  built in, `src = "genoma:noise"` (`ripple`, `dissolve`, `vignette`,
-  `grain`), and `require("@genoma/kit/effects")` gives them as nodes with
+  `crates/genoma-render/src/shaders/library.wgsl`. A shader with
+  `backdrop = true` reads what its surface drew under it with
+  `g_backdrop(p)`, a little beyond its edges too. Six effects come built
+  in, `src = "genoma:noise"` (`ripple`, `dissolve`, `vignette`, `grain`,
+  and `glass`, a pane that bends what is under it at its rim), and `require("@genoma/kit/effects")` gives them as nodes with
   named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
 - **Blur:** `blur_radius = 6` draws a node and everything in it blurred,

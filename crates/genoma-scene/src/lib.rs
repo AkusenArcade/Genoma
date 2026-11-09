@@ -266,6 +266,8 @@ pub struct Node {
     blur_radius: f32,
     /// What is under it shown through it blurred this much, logical units.
     backdrop_blur: f32,
+    /// A shader that reads what is under it.
+    reads_backdrop: bool,
     /// The keyboard walks inside it, the focused node ringed in this.
     navigate: bool,
     focus_color: [f32; 4],
@@ -389,6 +391,7 @@ impl Node {
             combine_soft: 0.0,
             blur_radius: 0.0,
             backdrop_blur: 0.0,
+            reads_backdrop: false,
             navigate: false,
             focus_color: [0.478, 0.635, 0.969, 1.0],
         }
@@ -1676,6 +1679,7 @@ impl Scene {
             Prop::Navigate => n.navigate = take!(flag),
             Prop::BlurRadius => n.blur_radius = take!(number).max(0.0),
             Prop::BackdropBlur => n.backdrop_blur = take!(number).max(0.0),
+            Prop::Backdrop => n.reads_backdrop = take!(flag),
             Prop::FocusColor => n.focus_color = take!(colour),
             Prop::Hollow => n.hollow = take!(flag),
             Prop::Blur => n.blur = take!(flag),
@@ -2003,7 +2007,7 @@ impl Scene {
         self.frame += 1;
         let others = self.combined_shapes();
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2399,6 +2403,10 @@ fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32;
 
 struct Out<'a> {
     frame: u64,
+    /// What is under the shader node being drawn, kept for it: the node,
+    /// the drawn group's key, and where its texture lies from the node's
+    /// corner, logical units.
+    under: Option<(NodeId, u64, [f32; 4])>,
     /// The pointer on the surface, logical units, and a button held.
     pointer: Option<(f32, f32, bool)>,
     /// The shapes a `combine_with` names, by id: where each was drawn and
@@ -2606,6 +2614,12 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = true;
     }
+    // A shader that reads what is under it: drawn as a group, unblurred,
+    // for its g_backdrop.
+    if tree.get_node_context(node).is_some_and(|n| n.present && n.reads_backdrop && n.kind == Kind::Shader) {
+        let ([x, y, w, h], _) = place(tree, node, parent, parent_exact, scale);
+        out.under = under_for_shader(node, [x, y, w, h], scale, out);
+    }
     // Frosted: what is drawn so far under its shape, blurred, laid first.
     if let Some(n) = tree.get_node_context(node).filter(|n| n.present && n.backdrop_blur > 0.0) {
         let ([x, y, w, h], _) = place(tree, node, parent, parent_exact, scale);
@@ -2628,6 +2642,36 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = false;
     }
+}
+
+/// What `out` holds under a shader node at `rect` (logical units), and a
+/// margin round it a bend can reach, as an unblurred group: the key and
+/// where the texture lies from the node's corner.
+fn under_for_shader(node: NodeId, rect: [f32; 4], scale: f32, out: &mut Out) -> Option<(NodeId, u64, [f32; 4])> {
+    // How far beyond its edges a shader may look, logical units.
+    const REACH: f32 = 24.0;
+    let area = [
+        ((rect[0] - REACH) * scale).max(0.0).floor(),
+        ((rect[1] - REACH) * scale).max(0.0).floor(),
+        ((rect[0] + rect[2] + REACH) * scale).min(out.viewport[0]).ceil(),
+        ((rect[1] + rect[3] + REACH) * scale).min(out.viewport[1]).ceil(),
+    ];
+    let size = [area[2] - area[0], area[3] - area[1]];
+    if size[0] < 1.0 || size[1] < 1.0 {
+        return None;
+    }
+    let under = out.list.within([area[0] as u32, area[1] as u32, size[0] as u32, size[1] as u32]);
+    if under.is_empty() {
+        return None;
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ("under", under.fingerprint(), area.map(f32::to_bits)).hash(&mut h);
+        h.finish() | (1 << 63)
+    };
+    out.list.groups.push(genoma_render::Group { key, list: under, bounds: area, sigma: 0.0 });
+    Some((node, key, [area[0] / scale - rect[0], area[1] / scale - rect[1], size[0] / scale, size[1] / scale]))
 }
 
 /// What `out` holds under `rect` (x, y, width, height, physical pixels),
@@ -3117,6 +3161,7 @@ fn collect_node(
                         Some((x, y, held)) => [x - origin[0], y - origin[1], 1.0, if held { 1.0 } else { 0.0 }],
                         None => [-1.0e6, -1.0e6, 0.0, 0.0],
                     },
+                    backdrop: out.under.filter(|(n, ..)| *n == node).map(|(_, key, at)| (key, at)),
                 });
             }
         }
@@ -3633,6 +3678,41 @@ mod tests {
         assert_eq!(list.rects.len(), 2, "both cards still drawn, the glass over its frost");
         // At rest, the same picture.
         assert_eq!(scene.draw_list(1.0).groups[0].key, g.key);
+    }
+
+    #[test]
+    fn a_shader_reads_what_is_drawn_under_it() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let well = scene.create(Kind::Box, Role::None);
+        scene.append(root, well);
+        let under = scene.create(Kind::Capsule, Role::None);
+        scene.append(well, under);
+        for (p, v) in [(Prop::Width, 100.0), (Prop::Height, 60.0)] {
+            scene.set(under, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(under, Prop::Fill, Value::Color([0.0, 0.0, 1.0, 1.0]), None).unwrap();
+        let pane = scene.create(Kind::Shader, Role::None);
+        scene.append(well, pane);
+        for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 30.0), (Prop::OffsetX, 30.0), (Prop::OffsetY, 10.0)] {
+            scene.set(pane, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(pane, Prop::Overlay, Value::Bool(true), None).unwrap();
+        scene.set(pane, Prop::Attach, Value::Text("corner".into()), None).unwrap();
+        scene.set(pane, Prop::Src, Value::Text("genoma:glass".into()), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        assert!(scene.draw_list(1.0).shaders[0].backdrop.is_none(), "not asked, nothing read");
+        scene.set(pane, Prop::Backdrop, Value::Bool(true), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.groups.len(), 1);
+        let g = &list.groups[0];
+        assert_eq!((g.sigma, g.list.rects.len()), (0.0, 1), "the blue card, unblurred");
+        let (key, at) = list.shaders[0].backdrop.expect("read");
+        assert_eq!(key, g.key);
+        // The texture reaches 24 beyond the pane, within the surface: from
+        // the pane's corner, (-24, -10), and as wide as both reaches allow.
+        assert_eq!(at, [-24.0, -10.0, 88.0, 64.0]);
     }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {
