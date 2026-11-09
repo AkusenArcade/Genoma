@@ -14,6 +14,7 @@
 //! directory reloads the interface in place.
 
 mod access;
+mod docs;
 mod ipc;
 mod wayland;
 
@@ -50,7 +51,12 @@ fn main() {
     take_name();
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
-        Some("types") => print!("{}", genoma_scene::luau_definitions()),
+        Some("types") => {
+            if let Err(e) = docs::types(std::env::args().nth(2).map(PathBuf::from).as_deref()) {
+                fail(&format!("genoma types: {e}"));
+            }
+        }
+        Some("reference") => print!("{}", docs::reference()),
         Some("probe") => probe(),
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         Some("polkit-test") => polkit_test(),

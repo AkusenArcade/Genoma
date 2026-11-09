@@ -18,7 +18,14 @@ local theme = require("@genoma/kit/theme")
 -- over a row of buttons does not light them all.
 local REST = 0.6
 
-return function(t: { [string]: any }): any
+export type Tooltip = {
+    text: string | () -> string,
+    side: string?,
+    align: string?,
+    [any]: any,
+}
+
+return function(t: Tooltip): any
     local node = t[1]
     assert(type(node) == "table", "tooltip wraps one node")
     local shown = g.signal(false)

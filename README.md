@@ -109,10 +109,13 @@ return g.surface {
   says: metaballs), `"subtract"` (a bite, a moon) or `"intersect"` (a
   lens). The named capsule lends its outline; give it no fill unless it
   should be drawn too. See `examples/shapes`.
-  `genoma types` prints every property with its type and description, as
-  `.d.luau` definitions for `luau-lsp`.
+  The [API reference](docs/reference.md) lists every property, function
+  and service. `genoma types ~/.local/share/genoma/types` writes the whole
+  API as Luau types, the kit's sources beside them; point `@genoma` at
+  that directory in your interface's `.luaurc` (`{ "aliases": { "genoma":
+  "…" } }`) and luau-lsp completes and checks every `require("@genoma/…")`.
 - **Bindings:** any property can be a function. It is re-evaluated only when
-  a signal it read changes. `g.value`, `g.computed`, `g.effect` and
+  a signal it read changes. `g.signal`, `g.computed`, `g.effect` and
   `g.watch` make your own signals.
 - **Timing:** every duration has a name in `g.timing { … }`. A literal
   duration in an interface is rejected at load. A transition names the
@@ -197,7 +200,8 @@ Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 | Command | |
 |---|---|
 | `genoma <dir> [entry]` | run the interface in `<dir>`, from `shell.luau` or another entry file |
-| `genoma types` | print the node schema as `.d.luau` |
+| `genoma types [dir]` | print the API as Luau types, or write them to `dir` for luau-lsp |
+| `genoma reference` | print the API reference in Markdown (`docs/reference.md`) |
 | `genoma probe` | print every service's signals as they change, without UI |
 | `genoma ipc <target> <function> [args…]` | call into a running interface (`g.ipc`) |
 | `genoma pam <service> [dir]` | one PAM authentication, from the terminal |

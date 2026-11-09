@@ -14,7 +14,15 @@ local theme = require("@genoma/kit/theme")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type Tabs = {
+    items: ({ string } | () -> { string })?,
+    selected: (number | () -> number)?,
+    on_select: ((place: number) -> ())?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Tabs): any
     local function items(): { any }
         local out = {}
         for i, name in read(t.items) or {} do

@@ -42,7 +42,9 @@ local function heading(text: string): any
 end
 
 local function line(...: any): any
-    return g.box { gap = 10, ... }
+    local row: { [any]: any } = { ... }
+    row.gap = 10
+    return g.box(row)
 end
 
 -- A surface of its own, over everything while it asks.

@@ -17,7 +17,18 @@ local menu = require("@genoma/kit/menu")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type Dropdown = {
+    options: ({ string } | () -> { string })?,
+    selected: (number | () -> number?)?,
+    on_select: ((place: number) -> ())?,
+    placeholder: string?,
+    width: number?,
+    disabled: (boolean | () -> boolean)?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Dropdown): any
     local open = g.signal(false)
     local function options(): { string } return read(t.options) or {} end
     local function label(): string

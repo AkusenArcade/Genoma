@@ -28,7 +28,8 @@
 local g = require("@genoma")
 
 local function read(v: any): any
-    if type(v) == "function" then return v() end
+    -- `function` is not callable to the type checker: as any, it is.
+    if type(v) == "function" then return (v :: any)() end
     return v
 end
 
@@ -47,7 +48,7 @@ local NODE = {
     "follow", "min_width", "max_width", "rotate_x", "rotate_y", "depth", "perspective", "pivot_x", "pivot_y",
 }
 
-local function effect(name: string, t: { [string]: any }, moving: { string }, values: () -> { number }): any
+local function effect(name: string, t: { [any]: any }, moving: { string }, values: () -> { number }): any
     local node: { [any]: any } = { src = "genoma:" .. name, values = values }
     for _, k in NODE do
         if t[k] ~= nil then node[k] = t[k] end
@@ -64,7 +65,7 @@ end
 
 local M = {}
 
-function M.noise(t: { [string]: any }): any
+function M.noise(t: { [any]: any }): any
     return effect("noise", t, { "drift" }, function()
         local r1, g1, b1, a1 = rgba(read(t.from) or "#000000")
         local r2, g2, b2, a2 = rgba(read(t.to) or "#ffffff")
@@ -72,7 +73,7 @@ function M.noise(t: { [string]: any }): any
     end)
 end
 
-function M.ripple(t: { [string]: any }): any
+function M.ripple(t: { [any]: any }): any
     return effect("ripple", t, { "speed" }, function()
         local r, gr, b, a = rgba(read(t.color) or "#ffffff")
         local centre = read(t.centre) or { 0.5, 0.5 }
@@ -80,7 +81,7 @@ function M.ripple(t: { [string]: any }): any
     end)
 end
 
-function M.dissolve(t: { [string]: any }): any
+function M.dissolve(t: { [any]: any }): any
     return effect("dissolve", t, {}, function()
         local r, gr, b, a = rgba(read(t.color) or "#ffffff")
         local er, eg, eb, ea = rgba(read(t.edge_color) or "#ffb35a")
@@ -88,14 +89,14 @@ function M.dissolve(t: { [string]: any }): any
     end)
 end
 
-function M.vignette(t: { [string]: any }): any
+function M.vignette(t: { [any]: any }): any
     return effect("vignette", t, {}, function()
         local r, gr, b, a = rgba(read(t.color) or "#000000")
         return { r, gr, b, a, read(t.strength) or 0.5, read(t.start) or 0.4, read(t.softness) or 0.6 }
     end)
 end
 
-function M.grain(t: { [string]: any }): any
+function M.grain(t: { [any]: any }): any
     return effect("grain", t, { "rate" }, function()
         return { read(t.amount) or 0.06, read(t.size) or 1, read(t.rate) or 0 }
     end)

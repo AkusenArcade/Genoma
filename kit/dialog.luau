@@ -25,18 +25,37 @@ local button = require("@genoma/kit/button")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type DialogAction = {
+    text: string,
+    kind: string?,
+    disabled: (boolean | () -> boolean)?,
+    on_click: (() -> ())?,
+}
+
+export type Dialog = {
+    present: (() -> boolean)?,
+    on_close: (() -> ())?,
+    title: string?,
+    text: string?,
+    actions: { DialogAction }?,
+    width: number?,
+    scrim: string?,
+    namespace: string?,
+    [any]: any,
+}
+
+return function(t: Dialog): any
     local function close()
         if t.on_close then t.on_close() end
     end
-    local function act(action: any)
+    local function act(action: DialogAction)
         if read(action.disabled) == true then return end
         if action.on_click then action.on_click() end
         close()
     end
-    local actions = t.actions or { { text = "OK", kind = "accent" } }
+    local actions: { DialogAction } = t.actions or { { text = "OK", kind = "accent" } }
 
-    local row = { gap = 8, justify = "end" }
+    local row: { [any]: any } = { gap = 8, justify = "end" }
     for _, action in actions do
         table.insert(row, button {
             text = action.text,

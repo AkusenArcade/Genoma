@@ -2171,6 +2171,35 @@ impl Script {
     }
 }
 
+/// Genoma's Luau API as types: what `genoma types` prints after the nodes'
+/// and `genoma reference` documents.
+pub const API: &str = include_str!("../api.luau");
+
+/// Each `require("@genoma/<name>")` service and the type it has in [`API`].
+pub const SERVICES: &[(&str, &str)] = &[
+    ("clock", "Clock"),
+    ("niri", "Niri"),
+    ("compositor", "Compositor"),
+    ("vitals", "Vitals"),
+    ("power", "Power"),
+    ("network", "Network"),
+    ("media", "Media"),
+    ("audio", "Audio"),
+    ("bluetooth", "Bluetooth"),
+    ("toplevels", "Toplevels"),
+    ("idle", "Idle"),
+    ("lock", "Lock"),
+    ("tray", "Tray"),
+    ("polkit", "Polkit"),
+    ("notifications", "Notifications"),
+    ("clipboard", "Clipboard"),
+];
+
+/// The kit's modules by name, as built in.
+pub fn kit_modules() -> &'static [(&'static str, &'static str)] {
+    KIT
+}
+
 /// The component kit's modules, built in. `GENOMA_KIT_DIR` reads them from
 /// a directory instead, for working on the kit itself: read at each load,
 /// so saving the interface's own files brings an edit of the kit in.

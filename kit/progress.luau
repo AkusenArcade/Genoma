@@ -12,7 +12,16 @@ local theme = require("@genoma/kit/theme")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type Progress = {
+    value: (number | () -> number)?,
+    width: (number | () -> number)?,
+    height: number?,
+    color: (string | () -> string)?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Progress): any
     local height = t.height or 6
     local function width(): number return read(t.width) or 200 end
     local function value(): number return math.clamp(read(t.value) or 0, 0, 1) end

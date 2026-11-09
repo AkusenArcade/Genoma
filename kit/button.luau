@@ -14,7 +14,18 @@ local theme = require("@genoma/kit/theme")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type Button = {
+    text: (string | () -> string)?,
+    icon: string?,
+    -- "plain" (the default), "accent", "danger" or "flat".
+    kind: (string | () -> string)?,
+    disabled: (boolean | () -> boolean)?,
+    on_click: (() -> ())?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Button): any
     local hovered = g.signal(false)
     local pressed = g.signal(false)
     local function disabled(): boolean return read(t.disabled) == true end

@@ -17,7 +17,18 @@ local read = theme.read
 
 local TRACK, HANDLE = 4, 16
 
-return function(t: { [string]: any }): any
+export type Slider = {
+    value: (number | () -> number)?,
+    on_change: ((value: number) -> ())?,
+    width: (number | () -> number)?,
+    step: number?,
+    snap: boolean?,
+    disabled: (boolean | () -> boolean)?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Slider): any
     local hovered = g.signal(false)
     local held = g.signal(false)
     local function width(): number return read(t.width) or 200 end

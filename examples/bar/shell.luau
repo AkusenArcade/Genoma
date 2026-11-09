@@ -144,7 +144,7 @@ end, {
 
 local battery = reading("BAT", function()
     local b = power.battery
-    local charging = b.state == "charging" or b.state == "fully-charged"
+    local charging = b.state == "charging" or b.state == "full"
     return percent(b.level) .. (if charging then "+" else "")
 end, {
     role = "status",

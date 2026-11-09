@@ -15,7 +15,15 @@ local read = theme.read
 
 local WIDTH, HEIGHT, KNOB = 40, 22, 16
 
-return function(t: { [string]: any }): any
+export type Toggle = {
+    on: (boolean | () -> boolean)?,
+    on_toggle: ((on: boolean) -> ())?,
+    disabled: (boolean | () -> boolean)?,
+    name: string?,
+    [any]: any,
+}
+
+return function(t: Toggle): any
     local hovered = g.signal(false)
     local function on(): boolean return read(t.on) == true end
     local function disabled(): boolean return read(t.disabled) == true end

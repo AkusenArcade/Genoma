@@ -70,7 +70,7 @@ local M = {}
 
 -- theme.set { … }: the tokens given replace those of the same name.
 function M.set(changes: { [string]: any })
-    local next = table.clone(g.untracked(function() return tokens.value end))
+    local next: { [string]: any } = table.clone(g.untracked(function() return tokens.value end)) :: any
     for k, v in changes do
         if (defaults :: any)[k] == nil then
             error(`theme.set: no token {k}`, 2)
@@ -98,7 +98,8 @@ end
 
 -- A value given to a component, or the function that gives it.
 function M.read(v: any): any
-    if type(v) == "function" then return v() end
+    -- `function` is not callable to the type checker: as any, it is.
+    if type(v) == "function" then return (v :: any)() end
     return v
 end
 

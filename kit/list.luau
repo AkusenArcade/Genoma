@@ -21,7 +21,19 @@ local theme = require("@genoma/kit/theme")
 
 local read = theme.read
 
-return function(t: { [string]: any }): any
+export type List = {
+    items: () -> { any },
+    label: (item: any) -> any,
+    detail: ((item: any) -> any)?,
+    key: ((item: any) -> string | number)?,
+    selected: (number | () -> number?)?,
+    on_select: ((place: number) -> ())?,
+    on_activate: ((place: number) -> ())?,
+    row_height: number?,
+    [any]: any,
+}
+
+return function(t: List): any
     local row_height = t.row_height or g.untracked(function() return theme.get("control_height") end)
     local function selected(): number? return read(t.selected) end
     local node: { [any]: any } = {

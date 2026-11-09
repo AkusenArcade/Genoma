@@ -29,7 +29,29 @@ local read = theme.read
 
 local ROW = 30
 
-return function(t: { [string]: any }): any
+export type MenuItem = {
+    text: string,
+    on_select: (() -> ())?,
+    disabled: (boolean | () -> boolean)?,
+    danger: boolean?,
+    -- A shortcut's keys, said at the right.
+    keys: string?,
+}
+
+export type Menu = {
+    -- Items, "-" for a separator, or a function giving them.
+    items: ({ MenuItem | string } | () -> { MenuItem | string })?,
+    present: (() -> boolean)?,
+    on_close: (() -> ())?,
+    anchor: string?,
+    side: string?,
+    align: string?,
+    gap: number?,
+    min_width: number?,
+    [any]: any,
+}
+
+return function(t: Menu): any
     -- The item under the pointer or the keyboard, by place.
     local hot = g.signal(nil :: number?)
     local function items(): { any }
@@ -50,7 +72,8 @@ return function(t: { [string]: any }): any
     local function choose(item: any)
         if not usable(item) then return end
         close()
-        if item.on_select then item.on_select() end
+        local chosen: MenuItem = item
+        if chosen.on_select then chosen.on_select() end
     end
     -- The next usable item from `from`, going `by`, wrapping round.
     local function move(by: number)
