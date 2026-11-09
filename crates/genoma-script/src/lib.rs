@@ -17,11 +17,12 @@ mod auth;
 mod profile;
 pub mod dbus;
 mod greetd;
+mod list;
 mod values;
 pub mod io;
 
 use genoma_core::{
-    reactive::{Effect, Scope, Signal, current_owner, detached, on_cleanup, owned_by, untracked},
+    reactive::{Effect, Scope, Signal, current_owner, detached, on_cleanup, owned_by},
     timing::{self, Curve, Timing},
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
@@ -104,8 +105,9 @@ pub enum Input {
     Change(String),
     /// Return in a field, with its text. Never passed up.
     Submit(String),
-    /// Discrete wheel steps, or touchpad movement in logical units.
-    Wheel(f64, f64),
+    /// Discrete wheel steps, or touchpad movement in logical units; true
+    /// for steps, so a high-resolution wheel's fractions read as steps.
+    Wheel(f64, f64, bool),
     /// The fingers left the touchpad while moving: their speed over the last
     /// moment, logical units a second, for the content to carry on.
     Fling(f64, f64),
@@ -1347,7 +1349,8 @@ impl Script {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
                         f.call::<()>((lx, ly))
                     }
-                    Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
+                    Input::Wheel(dx, dy, steps) => f.call::<()>((*dx, *dy, *steps)),
+                    Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
                     Input::Change(text) | Input::Submit(text) => f.call::<()>(text.as_str()),
                     Input::Focus(on) => f.call::<()>(*on),
@@ -1604,6 +1607,7 @@ impl Script {
     }
 
     fn install(&self, lua: &Lua) -> mlua::Result<()> {
+        list::set_host(self.host.clone());
         let g = lua.create_table()?;
         // g.focus_move(1 | -1), g.focus_press(), g.focus_clear(): the
         // keyboard's way through the open cell's buttons, done once the key
@@ -1965,7 +1969,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each", "list"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -2250,7 +2254,7 @@ fn popup_spec(t: &Table) -> mlua::Result<Option<PopupSpec>> {
 fn kind_of(t: &Table) -> mlua::Result<Kind> {
     Ok(match t.get::<String>("__kind").map_err(|_| err("a child that is not a node"))?.as_str() {
         // A keyed list is a box whose children are its rows.
-        "box" | "each" => Kind::Box,
+        "box" | "each" | "list" => Kind::Box,
         "capsule" => Kind::Capsule,
         "text" => Kind::Text,
         "icon" => Kind::Icon,
@@ -2455,7 +2459,9 @@ fn mount(
     parent: genoma_scene::NodeId,
 ) -> mlua::Result<genoma_scene::NodeId> {
     let kind = kind_of(t)?;
-    let each = t.get::<Option<String>>("__kind")?.as_deref() == Some("each");
+    let made_as = t.get::<Option<String>>("__kind")?;
+    let each = made_as.as_deref() == Some("each");
+    let list = made_as.as_deref() == Some("list");
     let role = role_of(t.get("role")?)?;
     let node = scene.borrow_mut().create(kind, role);
     scene.borrow_mut().set_name(node, t.get("name")?);
@@ -2465,6 +2471,19 @@ fn mount(
         scene.borrow_mut().set_id(node, Some(id.to_string_lossy()));
     }
     scene.borrow_mut().append(parent, node);
+    if list {
+        for taken in ["on_wheel", "on_fling"] {
+            if t.contains_key(taken)? {
+                return Err(err(format!("g.list scrolls by itself: {taken} is its own")));
+            }
+        }
+        // A column of rows as wide as the list, inside it; what the
+        // interface sets says otherwise.
+        let mut scene = scene.borrow_mut();
+        let _ = scene.set(node, Prop::Direction, Value::Text("column".into()), None);
+        let _ = scene.set(node, Prop::Align, Value::Text("stretch".into()), None);
+        let _ = scene.set(node, Prop::Clip, Value::Bool(true), None);
+    }
 
     // transition = { fill = "theme" }: names from the timing set, never
     // numbers. Checked here, at load, not when the value first moves.
@@ -2501,7 +2520,10 @@ fn mount(
         if matches!(key.as_str(), "__kind" | "role" | "name" | "id" | "transition") {
             continue;
         }
-        if each && matches!(key.as_str(), "items" | "key" | "row") {
+        if (each || list) && matches!(key.as_str(), "items" | "key" | "row") {
+            continue;
+        }
+        if list && matches!(key.as_str(), "row_height" | "reveal" | "on_scroll") {
             continue;
         }
         if let Some(&name) = HANDLERS.iter().find(|h| **h == key) {
@@ -2534,110 +2556,20 @@ fn mount(
         let want = |name: &str| -> mlua::Result<Function> {
             t.get::<Option<Function>>(name)?.ok_or_else(|| err(format!("g.each needs {name}, a function")))
         };
-        keyed(scene.clone(), handlers.clone(), target, node, want("items")?, want("key")?, want("row")?);
+        list::each(scene.clone(), handlers.clone(), target, node, want("items")?, want("key")?, want("row")?);
+        return Ok(node);
+    }
+    if list {
+        if t.raw_len() > 0 {
+            return Err(err("g.list draws its children from row, and holds none of its own"));
+        }
+        list::list(scene.clone(), handlers.clone(), target, node, t)?;
         return Ok(node);
     }
     for child in t.sequence_values::<Table>() {
         mount(scene, handlers, target, &child?, node)?;
     }
     Ok(node)
-}
-
-/// One row of a keyed list: what it was mounted from, kept while its key is.
-struct Row {
-    key: String,
-    root: genoma_scene::NodeId,
-    scope: Scope,
-    item: Signal<LuaValue>,
-    index: Signal<f64>,
-}
-
-/// `g.each`: a row per item, by key. A key seen again keeps its row, which
-/// is handed the new item and place through `item()` and `index()`, so its
-/// bindings follow and nothing is mounted again; a new key mounts a row; a
-/// key gone takes its row, its bindings and its handlers with it.
-fn keyed(
-    scene: Rc<RefCell<Scene>>,
-    handlers: Handlers,
-    target: usize,
-    node: genoma_scene::NodeId,
-    items: Function,
-    key: Function,
-    row: Function,
-) {
-    let rows: Rc<RefCell<Vec<Row>>> = Rc::default();
-    // The rows are detached from the list's effect, or each run would
-    // dispose them; the interface's scope disposes them instead.
-    on_cleanup({
-        let rows = rows.clone();
-        move || {
-            for r in rows.borrow_mut().drain(..) {
-                r.scope.dispose();
-            }
-        }
-    });
-    Effect::new(move || {
-        let list = match items.call::<Table>(()) {
-            Ok(list) => list,
-            Err(e) => {
-                log::error!("g.each items: {e}");
-                return;
-            }
-        };
-        let values: Vec<LuaValue> = list.sequence_values::<LuaValue>().filter_map(Result::ok).collect();
-        untracked(|| {
-            let mut old = std::mem::take(&mut *rows.borrow_mut());
-            let mut next = Vec::with_capacity(values.len());
-            for (i, value) in values.into_iter().enumerate() {
-                let k = match key.call::<LuaValue>(value.clone()).and_then(|k| k.to_string()) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        log::error!("g.each key: {e}");
-                        continue;
-                    }
-                };
-                if next.iter().any(|r: &Row| r.key == k) {
-                    log::error!("g.each: key {k} twice; the second is not drawn");
-                    continue;
-                }
-                let index = (i + 1) as f64;
-                if let Some(at) = old.iter().position(|r| r.key == k) {
-                    let r = old.swap_remove(at);
-                    r.item.set(value);
-                    r.index.set(index);
-                    next.push(r);
-                    continue;
-                }
-                let (scope, mounted) = detached(|| {
-                    Scope::new(|| -> mlua::Result<_> {
-                        let item = Signal::new(value);
-                        let index = Signal::new(index);
-                        let lua = row.weak_lua().upgrade();
-                        let read_item = lua.create_function(move |_, ()| Ok(item.try_get().unwrap_or(LuaValue::Nil)))?;
-                        let read_index = lua.create_function(move |_, ()| Ok(index.try_get().unwrap_or(0.0)))?;
-                        let t: Table = row.call((read_item, read_index))?;
-                        Ok((mount(&scene, &handlers, target, &t, node)?, item, index))
-                    })
-                });
-                match mounted {
-                    Ok((root, item, index)) => next.push(Row { key: k, root, scope, item, index }),
-                    Err(e) => {
-                        log::error!("g.each row {k}: {e}");
-                        scope.dispose();
-                    }
-                }
-            }
-            for r in old {
-                r.scope.dispose();
-                let gone = scene.borrow().subtree(r.root);
-                handlers.borrow_mut().retain(|(t, n), _| *t != target || !gone.contains(n));
-                scene.borrow_mut().remove(r.root);
-            }
-            let order: Vec<_> = next.iter().map(|r| r.root).collect();
-            scene.borrow_mut().set_children(node, &order);
-            *rows.borrow_mut() = next;
-        });
-    });
 }
 
 /// A property that follows a function: an effect that calls it and sets the

@@ -315,7 +315,15 @@ pub fn luau_definitions() -> String {
          export type Each<T> = Node & {\n\
          \x20   items: () -> { T },\n\
          \x20   key: (T) -> string | number,\n\
-         \x20   row: (item: () -> T, index: () -> number) -> Node,\n}\n",
+         \x20   row: (item: () -> T, index: () -> number) -> Node,\n}\n\n\
+         -- g.list: a keyed list that scrolls, mounting only the rows in view.\n\
+         -- Every row is row_height tall; the list needs a height of its own.\n\
+         export type List<T> = Each<T> & {\n\
+         \x20   row_height: number,\n\
+         \x20   -- A row's place, from 1: brought into view the least way.\n\
+         \x20   reveal: (() -> number?)?,\n\
+         \x20   -- Where it is scrolled to, and how far it can go.\n\
+         \x20   on_scroll: ((offset: number, room: number) -> ())?,\n}\n",
     );
     out
 }

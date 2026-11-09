@@ -84,6 +84,7 @@ return g.surface {
 - **Nodes:** `g.box` lays out, `g.capsule` is a box that draws (fill, rim,
   shadow, linear/radial/conic gradients, radius, blur), and there are also `g.text`, `g.icon`,
   `g.image`, `g.shader` and particle emitters. `g.each` is a keyed list.
+  `g.list` is one that scrolls and mounts only the rows in view.
   `genoma types` prints every property with its type and description, as
   `.d.luau` definitions for `luau-lsp`.
 - **Bindings:** any property can be a function. It is re-evaluated only when
@@ -94,6 +95,18 @@ return g.surface {
   timing to use, so retiming a shell is one table.
 - **Input:** `on_click`, `on_wheel`, `on_drag`, `on_key`, `on_hover`,
   `on_fling` and others. The input region follows the nodes that take input.
+  `on_wheel(dx, dy, steps)` is told whether the movement came in a wheel's
+  steps or a touchpad's distance.
+- **Long lists:** `g.list { items = …, key = …, row = …, row_height = 28,
+  height = 336, reveal = … }` takes `g.each`'s three functions, but mounts
+  only the rows in view and a few beyond, so thousands of items cost what a
+  dozen do. Every row is `row_height` tall. The list needs a height of its
+  own (`height`, or `grow` in a bounded parent): its rows do not size it.
+  It scrolls by itself: a wheel step is three rows, glided to; a touchpad
+  moves it as the fingers do and flings it when they lift. `reveal`, a
+  row's place from 1, brings that row into view the least way, which is
+  what keyboard selection wants. `on_scroll(offset, room)` reports where it
+  is, for a scroll bar of your own. See `examples/list`.
 - **Fields:** `g.field { text = …, on_change = …, on_submit = …, focused = … }`
   is a line to type into: caret and selection by key and by pointer
   (double-click a word, triple-click the line), word moves, undo and redo,

@@ -2473,7 +2473,8 @@ impl PointerHandler for App {
                     let step = |a: &AxisScroll| if a.value120 != 0 { a.value120 as f64 / 120.0 } else { a.absolute };
                     let (dx, dy) = (step(&horizontal), step(&vertical));
                     if dx != 0.0 || dy != 0.0 {
-                        self.deliver(i, node, Input::Wheel(dx, dy));
+                        let steps = horizontal.value120 != 0 || vertical.value120 != 0;
+                        self.deliver(i, node, Input::Wheel(dx, dy, steps));
                     }
                 }
                 K::Leave { .. } => self.surfaces[i].pressed = None,

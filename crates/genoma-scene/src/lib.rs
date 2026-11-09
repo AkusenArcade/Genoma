@@ -625,6 +625,19 @@ impl Scene {
         self.root
     }
 
+    /// `node`'s padding and border, top and bottom together, as last laid
+    /// out: what its own height does not leave its children.
+    pub fn inset_y(&self, node: NodeId) -> f32 {
+        self.tree.layout(node).map_or(0.0, |l| l.padding.top + l.padding.bottom + l.border.top + l.border.bottom)
+    }
+
+    /// The space between `node`'s children, logical units.
+    pub fn gap(&self, node: NodeId) -> f32 {
+        let Ok(style) = self.tree.style(node) else { return 0.0 };
+        let gap = style.gap.height.into_raw();
+        if gap.tag() == taffy::CompactLength::LENGTH_TAG { gap.value() } else { 0.0 }
+    }
+
     /// Where icon names are looked up, first match wins.
     pub fn set_icon_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
         // A name not found in the old places may be in the new ones: what
@@ -1101,6 +1114,12 @@ impl Scene {
         }
         self.animations.retain(|a| !(a.node == node && a.prop == prop));
         self.apply(node, prop, value)
+    }
+
+    /// Where `prop` stands on `node` now, for the properties a value can be
+    /// read back from: numbers, colours, sizes.
+    pub fn value(&self, node: NodeId, prop: Prop) -> Option<Value> {
+        self.current(node, prop)
     }
 
     fn current(&self, node: NodeId, prop: Prop) -> Option<Value> {

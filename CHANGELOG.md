@@ -24,6 +24,14 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `g.list`, a keyed list for thousands of items: only the rows in view
+  are mounted, every one `row_height` tall. It scrolls by itself (wheel
+  steps glided to, touchpad followed and flung), brings a row into view
+  with `reveal`, and reports its position to `on_scroll`. See
+  `examples/list`, a run prompt over `/usr/bin`.
+- `on_wheel` gets a third argument, `steps`: true when the movement came
+  from a wheel's steps (a high-resolution wheel's fractions included),
+  false for a touchpad's distance.
 - `@genoma/compositor`: workspaces, windows and the focused window under
   niri, Hyprland or Umbriel, one model for all three, with
   `focus_workspace`, `focus_window` and `close_window`. Requiring it fails

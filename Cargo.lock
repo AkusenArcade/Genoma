@@ -1041,6 +1041,7 @@ dependencies = [
  "calloop",
  "futures-util",
  "genoma-core",
+ "genoma-render",
  "genoma-scene",
  "genoma-services",
  "log",
