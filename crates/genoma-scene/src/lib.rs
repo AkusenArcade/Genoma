@@ -47,6 +47,9 @@ pub enum Kind {
     /// A line of text to type into (`g.field`): caret, selection, undo,
     /// the clipboard and input methods.
     Field,
+    /// A shape of any outline (`g.path`): SVG path data or a polygon,
+    /// filled, stroked, dashed.
+    Path,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -245,6 +248,20 @@ pub struct Node {
     time: f32,
     /// Props set at least once: the first value is placed, never animated.
     seen: Vec<Prop>,
+    /// A path's outline: SVG path data, or a polygon's corners; how its
+    /// corners and ends are drawn, its fill rule, and how far it reaches
+    /// right and down (its size when none is given).
+    outline: Option<String>,
+    points: Vec<f32>,
+    join: &'static str,
+    cap: &'static str,
+    even_odd: bool,
+    reach_of_path: [f32; 2],
+    /// Drawn as one shape with the capsule of this id: union (0), subtract
+    /// (1) or intersect (2), this soft.
+    combine_with: Option<String>,
+    combine: u8,
+    combine_soft: f32,
 }
 
 impl Node {
@@ -354,6 +371,15 @@ impl Node {
             clock: false,
             time: 0.0,
             seen: Vec::new(),
+            outline: None,
+            points: Vec::new(),
+            join: "miter",
+            cap: "butt",
+            even_odd: false,
+            reach_of_path: [0.0; 2],
+            combine_with: None,
+            combine: 0,
+            combine_soft: 0.0,
         }
     }
 
@@ -863,7 +889,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader | Kind::Field => {
+            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader | Kind::Field | Kind::Path => {
                 Style { flex_shrink: 0.0, ..Style::default() }
             }
         };
@@ -1047,6 +1073,34 @@ impl Scene {
     }
 
     /// The node the interface called `id`, if this scene holds one, shown.
+    /// The shapes named by a `combine_with`, by id: where each was last
+    /// drawn and its radius, logical units.
+    fn combined_shapes(&self) -> std::collections::HashMap<String, [f32; 5]> {
+        let mut wanted: Vec<String> = Vec::new();
+        self.walk(self.root, &mut |_, n| {
+            if let Some(id) = &n.combine_with
+                && !wanted.contains(id)
+            {
+                wanted.push(id.clone());
+            }
+        });
+        let mut shapes = std::collections::HashMap::new();
+        if wanted.is_empty() {
+            return shapes;
+        }
+        self.walk(self.root, &mut |_, n| {
+            if let Some(id) = &n.id
+                && wanted.contains(id)
+                && !shapes.contains_key(id)
+            {
+                let [x, y, w, h] = n.extent;
+                let radius = n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0);
+                shapes.insert(id.clone(), [x, y, w, h, radius]);
+            }
+        });
+        shapes
+    }
+
     pub fn find(&self, id: &str) -> Option<NodeId> {
         let mut found = None;
         self.walk(self.root, &mut |node, n| {
@@ -1144,6 +1198,7 @@ impl Scene {
             Prop::ToX => Value::Number(n.path[4]),
             Prop::ToY => Value::Number(n.path[5]),
             Prop::Bud => Value::Number(n.bud),
+            Prop::CombineSoft => Value::Number(n.combine_soft),
             Prop::Halo => Value::Number(n.halo),
             Prop::RotateX => Value::Number(n.turn[0]),
             Prop::RotateY => Value::Number(n.turn[1]),
@@ -1404,6 +1459,41 @@ impl Scene {
             Prop::GradientTop => n.gradient.0 = Some(take!(colour)),
             Prop::GradientBottom => n.gradient.1 = Some(take!(colour)),
             Prop::Stroke => n.stroke = Some(take!(number)),
+            Prop::D => {
+                let d = take!(text);
+                n.reach_of_path = path_reach(&d);
+                n.outline = Some(d);
+                restyle = true;
+            }
+            Prop::Points => {
+                n.points = take!(numbers);
+                n.reach_of_path = n.points.chunks_exact(2).fold([0.0f32; 2], |r, p| [r[0].max(p[0]), r[1].max(p[1])]);
+                restyle = true;
+            }
+            Prop::Join => {
+                n.join = match take!(text).as_str() {
+                    "round" => "round",
+                    "bevel" => "bevel",
+                    _ => "miter",
+                }
+            }
+            Prop::Cap => {
+                n.cap = match take!(text).as_str() {
+                    "round" => "round",
+                    "square" => "square",
+                    _ => "butt",
+                }
+            }
+            Prop::EvenOdd => n.even_odd = take!(flag),
+            Prop::CombineWith => n.combine_with = Some(take!(text)).filter(|id| !id.is_empty()),
+            Prop::Combine => {
+                n.combine = match take!(text).as_str() {
+                    "subtract" => 1,
+                    "intersect" => 2,
+                    _ => 0,
+                }
+            }
+            Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
             Prop::Hollow => n.hollow = take!(flag),
             Prop::Blur => n.blur = take!(flag),
             Prop::Wave => n.wave = take!(number),
@@ -1689,6 +1779,12 @@ impl Scene {
                 }
                 // A field is a line high, and as wide as what it shows and
                 // its caret unless given a width.
+                // A path reaches as far right and down as its outline, from
+                // its own corner, unless given a size.
+                Some(n) if n.kind == Kind::Path => Size {
+                    width: known.width.unwrap_or(n.reach_of_path[0].ceil()),
+                    height: known.height.unwrap_or(n.reach_of_path[1].ceil()),
+                },
                 Some(n) if n.kind == Kind::Field => {
                     let buffer = shape(&mut fonts, n);
                     let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) + 1.0;
@@ -1722,7 +1818,8 @@ impl Scene {
         let mut fonts = self.fonts.lock().unwrap();
         let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
         self.frame += 1;
-        let mut out = Out { frame: self.frame, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        let others = self.combined_shapes();
+        let mut out = Out { frame: self.frame, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
@@ -2092,6 +2189,9 @@ fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32;
 
 struct Out<'a> {
     frame: u64,
+    /// The shapes a `combine_with` names, by id: where each was drawn and
+    /// its radius, logical units.
+    others: std::collections::HashMap<String, [f32; 5]>,
     list: &'a mut DrawList,
     /// The fade toward the foot of the nearest clip that fades, physical
     /// pixels: where nothing is left and how far above it it begins.
@@ -2430,8 +2530,22 @@ fn collect_node(
             // A bud is drawn as one shape with its parent capsule, without
             // the parent's interior: the parent's centre relative to this
             // one, its half size and radius, and the union's softness.
-            let (bud, bud_shape) = match (n.bud > 0.0, out.parent_shape) {
-                (true, Some([px, py, pw, ph, pr])) => (
+            let other: Option<[f32; 5]> = n.combine_with.as_ref().and_then(|id| out.others.get(id).copied());
+            let (bud, bud_shape) = match (other, n.bud > 0.0, out.parent_shape) {
+                // Combined with a named shape: its box as a bud's parent's,
+                // and what to do with it. A sharp edge is half a pixel soft.
+                (Some([px, py, pw, ph, pr]), _, _) => (
+                    [
+                        ((px + pw / 2.0) - (x + w / 2.0)) * scale,
+                        ((py + ph / 2.0) - (y + h / 2.0)) * scale,
+                        pw / 2.0 * scale,
+                        ph / 2.0 * scale,
+                    ],
+                    // Joined whole (3), unlike a bud, whose parent's inside
+                    // is the parent's to draw.
+                    [pr * scale, (n.combine_soft * scale).max(0.5), 0.0, if n.combine == 0 { 3.0 } else { n.combine as f32 }],
+                ),
+                (None, true, Some([px, py, pw, ph, pr])) => (
                     [
                         ((px + pw / 2.0) - (x + w / 2.0)) * scale,
                         ((py + ph / 2.0) - (y + h / 2.0)) * scale,
@@ -2882,6 +2996,30 @@ fn collect_node(
             }
         }
         Kind::Field => draw_field(fonts, n, origin, &layout, scale, alpha, out),
+        Kind::Path => {
+            let w = (layout.size.width * scale).round() as u32;
+            let h = (layout.size.height * scale).round() as u32;
+            if w > 0
+                && h > 0
+                && let Some(svg) = path_svg(n, [layout.size.width, layout.size.height], [w, h])
+                && let Some((key, data)) = out.icons.vector(&svg, w, h)
+            {
+                out.list.push_image(genoma_render::Image {
+                    key,
+                    pixels: data,
+                    width: w,
+                    height: h,
+                    origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
+                    size: [w as f32, h as f32],
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    radius: 0.0,
+                    alpha,
+                    clip: out.clip,
+                    fade: out.fade_of(),
+                    transform: out.transform,
+                });
+            }
+        }
         Kind::Box => {}
     }
     // A clipping node narrows the clip for everything inside it, and a
@@ -2919,6 +3057,63 @@ fn collect_node(
     out.transform = saved_transform;
 }
 
+/// How far right and down SVG path data reaches from its origin, logical
+/// units: the size of a path given none.
+fn path_reach(d: &str) -> [f32; 2] {
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><path d=\"{}\"/></svg>", xml_escape(d));
+    let Ok(tree) = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()) else {
+        log::warn!("path: cannot read {d:?}");
+        return [0.0; 2];
+    };
+    let b = tree.root().abs_bounding_box();
+    [b.right().max(0.0), b.bottom().max(0.0)]
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A path node as an SVG document `pixels` wide and high showing `size`
+/// logical units: drawn by resvg at the exact physical size.
+fn path_svg(n: &Node, size: [f32; 2], pixels: [u32; 2]) -> Option<String> {
+    let paint = |c: [f32; 4]| {
+        let [r, g, b, _] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        (format!("rgb({r},{g},{b})"), c[3].clamp(0.0, 1.0))
+    };
+    let (fill, fill_alpha) = paint(n.fill);
+    let fill = if fill_alpha > 0.0 {
+        format!(" fill=\"{fill}\" fill-opacity=\"{fill_alpha}\" fill-rule=\"{}\"", if n.even_odd { "evenodd" } else { "nonzero" })
+    } else {
+        " fill=\"none\"".to_owned()
+    };
+    let stroke = match n.stroke {
+        Some(width) if width > 0.0 && n.color[3] > 0.0 => {
+            let (colour, alpha) = paint(n.color);
+            let mut s = format!(
+                " stroke=\"{colour}\" stroke-opacity=\"{alpha}\" stroke-width=\"{width}\" stroke-linejoin=\"{}\" stroke-linecap=\"{}\"",
+                n.join, n.cap
+            );
+            if n.dash[0] > 0.0 {
+                s.push_str(&format!(" stroke-dasharray=\"{} {}\"", n.dash[0], n.dash[1].max(0.0)));
+            }
+            s
+        }
+        _ => String::new(),
+    };
+    let shape = match (&n.outline, n.points.len() >= 4) {
+        (Some(d), _) => format!("<path d=\"{}\"{fill}{stroke}/>", xml_escape(d)),
+        (None, true) => {
+            let points: Vec<String> = n.points.chunks_exact(2).map(|p| format!("{},{}", p[0], p[1])).collect();
+            format!("<polygon points=\"{}\"{fill}{stroke}/>", points.join(" "))
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">{shape}</svg>",
+        pixels[0], pixels[1], size[0], size[1]
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2949,6 +3144,75 @@ mod tests {
         assert!(glyphs.iter().any(|g| g.end == n.text.len()), "the extension is kept");
         assert!(run.line_w <= 121.0, "it fits: {}", run.line_w);
         assert!(glyphs.len() < n.text.len(), "something was cut");
+    }
+
+    #[test]
+    fn a_path_reaches_as_far_as_its_outline() {
+        assert_eq!(path_reach("M 2 3 L 10 20 L 4 8 Z"), [10.0, 20.0]);
+        assert_eq!(path_reach("not a path"), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_path_is_drawn_filled_and_stroked() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let n = scene.create(Kind::Path, Role::None);
+        scene.append(root, n);
+        // A triangle, its point down, filled red.
+        scene.set(n, Prop::Points, Value::Numbers(vec![0.0, 0.0, 20.0, 0.0, 10.0, 20.0]), None).unwrap();
+        scene.set(n, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        assert_eq!(scene.layout(None, None), (20.0, 20.0), "its size is its reach");
+        let node = scene.tree.get_node_context(n).unwrap();
+        let svg = path_svg(node, [20.0, 20.0], [40, 40]).unwrap();
+        assert!(svg.contains("<polygon") && svg.contains("fill=\"rgb(255,0,0)\"") && !svg.contains("stroke="));
+        let mut icons = icons::Icons::default();
+        let (_, pixels) = icons.vector(&svg, 40, 40).expect("drawn");
+        let at = |x: usize, y: usize| pixels[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4].to_vec();
+        assert_eq!(at(20, 10), vec![255, 0, 0, 255], "inside, at twice the scale");
+        assert_eq!(at(2, 36)[3], 0, "outside, below the left edge");
+        // Stroked with nothing filled: the fill is none.
+        scene.set(n, Prop::Fill, Value::Color([0.0; 4]), None).unwrap();
+        scene.set(n, Prop::Stroke, Value::Number(2.0), None).unwrap();
+        scene.set(n, Prop::Join, Value::Text("round".into()), None).unwrap();
+        let node = scene.tree.get_node_context(n).unwrap();
+        let svg = path_svg(node, [20.0, 20.0], [20, 20]).unwrap();
+        assert!(svg.contains("fill=\"none\"") && svg.contains("stroke-width=\"2\"") && svg.contains("stroke-linejoin=\"round\""));
+    }
+
+    #[test]
+    fn a_capsule_is_combined_with_the_one_it_names() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let disc = |scene: &mut Scene, x: f32| {
+            let n = scene.create(Kind::Capsule, Role::None);
+            scene.append(root, n);
+            for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 40.0), (Prop::OffsetX, x)] {
+                scene.set(n, p, Value::Number(v), None).unwrap();
+            }
+            scene.set(n, Prop::Overlay, Value::Bool(true), None).unwrap();
+            scene.set(n, Prop::Attach, Value::Text("corner".into()), None).unwrap();
+            scene.set(n, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+            n
+        };
+        let a = disc(&mut scene, 0.0);
+        scene.set_id(a, Some("a".into()));
+        let b = disc(&mut scene, 30.0);
+        scene.set(b, Prop::CombineWith, Value::Text("a".into()), None).unwrap();
+        scene.set(b, Prop::Combine, Value::Text("subtract".into()), None).unwrap();
+        scene.layout(Some(100.0), Some(50.0));
+        // The first frame learns where "a" is; the next combines with it.
+        scene.draw_list(2.0);
+        let list = scene.draw_list(2.0);
+        let cut = list.rects.iter().find(|r| r.bud_shape[1] > 0.0).expect("one rect combined");
+        assert_eq!(cut.bud_shape[3], 1.0, "subtract");
+        assert_eq!(cut.bud[0], -60.0, "a's centre is 30 units left, at twice the scale");
+        assert_eq!(cut.bud[2], 40.0, "a's half width");
+        // A union is drawn whole, unlike a bud.
+        scene.set(b, Prop::Combine, Value::Text("union".into()), None).unwrap();
+        let list = scene.draw_list(2.0);
+        assert_eq!(list.rects.iter().find(|r| r.bud_shape[1] > 0.0).unwrap().bud_shape[3], 3.0);
     }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {

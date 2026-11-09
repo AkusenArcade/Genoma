@@ -15,7 +15,13 @@ use resvg::{tiny_skia, usvg};
 pub struct Icons {
     pub dirs: Vec<PathBuf>,
     pub(crate) cache: HashMap<u64, Option<Arc<Vec<u8>>>>,
+    /// Paths drawn, by their document: kept few, since a path that moves
+    /// is a new document every frame.
+    vectors: HashMap<u64, Option<Arc<Vec<u8>>>>,
 }
+
+/// The paths kept drawn at most; past it the cache starts again.
+const VECTORS_KEPT: usize = 256;
 
 fn hex(c: [f32; 4]) -> String {
     let [r, g, b, _] = bytes(c);
@@ -72,6 +78,32 @@ impl Icons {
         let pixels = pixmap.map(|p| Arc::new(p.take()));
         self.cache.insert(key, pixels.clone());
         pixels.map(|p| (key, p))
+    }
+}
+
+impl Icons {
+    /// An SVG document drawn at `width` by `height` pixels: a path node.
+    pub fn vector(&mut self, svg: &str, width: u32, height: u32) -> Option<(u64, Arc<Vec<u8>>)> {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (svg, width, height).hash(&mut h);
+        let key = h.finish();
+        if let Some(found) = self.vectors.get(&key) {
+            return found.clone().map(|p| (key, p));
+        }
+        if self.vectors.len() >= VECTORS_KEPT {
+            self.vectors.clear();
+        }
+        let drawn = (|| {
+            let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+            let mut target = tiny_skia::Pixmap::new(width, height)?;
+            resvg::render(&tree, tiny_skia::Transform::identity(), &mut target.as_mut());
+            Some(Arc::new(target.take()))
+        })();
+        if drawn.is_none() {
+            log::warn!("path: cannot draw {svg}");
+        }
+        self.vectors.insert(key, drawn.clone());
+        drawn.map(|p| (key, p))
     }
 }
 

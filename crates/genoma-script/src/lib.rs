@@ -1970,7 +1970,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each", "list"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each", "list", "path"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -2379,6 +2379,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
     Ok(match t.get::<String>("__kind").map_err(|_| err("a child that is not a node"))?.as_str() {
         // A keyed list is a box whose children are its rows.
         "box" | "each" | "list" => Kind::Box,
+        "path" => Kind::Path,
         "capsule" => Kind::Capsule,
         "text" => Kind::Text,
         "icon" => Kind::Icon,

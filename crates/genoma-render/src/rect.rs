@@ -308,6 +308,11 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
     return min(a, b) - h * h * k * 0.25;
 }
 
+// Its counterpart: the two fields met where both are, rounded as wide as k.
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    return -smin(-a, -b, k);
+}
+
 // Signed distance to a rounded box: negative inside, in pixels.
 // How far round a rounded rectangle's outline the point nearest `p` is,
 // from the middle of the top edge clockwise, and the outline's length. A
@@ -390,10 +395,20 @@ fn body(in: Varyings) -> vec4<f32> {
     // A bud: joined to its parent by a smooth union, drawn only outside the
     // parent, so the parent's glass is never covered twice.
     var outside_parent = 1.0;
+    // Combined with another shape: joined whole (3), kept only where both
+    // are (2), or cut out of this one (1), rather than budded.
     if (in.bud_shape.y > 0.0) {
         let parent = rounded_box(in.local - in.bud.xy, in.bud.zw, in.bud_shape.x);
-        d = smin(d, parent, in.bud_shape.y);
-        outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+        if (in.bud_shape.w > 2.5) {
+            d = smin(d, parent, in.bud_shape.y);
+        } else if (in.bud_shape.w > 1.5) {
+            d = smax(d, parent, in.bud_shape.y);
+        } else if (in.bud_shape.w > 0.5) {
+            d = smax(d, -parent, in.bud_shape.y);
+        } else {
+            d = smin(d, parent, in.bud_shape.y);
+            outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+        }
     }
     let rim = in.shape.y;
 
@@ -421,6 +436,12 @@ fn body(in: Varyings) -> vec4<f32> {
     let flags = u32(in.wave.w + 0.5);
     if ((flags & 1u) != 0u) {
         surface = clamp(in.shape.z * in.half.x * 2.0 - (in.local.x + in.half.x) + 0.5, 0.0, 1.0);
+    }
+    // Full and still, there is no surface to draw: what reaches past the
+    // shape's own box (a bud's bridge, a shape combined with another) is
+    // filled too.
+    if (in.shape.z >= 0.9999 && in.wave.x <= 0.0) {
+        surface = 1.0;
     }
 
     // The part of the shape that is drawn: an angle clockwise from twelve,

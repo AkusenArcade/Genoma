@@ -85,6 +85,16 @@ return g.surface {
   shadow, linear/radial/conic gradients, radius, blur), and there are also `g.text`, `g.icon`,
   `g.image`, `g.shader` and particle emitters. `g.each` is a keyed list.
   `g.list` is one that scrolls and mounts only the rows in view.
+  `g.path` draws any outline: `d` (SVG path data) or `points` (a polygon),
+  filled with `fill`, stroked with `color` and `stroke`, with `join`,
+  `cap`, `dash` and `even_odd`. It is drawn at the exact pixel size, and
+  takes its outline's size unless given one.
+- **Shapes drawn as one:** a capsule with `combine_with = "id"` is drawn
+  as one shape with the capsule of that id, by their distance fields:
+  `combine = "union"` (a neck grows between them as `combine_soft`
+  says: metaballs), `"subtract"` (a bite, a moon) or `"intersect"` (a
+  lens). The named capsule lends its outline; give it no fill unless it
+  should be drawn too. See `examples/shapes`.
   `genoma types` prints every property with its type and description, as
   `.d.luau` definitions for `luau-lsp`.
 - **Bindings:** any property can be a function. It is re-evaluated only when

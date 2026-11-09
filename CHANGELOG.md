@@ -24,6 +24,11 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `g.path`: any outline, from SVG path data (`d`) or a polygon
+  (`points`), filled, stroked, dashed, with `join`, `cap` and `even_odd`.
+- `combine_with`, `combine` and `combine_soft` on capsules: drawn as one
+  shape with another capsule by id, joined (softly: metaballs), with it
+  cut out, or where both are. See `examples/shapes`.
 - `@genoma/kit`, a component kit with a neutral look: `button`,
   `toggle`, `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`,
   `tabs` and `dialog` (a surface of its own, the rest dimmed), restyled
@@ -79,6 +84,9 @@ changes what a shell sees.
 
 ### Fixed
 
+- A full, still capsule (no `level` below 1, no wave) cut off what it drew
+  past its own box: the part of a bud's bridge beyond it, by a row of
+  pixels, and now a shape combined with another.
 - A `full` surface whose `present` was false took the keyboard when a
   node in it caught. Asleep, a surface takes no keys. It goes on drawing,
   as before, so what is closing finishes leaving.

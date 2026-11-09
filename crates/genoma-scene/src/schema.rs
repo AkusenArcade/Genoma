@@ -120,6 +120,14 @@ pub enum Prop {
     CaretColor,
     Focused,
     Secret,
+    D,
+    Points,
+    Join,
+    Cap,
+    EvenOdd,
+    CombineWith,
+    Combine,
+    CombineSoft,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +278,14 @@ pub const PROPS: &[PropInfo] = &[
     p("focused", Prop::Focused, Ty::Bool, false, "While true, a field takes the keys and shows its caret: typing, the editing keys, Ctrl+A/C/X/V/Z/Y. Return reaches on_submit; Escape, Tab, Up and Down go on to on_key."),
     p("secret", Prop::Secret, Ty::Bool, false, "A field drawn as a dot a character, and never copied out: a password."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
+    p("d", Prop::D, Ty::Text, false, "A path's outline as SVG path data (M, L, C, Q, A, Z…), in logical units from the node's top-left corner."),
+    p("points", Prop::Points, Ty::Numbers, false, "A path's polygon, closed: x and y of each corner in turn, logical units from the node's top-left corner. Used when `d` is not given."),
+    p("join", Prop::Join, Ty::Choice(&["miter", "round", "bevel"]), false, "How a path's outline turns its corners."),
+    p("cap", Prop::Cap, Ty::Choice(&["butt", "round", "square"]), false, "How a path's open ends and dashes end."),
+    p("even_odd", Prop::EvenOdd, Ty::Bool, false, "A path filled by the even-odd rule: where it crosses itself, a hole."),
+    p("combine_with", Prop::CombineWith, Ty::Text, false, "A capsule drawn as one shape with the capsule of this id, as `combine` says: metaballs, a bite out of a shape, a lens. Name one earlier in the tree, or the shape follows it a frame late."),
+    p("combine", Prop::Combine, Ty::Choice(&["union", "subtract", "intersect"]), false, "How a capsule with `combine_with` meets the other: joined to it (both drawn, in this one's fill), with the other cut out, or only where both are. The other lends only its outline; give it no fill of its own unless it should be drawn too."),
+    p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),
 ];
 
 impl Prop {
