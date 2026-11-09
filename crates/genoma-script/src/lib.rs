@@ -98,6 +98,11 @@ pub enum Input {
     /// whenever it changes: what only the layout knows (the height of a
     /// column of wrapped text). Not pointer input, never passed up.
     Size(f32, f32),
+    /// A field's text after the person changed it (typing, erasing,
+    /// pasting, undoing): what the interface keeps. Never passed up.
+    Change(String),
+    /// Return in a field, with its text. Never passed up.
+    Submit(String),
     /// Discrete wheel steps, or touchpad movement in logical units.
     Wheel(f64, f64),
     /// The fingers left the touchpad while moving: their speed over the last
@@ -120,13 +125,18 @@ impl Input {
             Input::Size(..) => "on_size",
             Input::Focus(_) => "on_focus",
             Input::FocusWithin(..) => "on_focus_within",
+            Input::Change(_) => "on_change",
+            Input::Submit(_) => "on_submit",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
     }
 }
 
-const HANDLERS: &[&str] = &["on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_focus", "on_focus_within", "on_wheel", "on_fling", "on_outside", "on_key"];
+const HANDLERS: &[&str] = &[
+    "on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_focus", "on_focus_within", "on_wheel",
+    "on_fling", "on_outside", "on_key", "on_change", "on_submit",
+];
 
 /// What `g.focus_*` asks of the keyboard's focus, done by the host once the
 /// key that asked has been handled, on the surface the key went to.
@@ -176,6 +186,10 @@ pub struct SurfaceSpec {
     pub namespace: String,
     /// A popup (`g.popup`) rather than a layer surface: where it opens.
     pub popup: Option<PopupSpec>,
+    /// When it takes the keyboard: "none" (only while a node catches),
+    /// "on_demand" (when pressed: a bar with a search field), "exclusive"
+    /// (always).
+    pub keyboard: String,
 }
 
 /// Where a popup opens: beside a node of another surface on its output,
@@ -1247,6 +1261,7 @@ impl Script {
                     }
                     Input::Wheel(dx, dy) | Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
+                    Input::Change(text) | Input::Submit(text) => f.call::<()>(text.as_str()),
                     Input::Focus(on) => f.call::<()>(*on),
                     Input::FocusWithin(x, y, w, h) => {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
@@ -1260,7 +1275,7 @@ impl Script {
             }
             // Hover stays with its own node: entering a child is not
             // entering every ancestor again.
-            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_)) {
+            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_)) {
                 return;
             }
             at = scene.borrow().parent(id);
@@ -1862,7 +1877,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "each"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -2105,6 +2120,11 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
             _ => None,
         },
         popup: popup_spec(t)?,
+        keyboard: match t.get::<Option<String>>("keyboard")?.as_deref() {
+            None | Some("none") => "none".into(),
+            Some(k @ ("on_demand" | "exclusive")) => k.into(),
+            Some(other) => return Err(err(format!("keyboard: no mode {other} (none, on_demand, exclusive)"))),
+        },
     })
 }
 
@@ -2145,6 +2165,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "thread" => Kind::Thread,
         "emitter" => Kind::Emitter,
         "shader" => Kind::Shader,
+        "field" => Kind::Field,
         other => return Err(err(format!("unknown node {other}"))),
     })
 }

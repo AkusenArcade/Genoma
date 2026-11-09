@@ -92,6 +92,14 @@ return g.surface {
   timing to use, so retiming a shell is one table.
 - **Input:** `on_click`, `on_wheel`, `on_drag`, `on_key`, `on_hover`,
   `on_fling` and others. The input region follows the nodes that take input.
+- **Fields:** `g.field { text = …, on_change = …, on_submit = …, focused = … }`
+  is a line to type into: caret and selection by key and by pointer
+  (double-click a word, triple-click the line), word moves, undo and redo,
+  Ctrl+C/X/V through the clipboard, `secret` for passwords, and input methods
+  (`text-input-v3`) for scripts typed by composition. Keep its text in a
+  signal written by `on_change`. A surface takes the keyboard while a node
+  catches, or as its `keyboard` says (`"on_demand"` for a bar with a search
+  field, `"exclusive"`). See `examples/prompt`.
 - **Popups:** `g.popup { anchor = "clock", side = "bottom", align = "end",
   present = …, on_dismiss = … }` opens beside the node with `id = "clock"`
   on another surface, over everything. The compositor turns it to the other

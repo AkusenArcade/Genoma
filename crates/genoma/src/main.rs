@@ -678,6 +678,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     if script.borrow().wants("lock") {
         app.start_lock(services_lock.clone());
     }
+    app.set_clipboard_service(services_clipboard.clone());
     if script.borrow().wants("clipboard") {
         app.start_clipboard(services_clipboard.clone());
     }

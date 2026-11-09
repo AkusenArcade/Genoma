@@ -7,6 +7,7 @@
 //! when it next will (`Motion`); the surface asks the compositor for a frame
 //! only then.
 
+pub mod field;
 mod glyphs;
 mod icons;
 mod images;
@@ -43,6 +44,9 @@ pub enum Kind {
     /// A field the interface writes in WGSL, fed by numbers it binds
     /// (`g.shader`).
     Shader,
+    /// A line of text to type into (`g.field`): caret, selection, undo,
+    /// the clipboard and input methods.
+    Field,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -137,6 +141,17 @@ pub struct Node {
     ellipsize: u8,
     max_width: Option<f32>,
     buffer: Option<Arc<ct::Buffer>>,
+    /// A field's editing state; `None` on every other node.
+    edit: Option<Box<field::Editor>>,
+    placeholder: String,
+    placeholder_color: [f32; 4],
+    selection_color: [f32; 4],
+    caret_color: [f32; 4],
+    focused: bool,
+    secret: bool,
+    /// Where a field's caret was last drawn, logical units in the surface:
+    /// where an input method puts its candidates.
+    caret_rect: Option<[f32; 4]>,
     /// Beats a minute, and where in the current beat the node is (0…1).
     pulse: f32,
     beat: f32,
@@ -262,6 +277,14 @@ impl Node {
             ellipsize: 0,
             max_width: None,
             buffer: None,
+            edit: (kind == Kind::Field).then(Box::default),
+            placeholder: String::new(),
+            placeholder_color: [0.0; 4],
+            selection_color: [0.0; 4],
+            caret_color: [0.0; 4],
+            focused: false,
+            secret: false,
+            caret_rect: None,
             pulse: 0.0,
             beat: 0.0,
             orbit: 0.0,
@@ -278,7 +301,8 @@ impl Node {
             fill_stops: Vec::new(),
             arc_rate: 0.0,
             offset: [0.0; 2],
-            interactive: false,
+            // A field takes the pointer, to place its caret.
+            interactive: kind == Kind::Field,
             drawn_frame: 0,
             extent: [0.0; 4],
             opacity: 1.0,
@@ -702,6 +726,7 @@ impl Scene {
         loop {
             match self.tree.get_node_context(node) {
                 Some(n) if n.cursor != 0 => return schema::CURSORS[n.cursor as usize],
+                Some(n) if n.kind == Kind::Field => return "text",
                 _ => {}
             }
             match self.parent(node) {
@@ -825,7 +850,9 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader => Style { flex_shrink: 0.0, ..Style::default() },
+            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader | Kind::Field => {
+                Style { flex_shrink: 0.0, ..Style::default() }
+            }
         };
         self.tree.new_leaf_with_context(style, Node::new(kind, role)).expect("node")
     }
@@ -873,6 +900,131 @@ impl Scene {
         for child in self.tree.children(self.root).unwrap_or_default() {
             self.remove(child);
         }
+    }
+
+    // ---- Fields ---------------------------------------------------------
+
+    /// The field that has the keys (`focused`), if one is shown.
+    pub fn focused_field(&self) -> Option<NodeId> {
+        let mut found = None;
+        self.walk(self.root, &mut |id, n| {
+            if found.is_none() && n.focused && n.edit.is_some() {
+                found = Some(id);
+            }
+        });
+        found
+    }
+
+    pub fn is_field(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.edit.is_some())
+    }
+
+    pub fn field_text(&self, node: NodeId) -> Option<String> {
+        self.tree.get_node_context(node)?.edit.as_ref().map(|e| e.text().to_owned())
+    }
+
+    /// The field's text, caret and selection's other end (bytes), as an
+    /// input method is told them.
+    pub fn field_surrounding(&self, node: NodeId) -> Option<(String, usize, usize)> {
+        let e = self.tree.get_node_context(node)?.edit.as_ref()?;
+        let (caret, anchor) = match e.selection() {
+            Some((a, b)) if e.caret() == a => (a, b),
+            Some((a, b)) => (b, a),
+            None => (e.caret(), e.caret()),
+        };
+        Some((e.text().to_owned(), caret, anchor))
+    }
+
+    /// Whether the field is a password's.
+    pub fn field_is_secret(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.secret)
+    }
+
+    /// Where the field's caret was last drawn, logical units in the surface.
+    pub fn field_caret_rect(&self, node: NodeId) -> Option<[f32; 4]> {
+        self.tree.get_node_context(node)?.caret_rect
+    }
+
+    fn edited(&mut self, node: NodeId, reshape: bool) {
+        if reshape {
+            if let Some(n) = self.tree.get_node_context_mut(node) {
+                n.buffer = None;
+            }
+            self.tree.mark_dirty(node).ok();
+        }
+        self.dirty = true;
+    }
+
+    /// A key for the field: what it did.
+    pub fn field_key(&mut self, node: NodeId, name: &str, typed: Option<&str>, ctrl: bool, shift: bool) -> Option<field::Outcome> {
+        let n = self.tree.get_node_context_mut(node)?;
+        let secret = n.secret;
+        let out = n.edit.as_mut()?.key(name, typed, ctrl, shift, secret);
+        if out.used {
+            self.edited(node, true);
+        }
+        Some(out)
+    }
+
+    /// Text inserted at the caret (pasted, or committed by an input
+    /// method): whether the field's text changed.
+    pub fn field_insert(&mut self, node: NodeId, text: &str) -> bool {
+        let Some(edit) = self.tree.get_node_context_mut(node).and_then(|n| n.edit.as_mut()) else { return false };
+        let before = edit.text().to_owned();
+        edit.insert(text);
+        let changed = edit.text() != before;
+        self.edited(node, true);
+        changed
+    }
+
+    /// What an input method is composing, or `None` when it stopped.
+    pub fn field_preedit(&mut self, node: NodeId, preedit: Option<(String, Option<usize>)>) {
+        let Some(edit) = self.tree.get_node_context_mut(node).and_then(|n| n.edit.as_mut()) else { return };
+        if edit.preedit() == preedit.as_ref() {
+            return;
+        }
+        edit.set_preedit(preedit);
+        self.edited(node, true);
+    }
+
+    pub fn field_delete_surrounding(&mut self, node: NodeId, before: usize, after: usize) -> bool {
+        let Some(edit) = self.tree.get_node_context_mut(node).and_then(|n| n.edit.as_mut()) else { return false };
+        let changed = edit.delete_surrounding(before, after);
+        self.edited(node, true);
+        changed
+    }
+
+    /// The byte under a point of the field, local to it, logical units.
+    fn field_byte(&mut self, node: NodeId, x: f32) -> Option<usize> {
+        let pad = self.tree.layout(node).map_or(0.0, |l| l.padding.left);
+        let mut fonts = self.fonts.lock().unwrap();
+        let n = self.tree.get_node_context_mut(node)?;
+        let buffer = shape(&mut fonts, n);
+        let edit = n.edit.as_ref()?;
+        if edit.display(n.secret).text.is_empty() {
+            return Some(0);
+        }
+        let at = byte_at(&buffer, x - pad + edit.scroll);
+        Some(edit.from_display(at, n.secret))
+    }
+
+    /// A press on the field, local to it: the caret goes there (a second
+    /// press selects the word, a third the line; Shift extends).
+    pub fn field_press(&mut self, node: NodeId, x: f32, shift: bool) {
+        let Some(at) = self.field_byte(node, x) else { return };
+        if let Some(edit) = self.tree.get_node_context_mut(node).and_then(|n| n.edit.as_mut()) {
+            edit.press(at, shift, std::time::Instant::now());
+        }
+        self.edited(node, false);
+    }
+
+    /// The pointer dragged over the field after a press, local to it.
+    pub fn field_drag(&mut self, node: NodeId, x: f32) {
+        let Some(at) = self.field_byte(node, x) else { return };
+        if let Some(edit) = self.tree.get_node_context_mut(node).and_then(|n| n.edit.as_mut()) {
+            edit.drag(at);
+        }
+        self.edited(node, false);
     }
 
     pub fn set_id(&mut self, node: NodeId, id: Option<String>) {
@@ -1136,12 +1288,28 @@ impl Scene {
             Prop::ShadowY => n.shadow_y = take!(number),
             Prop::Text => {
                 let t = take!(text);
-                if n.text == t {
-                    return Ok(());
+                // A field follows its binding when it says something other
+                // than what the field holds: cleared after a submit, say.
+                if let Some(edit) = n.edit.as_mut() {
+                    if edit.text() != t {
+                        edit.set_text(&t);
+                        reshape = true;
+                    }
+                    n.text = t;
+                } else {
+                    if n.text == t {
+                        return Ok(());
+                    }
+                    n.text = t;
+                    reshape = true;
                 }
-                n.text = t;
-                reshape = true;
             }
+            Prop::Placeholder => (n.placeholder, reshape) = (take!(text), true),
+            Prop::PlaceholderColor => n.placeholder_color = take!(colour),
+            Prop::SelectionColor => n.selection_color = take!(colour),
+            Prop::CaretColor => n.caret_color = take!(colour),
+            Prop::Focused => n.focused = take!(flag),
+            Prop::Secret => (n.secret, reshape) = (take!(flag), true),
             Prop::FontSize => (n.font_size, reshape) = (take!(number), true),
             Prop::Font => (n.font, reshape) = (Some(take!(text)), true),
             Prop::Tabular => (n.tabular, reshape) = (take!(flag), true),
@@ -1500,6 +1668,14 @@ impl Scene {
                     }
                     Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h.ceil()) }
                 }
+                // A field is a line high, and as wide as what it shows and
+                // its caret unless given a width.
+                Some(n) if n.kind == Kind::Field => {
+                    let buffer = shape(&mut fonts, n);
+                    let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) + 1.0;
+                    let h = (n.font_size * 1.2).ceil();
+                    Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h) }
+                }
                 _ => Size::ZERO,
             })
         };
@@ -1692,6 +1868,18 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         tracking: n.tracking,
     };
     let attrs = style.attrs();
+    // A field is one line, never cut: it scrolls under its caret instead.
+    if let Some(edit) = &n.edit {
+        let shown = edit.display(n.secret).text;
+        let text = if shown.is_empty() { n.placeholder.as_str() } else { shown.as_str() };
+        buffer.set_wrap(ct::Wrap::None);
+        buffer.set_size(None, None);
+        buffer.set_text(text, &attrs, ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let buffer = Arc::new(buffer);
+        n.buffer = Some(buffer.clone());
+        return buffer;
+    }
     // A limited width ends the line in an ellipsis: never wrapped, never
     // shrunk (Bioma's window title). A sentence that may wrap goes on to
     // the next line instead.
@@ -1724,6 +1912,133 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     let buffer = Arc::new(buffer);
     n.buffer = Some(buffer.clone());
     buffer
+}
+
+/// Where the caret stands before byte `at` of a one-line buffer, logical
+/// units from the line's start.
+fn caret_x(buffer: &ct::Buffer, at: usize) -> f32 {
+    let Some(run) = buffer.layout_runs().next() else { return 0.0 };
+    let mut end = 0.0f32;
+    for g in run.glyphs.iter() {
+        if at <= g.start {
+            return g.x;
+        }
+        // Inside a cluster (a ligature): a share of its width.
+        if at < g.end {
+            return g.x + g.w * (at - g.start) as f32 / (g.end - g.start).max(1) as f32;
+        }
+        end = end.max(g.x + g.w);
+    }
+    end
+}
+
+/// The byte of a one-line buffer nearest to `x`, logical units from the
+/// line's start.
+fn byte_at(buffer: &ct::Buffer, x: f32) -> usize {
+    let Some(run) = buffer.layout_runs().next() else { return 0 };
+    for g in run.glyphs.iter() {
+        if x < g.x + g.w / 2.0 {
+            return g.start;
+        }
+    }
+    run.glyphs.iter().map(|g| g.end).max().unwrap_or(0)
+}
+
+/// A plain rectangle: no rim, no gradient, no shape.
+fn flat(origin: [f32; 2], size: [f32; 2], radius: f32, fill: [f32; 4], out: &Out) -> Rect {
+    Rect {
+        origin,
+        size,
+        radius,
+        rim: 0.0,
+        level: 1.0,
+        cut: 0.0,
+        fill,
+        rim_top: [0.0; 4],
+        rim_bottom: [0.0; 4],
+        wave: [0.0; 4],
+        arc: Rect::WHOLE,
+        fill_to: [0.0; 4],
+        stops: Rect::NO_STOPS,
+        clip: out.clip,
+        path: [0.0; 4],
+        path_end: [0.0; 4],
+        bud: [0.0; 4],
+        bud_shape: [0.0; 4],
+        fade: out.fade_of(),
+        transform: out.transform,
+    }
+}
+
+/// A field: what is selected, the text (or its placeholder) scrolled to
+/// keep the caret in sight, what an input method composes underlined, and
+/// the caret while it has the keys. A still hairline: a caret blinking at
+/// a fixed rate is motion with nothing behind it.
+fn draw_field(fonts: &mut ct::FontSystem, n: &mut Node, origin: [f32; 2], layout: &taffy::Layout, scale: f32, alpha: f32, out: &mut Out) {
+    let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
+    let buffer = shape(fonts, n);
+    let Some(display) = n.edit.as_ref().map(|e| e.display(n.secret)) else { return };
+    let empty = display.text.is_empty();
+    let left0 = origin[0] + layout.padding.left;
+    let room = (layout.size.width - layout.padding.left - layout.padding.right).max(1.0);
+    let height = layout.size.height - layout.padding.top - layout.padding.bottom;
+    let line = (n.font_size * 1.2).ceil();
+    // A line high, centred in what the field is given.
+    let top = origin[1] + layout.padding.top + ((height - line) / 2.0).max(0.0);
+    let x_at = |i: usize| if empty { 0.0 } else { caret_x(&buffer, i) };
+    let caret = x_at(display.caret);
+    let width = if empty { 0.0 } else { buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) };
+    let Some(edit) = n.edit.as_mut() else { return };
+    // The line scrolls under the caret, and never leaves room empty past
+    // its end while some of it is out of sight before.
+    let mut scroll = edit.scroll;
+    if caret - scroll > room - 1.0 {
+        scroll = caret - room + 1.0;
+    }
+    if caret < scroll {
+        scroll = caret;
+    }
+    if width - scroll < room - 1.0 {
+        scroll = width - room + 1.0;
+    }
+    edit.scroll = scroll.max(0.0);
+    let left = left0 - edit.scroll;
+    let saved = out.clip;
+    out.clip = [
+        saved[0].max(left0 * scale),
+        saved[1].max(origin[1] * scale),
+        saved[2].min((left0 + room) * scale),
+        saved[3].min((origin[1] + layout.size.height) * scale),
+    ];
+    let px = |v: f32| (v * scale).round();
+    if let Some((a, b)) = display.selection {
+        let (x0, x1) = (x_at(a), x_at(b));
+        let colour = if n.selection_color[3] > 0.0 { n.selection_color } else { [n.color[0], n.color[1], n.color[2], n.color[3] * 0.25] };
+        let rect = flat([px(left + x0), px(top)], [px(left + x1) - px(left + x0), px(line)], 2.0 * scale, fade(colour), out);
+        out.list.push_rect(rect);
+    }
+    let colour = match (empty, n.placeholder_color[3] > 0.0) {
+        (true, true) => n.placeholder_color,
+        (true, false) => [n.color[0], n.color[1], n.color[2], n.color[3] * 0.45],
+        _ => n.color,
+    };
+    if !empty || !n.placeholder.is_empty() {
+        let shown = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
+        out.list.push_text(Text { buffer: buffer.clone(), origin: [px(left0 - if empty { 0.0 } else { edit.scroll }), px(top)], scale, color: fade(colour), clip: out.clip }, [shown * scale, line * scale]);
+    }
+    let hair = scale.round().max(1.0);
+    if let Some((a, b)) = display.composing {
+        let (x0, x1) = (x_at(a), x_at(b));
+        let rect = flat([px(left + x0), px(top + line) - hair], [px(left + x1) - px(left + x0), hair], 0.0, fade(n.color), out);
+        out.list.push_rect(rect);
+    }
+    n.caret_rect = Some([left + caret, top, 1.0, line]);
+    if n.focused {
+        let colour = if n.caret_color[3] > 0.0 { n.caret_color } else { n.color };
+        let rect = flat([px(left + caret), px(top)], [hair, px(line)], 0.0, fade(colour), out);
+        out.list.push_rect(rect);
+    }
+    out.clip = saved;
 }
 
 /// The part of an image on the surface, in its decoded pixels (x, y, w,
@@ -2547,6 +2862,7 @@ fn collect_node(
                 });
             }
         }
+        Kind::Field => draw_field(fonts, n, origin, &layout, scale, alpha, out),
         Kind::Box => {}
     }
     // A clipping node narrows the clip for everything inside it, and a

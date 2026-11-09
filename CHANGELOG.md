@@ -25,6 +25,18 @@ changes what a shell sees.
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
 - `examples/bar`: a classic top bar written against Genoma alone.
+- `g.field`, a line of text to type into: caret and selection by key and
+  by pointer (double and triple click), word moves (Ctrl+arrows,
+  Ctrl+BackSpace), undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with typing
+  undone a word at a time, Ctrl+A/C/X/V through the clipboard, horizontal
+  scrolling under the caret, a placeholder, `secret` (dots, never copied),
+  and input methods through `text-input-v3` (composition underlined at the
+  caret). Props `placeholder`, `placeholder_color`, `selection_color`,
+  `caret_color`, `focused`, `secret`; handlers `on_change(text)` and
+  `on_submit(text)`; keys it leaves (Escape, Tab, Up, Down) reach `on_key`.
+  `examples/prompt`.
+- `keyboard` on `g.surface`: `"none"` (the default: only while a node
+  catches), `"on_demand"` (when pressed) or `"exclusive"`.
 - `g.popup`, a surface that opens beside a node of another one
   (`xdg_popup`): `anchor` (a node's `id`, or a function giving one), `side`,
   `align`, `gap`, `grab`, `present`, `on_dismiss`. The compositor flips or

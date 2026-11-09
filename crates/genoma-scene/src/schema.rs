@@ -114,6 +114,12 @@ pub enum Prop {
     Soften,
     Follow,
     Clock,
+    Placeholder,
+    PlaceholderColor,
+    SelectionColor,
+    CaretColor,
+    Focused,
+    Secret,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +263,12 @@ pub const PROPS: &[PropInfo] = &[
     p("raised", Prop::Raised, Ty::Bool, false, "Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it."),
     p("cursor", Prop::Cursor, Ty::Choice(&CURSORS), false, "The pointer's shape over this node and what it holds, unless a node inside names its own."),
     p("inhibit_shortcuts", Prop::InhibitShortcuts, Ty::Bool, false, "While true on a catching surface, the compositor's own shortcuts stand aside and their keys reach on_key: a field recording a key combination."),
+    p("placeholder", Prop::Placeholder, Ty::Text, false, "Shown in a field while it is empty."),
+    p("placeholder_color", Prop::PlaceholderColor, Ty::Color, false, "The placeholder's colour; unset, the text's, faded."),
+    p("selection_color", Prop::SelectionColor, Ty::Color, false, "What is selected in a field, drawn behind its text; unset, the text's colour at a quarter."),
+    p("caret_color", Prop::CaretColor, Ty::Color, false, "A field's caret; unset, the text's colour."),
+    p("focused", Prop::Focused, Ty::Bool, false, "While true, a field takes the keys and shows its caret: typing, the editing keys, Ctrl+A/C/X/V/Z/Y. Return reaches on_submit; Escape, Tab, Up and Down go on to on_key."),
+    p("secret", Prop::Secret, Ty::Bool, false, "A field drawn as a dot a character, and never copied out: a password."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
 ];
 

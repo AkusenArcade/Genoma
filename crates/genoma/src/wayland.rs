@@ -18,7 +18,13 @@ use genoma_scene::{Blur, NodeId, Scene};
 use genoma_script::{Input, SurfaceSpec, Target, Wish};
 use smithay_client_toolkit::{
     registry::SimpleGlobal,
-    reexports::protocols::xdg::shell::client::xdg_wm_base::XdgWmBase,
+    reexports::protocols::{
+        wp::text_input::zv3::client::{
+            zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+            zwp_text_input_v3::{self, ZwpTextInputV3},
+        },
+        xdg::shell::client::xdg_wm_base::XdgWmBase,
+    },
 };
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
@@ -219,6 +225,9 @@ struct Surface {
     dismissed: bool,
     /// A popup's anchor as its function gives it now.
     anchor_wish: Option<String>,
+    /// A field has the keys while nothing catches: the surface takes the
+    /// keyboard when pressed (on demand).
+    typing: bool,
 }
 
 impl Surface {
@@ -264,6 +273,7 @@ impl Surface {
             reserve_wish: None,
             dismissed: false,
             anchor_wish: None,
+            typing: false,
             strokes: Vec::new(),
             tall: false,
             output_size,
@@ -359,6 +369,9 @@ pub struct App {
     data_device: Option<ExtDataControlDeviceV1>,
     clip_offer: Option<ExtDataControlOfferV1>,
     clipboard: Option<std::rc::Rc<genoma_services::clipboard::Clipboard>>,
+    /// The clipboard service, started by the first field that copies or
+    /// pastes when the interface has not required it.
+    clipboard_service: Option<std::rc::Rc<genoma_services::clipboard::Clipboard>>,
     /// `xdg-shell`, for popups: only its base, bound by hand, since sctk's
     /// whole shell would ask for windows too.
     xdg_shell: Option<XdgWmBase>,
@@ -370,6 +383,27 @@ pub struct App {
     /// Popups the compositor closed, by description and output, for the
     /// interface to hear.
     dismissed: Vec<(usize, Option<String>)>,
+    /// `text-input-v3`: an input method composing into the field that has
+    /// the keys (CJK, emoji, dictation).
+    text_input_manager: Option<ZwpTextInputManagerV3>,
+    text_input: Option<ZwpTextInputV3>,
+    /// The surface the text input entered, whether it is enabled, the
+    /// state last told to it, and what the input method sent before its
+    /// next `done`.
+    text_input_on: Option<wl_surface::WlSurface>,
+    text_input_enabled: bool,
+    text_input_told: Option<(String, usize, usize, [i32; 4])>,
+    text_input_pending: TextInputPending,
+    /// The last change came from the input method (said with the next state).
+    text_input_cause: bool,
+}
+
+/// What an input method sends, applied all at once on its `done`.
+#[derive(Default)]
+struct TextInputPending {
+    preedit: Option<(String, i32, i32)>,
+    commit: Option<String>,
+    delete: Option<(u32, u32)>,
 }
 
 impl App {
@@ -425,13 +459,22 @@ impl App {
             data_device: None,
             clip_offer: None,
             clipboard: None,
+            clipboard_service: None,
             xdg_shell: None,
             input_serial: 0,
             keyboard_on: None,
             dismissed: Vec::new(),
+            text_input_manager: None,
+            text_input: None,
+            text_input_on: None,
+            text_input_enabled: false,
+            text_input_told: None,
+            text_input_pending: TextInputPending::default(),
+            text_input_cause: false,
             globals,
         };
         app.xdg_shell = app.globals.bind(&app.qh, 1..=6, smithay_client_toolkit::globals::GlobalData).ok();
+        app.text_input_manager = app.globals.bind(&app.qh, 1..=1, Ignore).ok();
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
         match app.dmabuf.get_default_feedback(&qh) {
@@ -501,6 +544,19 @@ impl App {
         clipboard.available.set(self.data_control.is_some());
         self.clipboard = Some(clipboard);
         self.make_data_device();
+    }
+
+    /// The service a field copies and pastes through.
+    pub fn set_clipboard_service(&mut self, clipboard: std::rc::Rc<genoma_services::clipboard::Clipboard>) {
+        self.clipboard_service = Some(clipboard);
+    }
+
+    /// The clipboard followed from now on, for a field: started early, at
+    /// its first press or key, its text is known by the time it pastes.
+    fn ensure_clipboard(&mut self) {
+        if let (None, Some(service)) = (&self.clipboard, self.clipboard_service.clone()) {
+            self.start_clipboard(service);
+        }
     }
 
     /// The seat's device, once there is a seat: the compositor then says
@@ -767,7 +823,7 @@ impl App {
         // opened from could take it: the layer surface may, while it is open.
         let seat = self.seat.clone().or_else(|| self.seats.seats().next());
         let grab = spec.grab && self.input_serial != 0 && seat.is_some();
-        if grab && !self.surfaces[j].keyboard {
+        if grab && !self.surfaces[j].keyboard && !self.surfaces[j].typing {
             layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
             layer.commit();
         }
@@ -827,7 +883,7 @@ impl App {
         // hand it the keyboard the popup leaves, away from the window that
         // had it before.
         let parent = self.surfaces.iter().find(|p| p.id == open.parent);
-        if let Some(layer) = parent.filter(|p| !p.keyboard).and_then(|p| p.role.layer()) {
+        if let Some(layer) = parent.filter(|p| !p.keyboard && !p.typing).and_then(|p| p.role.layer()) {
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
             layer.commit();
         }
@@ -1063,6 +1119,97 @@ impl App {
             .seats
             .get_keyboard_with_repeat(&qh, seat, None, handle, Box::new(|app: &mut App, _, event| app.key(&event)))
             .ok();
+        if let (Some(manager), None) = (&self.text_input_manager, &self.text_input) {
+            self.text_input = Some(manager.get_text_input(seat, &qh, TextInputData));
+        }
+    }
+
+    /// The text input as the field with the keys wants it: enabled on the
+    /// surface it entered while a field there has the keys, told its text,
+    /// caret and where the caret is drawn whenever they change.
+    fn sync_text_input(&mut self) {
+        use zwp_text_input_v3::{ChangeCause, ContentHint, ContentPurpose};
+        let Some(ti) = self.text_input.clone() else { return };
+        let target = self
+            .text_input_on
+            .as_ref()
+            .and_then(|wl| self.by_wl(wl))
+            .and_then(|i| self.surfaces[i].scene.borrow().focused_field().map(|f| (i, f)));
+        match target {
+            Some((i, f)) => {
+                let scene = self.surfaces[i].scene.borrow();
+                let Some((text, caret, anchor)) = scene.field_surrounding(f) else { return };
+                let r = scene.field_caret_rect(f).unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                let rect = [r[0].round() as i32, r[1].round() as i32, r[2].ceil().max(1.0) as i32, r[3].ceil().max(1.0) as i32];
+                let secret = scene.field_is_secret(f);
+                drop(scene);
+                let fresh = !self.text_input_enabled;
+                let state = (text, caret, anchor, rect);
+                if !fresh && self.text_input_told.as_ref() == Some(&state) {
+                    return;
+                }
+                if fresh {
+                    ti.enable();
+                    self.text_input_enabled = true;
+                }
+                let (text, caret, anchor, rect) = &state;
+                // At most 4000 bytes: the stretch around the caret.
+                let (from, to) = surrounding_window(text, (*caret).min(*anchor), (*caret).max(*anchor));
+                let inside = |i: usize| (i.clamp(from, to) - from) as i32;
+                ti.set_surrounding_text(text[from..to].to_owned(), inside(*caret), inside(*anchor));
+                ti.set_text_change_cause(if self.text_input_cause { ChangeCause::InputMethod } else { ChangeCause::Other });
+                if secret {
+                    ti.set_content_type(ContentHint::SensitiveData | ContentHint::HiddenText, ContentPurpose::Password);
+                } else {
+                    ti.set_content_type(ContentHint::None, ContentPurpose::Normal);
+                }
+                ti.set_cursor_rectangle(rect[0], rect[1], rect[2], rect[3]);
+                ti.commit();
+                self.text_input_cause = false;
+                self.text_input_told = Some(state);
+            }
+            None if self.text_input_enabled => {
+                ti.disable();
+                ti.commit();
+                self.text_input_enabled = false;
+                self.text_input_told = None;
+            }
+            None => {}
+        }
+    }
+
+    /// The input method's `done`: what it sent since, applied to the field
+    /// that has the keys in the protocol's order — the composition taken
+    /// out, the text around the caret deleted, the committed text put in,
+    /// then the new composition shown.
+    fn text_input_done(&mut self) {
+        let pending = std::mem::take(&mut self.text_input_pending);
+        let Some((i, f)) = self
+            .text_input_on
+            .as_ref()
+            .and_then(|wl| self.by_wl(wl))
+            .and_then(|i| self.surfaces[i].scene.borrow().focused_field().map(|f| (i, f)))
+        else {
+            return;
+        };
+        let scene = self.surfaces[i].scene.clone();
+        let mut changed = false;
+        scene.borrow_mut().field_preedit(f, None);
+        if let Some((before, after)) = pending.delete {
+            changed |= scene.borrow_mut().field_delete_surrounding(f, before as usize, after as usize);
+        }
+        if let Some(text) = pending.commit {
+            changed |= scene.borrow_mut().field_insert(f, &text);
+        }
+        if let Some((text, begin, _)) = pending.preedit {
+            let cursor = usize::try_from(begin).ok();
+            scene.borrow_mut().field_preedit(f, Some((text, cursor)));
+        }
+        if changed {
+            self.text_input_cause = true;
+            let text = scene.borrow().field_text(f).unwrap_or_default();
+            self.deliver(i, f, Input::Change(text));
+        }
     }
 
     /// The outputs the interface asks for, by name; `[None]` for one surface
@@ -1320,12 +1467,10 @@ impl App {
             None if !s.tall => layer.set_exclusive_zone(if spec.reserve { wanted.1 as i32 } else { 0 }),
             None => {}
         }
-        s.keyboard = s.scene.borrow().catcher().is_some();
-        layer.set_keyboard_interactivity(if s.keyboard {
-            KeyboardInteractivity::Exclusive
-        } else {
-            KeyboardInteractivity::None
-        });
+        let mode = keyboard_mode(&spec.keyboard, s.scene.borrow().catcher().is_some(), &s.scene.borrow());
+        s.keyboard = mode == KeyboardInteractivity::Exclusive;
+        s.typing = mode == KeyboardInteractivity::OnDemand;
+        layer.set_keyboard_interactivity(mode);
         layer.commit();
         s.dirty = true;
     }
@@ -1379,6 +1524,7 @@ impl App {
         self.flush_drag();
         self.sync_idle();
         self.sync_popups();
+        self.sync_text_input();
         for i in 0..self.surfaces.len() {
             let changed = self.surfaces[i].scene.borrow_mut().take_dirty();
             let s = &self.surfaces[i];
@@ -1420,6 +1566,7 @@ impl App {
 
     fn draw(&mut self, i: usize) {
         let spans = self.spans(i);
+        let wish = self.specs.get(self.surfaces[i].spec).map(|s| s.keyboard.clone()).unwrap_or_default();
         let catching = self.surfaces[i].scene.borrow().catcher().is_some();
         let holes = if catching { self.holes_for(i) } else { Vec::new() };
         let mut inputs_changed = false;
@@ -1540,16 +1687,16 @@ impl App {
             s.holes = holes;
         }
         // The keyboard while a cell is catching, with this frame's commit: a
-        // full surface never changes size, so it is never placed again.
-        if s.keyboard != catching {
+        // full surface never changes size, so it is never placed again. A
+        // field with the keys and nothing catching takes it when pressed.
+        let mode = keyboard_mode(&wish, catching, &s.scene.borrow());
+        let (exclusive, typing) = (mode == KeyboardInteractivity::Exclusive, mode == KeyboardInteractivity::OnDemand);
+        if s.keyboard != exclusive || s.typing != typing {
             if let Some(layer) = s.role.layer() {
-                layer.set_keyboard_interactivity(if catching {
-                    KeyboardInteractivity::Exclusive
-                } else {
-                    KeyboardInteractivity::None
-                });
+                layer.set_keyboard_interactivity(mode);
             }
-            s.keyboard = catching;
+            s.keyboard = exclusive;
+            s.typing = typing;
         }
         // The compositor's shortcuts stand aside while a catching surface's
         // node asks it, and come back as soon as it no longer does.
@@ -1680,25 +1827,149 @@ impl App {
     }
 
     fn key(&mut self, event: &KeyEvent) {
+        let on = self.keyboard_on.as_ref().and_then(|wl| self.by_wl(wl));
+        // A field with the keys takes them first: on the surface the
+        // keyboard is on, else wherever one has them.
+        let field = on
+            .and_then(|i| self.surfaces[i].scene.borrow().focused_field().map(|f| (i, f)))
+            .or_else(|| self.surfaces.iter().enumerate().find_map(|(i, s)| s.scene.borrow().focused_field().map(|f| (i, f))));
+        if field.is_some_and(|(i, f)| self.field_key(i, f, event)) {
+            return;
+        }
         // The keys go to what is catching on the surface the keyboard is on
         // (an open popup), else to the cell catching on whichever output.
-        let on = self.keyboard_on.as_ref().and_then(|wl| self.by_wl(wl));
         let held = on.and_then(|i| self.surfaces[i].scene.borrow().catcher().map(|c| (i, c)));
         let Some((i, catcher)) = held.or_else(|| {
             self.surfaces.iter().enumerate().find_map(|(i, s)| s.scene.borrow().catcher().map(|c| (i, c)))
         }) else {
+            // Nothing catching: a key the field let pass goes to it, and on
+            // to whoever above it listens.
+            if let Some((i, f)) = field {
+                let key = self.key_of(event);
+                self.deliver(i, f, Input::Key(key));
+            }
             return;
         };
         log::trace!("key {:?} to surface {} node {catcher:?}", event.keysym, self.surfaces[i].id);
+        let key = self.key_of(event);
+        self.deliver(i, catcher, Input::Key(key));
+        self.serve_focus(i, catcher);
+    }
+}
+
+impl App {
+    fn key_of(&self, event: &KeyEvent) -> genoma_script::Key {
         let name = event.keysym.name().unwrap_or_default();
         let name = name.strip_prefix("XK_").unwrap_or(name).to_owned();
         // The text the key types, as the keymap and its layout make it; none
         // while Ctrl or Alt is held, when the key is a command.
         let m = self.modifiers;
         let text = event.utf8.clone().filter(|t| !t.chars().any(char::is_control) && !m.ctrl && !m.alt);
-        let key = genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt, logo: m.logo, code: event.raw_code + 8 };
-        self.deliver(i, catcher, Input::Key(key));
-        self.serve_focus(i, catcher);
+        genoma_script::Key { name, text, ctrl: m.ctrl, shift: m.shift, alt: m.alt, logo: m.logo, code: event.raw_code + 8 }
+    }
+
+    /// A key for field `f` of surface `i`: whether the field took it. What
+    /// it changed is told to the interface, what it copied goes on the
+    /// clipboard, and Ctrl+V brings the clipboard's text in.
+    fn field_key(&mut self, i: usize, f: NodeId, event: &KeyEvent) -> bool {
+        self.ensure_clipboard();
+        let key = self.key_of(event);
+        let scene = self.surfaces[i].scene.clone();
+        let Some(out) = scene.borrow_mut().field_key(f, &key.name, key.text.as_deref(), key.ctrl, key.shift) else { return false };
+        if !out.used {
+            return false;
+        }
+        if let Some(text) = out.copy {
+            self.own_selection(genoma_services::clipboard::TEXT_TYPES.iter().map(|t| t.to_string()).collect(), text.into_bytes());
+            let _ = self.conn.flush();
+        }
+        let mut changed = out.changed;
+        if out.paste {
+            let text = self.clipboard.as_ref().and_then(|c| c.text.get_untracked()).unwrap_or_default();
+            if !text.is_empty() {
+                changed |= scene.borrow_mut().field_insert(f, &text);
+            }
+        }
+        let text = scene.borrow().field_text(f).unwrap_or_default();
+        if changed {
+            self.deliver(i, f, Input::Change(text.clone()));
+        }
+        if out.submit {
+            self.deliver(i, f, Input::Submit(text));
+        }
+        true
+    }
+}
+
+/// At most 4000 bytes of `text` around `from..to`, on character boundaries:
+/// what the text input protocol may carry.
+fn surrounding_window(text: &str, from: usize, to: usize) -> (usize, usize) {
+    const MAX: usize = 4000;
+    if text.len() <= MAX {
+        return (0, text.len());
+    }
+    let mut a = from.saturating_sub(MAX.saturating_sub(to - from) / 2);
+    let mut b = (a + MAX).min(text.len());
+    a = a.min(b.saturating_sub(MAX));
+    while !text.is_char_boundary(a) {
+        a += 1;
+    }
+    while !text.is_char_boundary(b) {
+        b -= 1;
+    }
+    (a, b)
+}
+
+/// The text input's events.
+struct TextInputData;
+
+impl Dispatch2<ZwpTextInputV3, App> for TextInputData {
+    fn event(&self, app: &mut App, _: &ZwpTextInputV3, event: zwp_text_input_v3::Event, _: &Connection, _: &QueueHandle<App>) {
+        use zwp_text_input_v3::Event as E;
+        match event {
+            E::Enter { surface } => {
+                app.text_input_on = Some(surface);
+                app.text_input_enabled = false;
+                app.text_input_told = None;
+            }
+            // Left, it is disabled by the compositor: a composition in
+            // flight is dropped.
+            E::Leave { surface } if app.text_input_on.as_ref() == Some(&surface) => {
+                if let Some(i) = app.by_wl(&surface) {
+                    let scene = app.surfaces[i].scene.clone();
+                    // Read first: the borrow would last through the block.
+                    let field = scene.borrow().focused_field();
+                    if let Some(f) = field {
+                        scene.borrow_mut().field_preedit(f, None);
+                    }
+                }
+                app.text_input_on = None;
+                app.text_input_enabled = false;
+                app.text_input_told = None;
+            }
+            E::PreeditString { text, cursor_begin, cursor_end } => {
+                app.text_input_pending.preedit = text.map(|t| (t, cursor_begin, cursor_end));
+            }
+            E::CommitString { text } => app.text_input_pending.commit = text,
+            E::DeleteSurroundingText { before_length, after_length } => {
+                app.text_input_pending.delete = Some((before_length, after_length));
+            }
+            E::Done { .. } => app.text_input_done(),
+            _ => {}
+        }
+    }
+}
+
+/// When a layer surface takes the keyboard: always while a node catches or
+/// its description says so; when pressed while a field has the keys or its
+/// description asks for it; otherwise never.
+fn keyboard_mode(wish: &str, catching: bool, scene: &Scene) -> KeyboardInteractivity {
+    match wish {
+        _ if catching => KeyboardInteractivity::Exclusive,
+        "exclusive" => KeyboardInteractivity::Exclusive,
+        "on_demand" => KeyboardInteractivity::OnDemand,
+        _ if scene.focused_field().is_some() => KeyboardInteractivity::OnDemand,
+        _ => KeyboardInteractivity::None,
     }
 }
 
@@ -2128,6 +2399,9 @@ impl PointerHandler for App {
                     if let Some(node) = self.surfaces[i].pressed {
                         let (ox, oy) = self.surfaces[i].pressed_at;
                         self.drag = Some((i, node, x - ox, y - oy));
+                        if scene.borrow().is_field(node) {
+                            scene.borrow_mut().field_drag(node, x - ox);
+                        }
                     }
                 }
                 K::Press { button, serial, .. } => {
@@ -2142,6 +2416,12 @@ impl PointerHandler for App {
                     if let Some(node) = hit {
                         let (lx, ly) = scene.borrow().local(node, x, y);
                         self.surfaces[i].pressed_at = (x - lx, y - ly);
+                        // A field places its caret before the interface
+                        // hears the press (which may give it the keys).
+                        if button == 0x110 && scene.borrow().is_field(node) {
+                            self.ensure_clipboard();
+                            scene.borrow_mut().field_press(node, lx, self.modifiers.shift);
+                        }
                         self.deliver(i, node, Input::Press(button, lx, ly));
                     }
                 }
@@ -2304,3 +2584,20 @@ impl ProvidesRegistryState for App {
 
 delegate_registry!(App);
 smithay_client_toolkit::delegate_dispatch2!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::surrounding_window;
+
+    #[test]
+    fn surrounding_text_is_at_most_4000_bytes_around_the_caret() {
+        assert_eq!(surrounding_window("short", 2, 2), (0, 5));
+        let long = "é".repeat(5000); // 10000 bytes
+        let (a, b) = surrounding_window(&long, 6000, 6000);
+        assert!(b - a <= 4000 && a <= 6000 && 6000 <= b, "{a}..{b}");
+        assert!(long.is_char_boundary(a) && long.is_char_boundary(b));
+        let (a, b) = surrounding_window(&long, 10000, 10000);
+        assert_eq!(b, 10000);
+        assert!(b - a <= 4000);
+    }
+}
