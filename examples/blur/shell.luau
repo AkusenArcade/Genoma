@@ -9,6 +9,7 @@ local kit = require("@genoma/kit")
 
 local theme = kit.theme
 local spread = g.signal(4)
+local slide = g.signal(0.3)
 local tilt = g.signal(35)
 
 local function card(title: string, colour: string): any
@@ -59,6 +60,52 @@ return g.surface {
                 rim_top = "#00000000",
                 rim_bottom = "#00000000",
             },
+        },
+
+        -- backdrop_blur: what is under a node, blurred, through its shape.
+        g.box {
+            width = 424,
+            height = 130,
+            clip = true,
+            require("@genoma/kit/effects").noise {
+                overlay = true,
+                attach = "corner",
+                width = 424,
+                height = 130,
+                from = "#1b2a49",
+                to = "#e6b062",
+                size = 30,
+                contrast = 1.6,
+            },
+            g.text {
+                overlay = true,
+                attach = "corner",
+                offset_x = 16,
+                offset_y = 30,
+                size = 48,
+                weight = 800,
+                color = "#ffffff",
+                text = "GLASS ▲▼",
+            },
+            g.capsule {
+                overlay = true,
+                attach = "corner",
+                offset_x = function() return slide.value * 264 end,
+                offset_y = 15,
+                width = 160,
+                height = 100,
+                radius = 18,
+                backdrop_blur = 10,
+                fill = "#ffffff1a",
+                rim_top = "#ffffff55",
+                rim_bottom = "#ffffff11",
+                g.text { size = 13, weight = 600, color = "#ffffff", text = "Frosted" },
+            },
+        },
+        g.box {
+            gap = 12,
+            g.text { size = 12, width = 60, color = function() return theme.get("faint") end, text = "glass" },
+            kit.slider { width = 260, value = function() return slide.value end, on_change = function(v) slide.value = v end },
         },
 
         g.box {

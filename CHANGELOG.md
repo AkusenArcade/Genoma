@@ -24,6 +24,10 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `backdrop_blur`: frosted glass inside the shell. What the surface drew
+  under a flat node shows through it blurred, inside its rounded shape,
+  whatever the compositor offers; re-blurred only when what is under it
+  changes.
 - `blur_radius`: a node and its subtree drawn blurred, after depth, the
   spread in logical units; nothing done at 0, and a blur at rest kept
   rather than drawn again (the subtree's texture is keyed by what it

@@ -264,6 +264,8 @@ pub struct Node {
     combine_soft: f32,
     /// Drawn blurred, this spread, logical units; 0 is not blurred.
     blur_radius: f32,
+    /// What is under it shown through it blurred this much, logical units.
+    backdrop_blur: f32,
     /// The keyboard walks inside it, the focused node ringed in this.
     navigate: bool,
     focus_color: [f32; 4],
@@ -386,6 +388,7 @@ impl Node {
             combine: 0,
             combine_soft: 0.0,
             blur_radius: 0.0,
+            backdrop_blur: 0.0,
             navigate: false,
             focus_color: [0.478, 0.635, 0.969, 1.0],
         }
@@ -1360,6 +1363,7 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::Bud => Value::Number(n.bud),
             Prop::CombineSoft => Value::Number(n.combine_soft),
             Prop::BlurRadius => Value::Number(n.blur_radius),
+            Prop::BackdropBlur => Value::Number(n.backdrop_blur),
             Prop::Halo => Value::Number(n.halo),
             Prop::RotateX => Value::Number(n.turn[0]),
             Prop::RotateY => Value::Number(n.turn[1]),
@@ -1671,6 +1675,7 @@ impl Scene {
             Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
             Prop::Navigate => n.navigate = take!(flag),
             Prop::BlurRadius => n.blur_radius = take!(number).max(0.0),
+            Prop::BackdropBlur => n.backdrop_blur = take!(number).max(0.0),
             Prop::FocusColor => n.focus_color = take!(colour),
             Prop::Hollow => n.hollow = take!(flag),
             Prop::Blur => n.blur = take!(flag),
@@ -2601,6 +2606,12 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = true;
     }
+    // Frosted: what is drawn so far under its shape, blurred, laid first.
+    if let Some(n) = tree.get_node_context(node).filter(|n| n.present && n.backdrop_blur > 0.0) {
+        let ([x, y, w, h], _) = place(tree, node, parent, parent_exact, scale);
+        let radius = if n.kind == Kind::Capsule { n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0) } else { n.radius.unwrap_or(0.0) };
+        backdrop([x * scale, y * scale, w * scale, h * scale], radius * scale, n.backdrop_blur * scale, out);
+    }
     // Blurred: the node and its subtree drawn into a list of their own,
     // shown as the image the renderer makes of it.
     let radius = tree.get_node_context(node).filter(|n| n.present).map_or(0.0, |n| n.blur_radius);
@@ -2617,6 +2628,54 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = false;
     }
+}
+
+/// What `out` holds under `rect` (x, y, width, height, physical pixels),
+/// blurred over `sigma` and laid inside the rectangle, its corners rounded
+/// by `radius`: frosted glass. What is under is taken within three spreads
+/// of it, so only a change there blurs again.
+fn backdrop(rect: [f32; 4], radius: f32, sigma: f32, out: &mut Out) {
+    let margin = (sigma * 3.0).ceil();
+    let area = [
+        (rect[0] - margin).max(0.0).floor(),
+        (rect[1] - margin).max(0.0).floor(),
+        (rect[0] + rect[2] + margin).min(out.viewport[0]).ceil(),
+        (rect[1] + rect[3] + margin).min(out.viewport[1]).ceil(),
+    ];
+    let size = [area[2] - area[0], area[3] - area[1]];
+    if size[0] < 1.0 || size[1] < 1.0 || rect[2] <= 0.0 || rect[3] <= 0.0 {
+        return;
+    }
+    let under = out.list.within([area[0] as u32, area[1] as u32, size[0] as u32, size[1] as u32]);
+    if under.is_empty() {
+        return;
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ("backdrop", under.fingerprint(), sigma.to_bits(), area.map(f32::to_bits)).hash(&mut h);
+        h.finish() | (1 << 63)
+    };
+    out.list.groups.push(genoma_render::Group { key, list: under, bounds: area, sigma });
+    out.list.push_image(genoma_render::Image {
+        key,
+        pixels: Arc::new(Vec::new()),
+        width: size[0] as u32,
+        height: size[1] as u32,
+        origin: [rect[0], rect[1]],
+        size: [rect[2], rect[3]],
+        uv: [
+            (rect[0] - area[0]) / size[0],
+            (rect[1] - area[1]) / size[1],
+            (rect[0] + rect[2] - area[0]) / size[0],
+            (rect[1] + rect[3] - area[1]) / size[1],
+        ],
+        radius,
+        alpha: 1.0,
+        clip: out.clip,
+        fade: out.fade_of(),
+        transform: Rect::IDENTITY,
+    });
 }
 
 /// `own`, a subtree's list, as a blurred group: its paint's bounds grown by
@@ -3538,6 +3597,42 @@ mod tests {
         assert_eq!(again.groups[0].key, g.key);
         scene.set(card, Prop::BlurRadius, Value::Number(5.0), None).unwrap();
         assert_ne!(scene.draw_list(2.0).groups[0].key, g.key, "another radius, another picture");
+    }
+
+    #[test]
+    fn frosted_glass_blurs_what_is_under_it_inside_its_shape() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let well = scene.create(Kind::Box, Role::None);
+        scene.append(root, well);
+        let card = |scene: &mut Scene, x: f32, fill: [f32; 4]| {
+            let n = scene.create(Kind::Capsule, Role::None);
+            scene.append(well, n);
+            for (p, v) in [(Prop::Width, 60.0), (Prop::Height, 40.0), (Prop::OffsetX, x), (Prop::Radius, 8.0)] {
+                scene.set(n, p, Value::Number(v), None).unwrap();
+            }
+            scene.set(n, Prop::Overlay, Value::Bool(true), None).unwrap();
+            scene.set(n, Prop::Attach, Value::Text("corner".into()), None).unwrap();
+            scene.set(n, Prop::Fill, Value::Color(fill), None).unwrap();
+            n
+        };
+        card(&mut scene, 0.0, [1.0, 0.0, 0.0, 1.0]);
+        let glass = card(&mut scene, 30.0, [1.0, 1.0, 1.0, 0.1]);
+        scene.layout(Some(200.0), Some(100.0));
+        assert!(scene.draw_list(1.0).groups.is_empty());
+        scene.set(glass, Prop::BackdropBlur, Value::Number(5.0), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.groups.len(), 1);
+        let g = &list.groups[0];
+        assert_eq!(g.sigma, 5.0);
+        assert_eq!(g.list.rects.len(), 1, "the red card under it, not the glass itself");
+        // The blurred picture laid in the glass's rectangle, its corners.
+        let i = list.images.iter().find(|i| i.key == g.key).expect("the frosted image");
+        assert_eq!((i.origin, i.size, i.radius), ([30.0, 0.0], [60.0, 40.0], 8.0));
+        assert_eq!(list.rects.len(), 2, "both cards still drawn, the glass over its frost");
+        // At rest, the same picture.
+        assert_eq!(scene.draw_list(1.0).groups[0].key, g.key);
     }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {

@@ -112,8 +112,10 @@ return g.surface {
   a texture of its own and blurred there (halved first for a wide
   spread); a radius and a content at rest are blurred once and kept, a
   moving radius is blurred each frame. It animates with `transition`. See
-  `examples/blur`. (`blur = true` is the compositor's blur behind a
-  shape, another thing.)
+  `examples/blur`. `backdrop_blur = 10` is frosted glass: what the
+  surface drew under a flat node, blurred, shows through it inside its
+  shape, kept at rest as well. Other programs' windows are the
+  compositor's to blur (`blur = true`, through `ext-background-effect`).
 - **Shapes drawn as one:** a capsule with `combine_with = "id"` is drawn
   as one shape with the capsule of that id, by their distance fields:
   `combine = "union"` (a neck grows between them as `combine_soft`
