@@ -21,6 +21,7 @@ use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 
+mod blur;
 mod gpu;
 mod image;
 mod particles;
@@ -111,8 +112,12 @@ pub struct Image {
 /// new layer, so it lies over it (a scrim over a picture); shapes that do
 /// not overlap stay batched whatever their order. What is raised over all
 /// of it (a list a dropdown opened) is a layer of its own, last.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DrawList {
+    /// Subtrees drawn blurred (see [`Group`]), inner ones first: each is
+    /// drawn into a texture of its own and shows in this list as an image
+    /// of its key.
+    pub groups: Vec<Group>,
     /// Where each layer but the last ends.
     pub breaks: Vec<Layer>,
     pub rects: Vec<Rect>,
@@ -127,6 +132,28 @@ pub struct DrawList {
     /// kind as `order`'s ranks: what a frame that redraws only what changed
     /// has to clear and draw again (see [`DrawList::damage`]).
     paint: [Vec<[f32; 4]>; 5],
+}
+
+/// A subtree drawn blurred: its own list drawn into a texture over
+/// `bounds`, blurred over `sigma`, and shown where it was as the image whose
+/// key is `key`. The key is the list's fingerprint with the blur's: the same
+/// key is the same picture, so one at rest is never drawn or blurred again.
+#[derive(Clone)]
+pub struct Group {
+    pub key: u64,
+    pub list: DrawList,
+    /// x0, y0, x1, y1, physical pixels, whole: what the texture covers.
+    pub bounds: [f32; 4],
+    /// The Gaussian's standard deviation, physical pixels.
+    pub sigma: f32,
+}
+
+impl Group {
+    /// Its list as its texture takes it: the bounds' corner at the
+    /// texture's.
+    pub(crate) fn list_for_texture(&self, x0: f32, y0: f32) -> DrawList {
+        self.list.clone().shifted(x0, y0)
+    }
 }
 
 /// What changed between two frames of one surface.
@@ -431,8 +458,155 @@ impl DrawList {
         out
     }
 
+    /// Where anything in it leaves paint, physical pixels, x0, y0, x1, y1;
+    /// none when it is empty.
+    pub fn paint_bounds(&self) -> Option<[f32; 4]> {
+        self.paint.iter().flatten().fold(None, |acc: Option<[f32; 4]>, b| {
+            if b[2] <= b[0] || b[3] <= b[1] {
+                return acc;
+            }
+            Some(match acc {
+                Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+                None => *b,
+            })
+        })
+    }
+
+    /// A number that is the same for two lists that draw the same pixels:
+    /// what a blurred group is cached by.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for b in &self.breaks {
+            (b.rects, b.images, b.shaders, b.emitters, b.texts).hash(&mut h);
+        }
+        for r in &self.rects {
+            bytemuck::bytes_of(r).hash(&mut h);
+        }
+        for i in &self.images {
+            i.key.hash(&mut h);
+            for v in i.origin.iter().chain(&i.size).chain(&i.uv).chain(&i.clip).chain(&i.fade).chain(i.transform.iter().flatten()) {
+                v.to_bits().hash(&mut h);
+            }
+            (i.width, i.height, i.radius.to_bits(), i.alpha.to_bits()).hash(&mut h);
+        }
+        for sh in &self.shaders {
+            sh.key.hash(&mut h);
+            for v in sh.origin.iter().chain(&sh.size).chain(&sh.clip).chain(&sh.fade).chain(&sh.values).chain(&sh.pointer).chain(sh.transform.iter().flatten()) {
+                v.to_bits().hash(&mut h);
+            }
+            (sh.scale.to_bits(), sh.time.to_bits(), sh.alpha.to_bits()).hash(&mut h);
+        }
+        for e in &self.emitters {
+            (e.key, e.generation).hash(&mut h);
+            bytemuck::bytes_of(&e.params).hash(&mut h);
+        }
+        for t in &self.texts {
+            (Arc::as_ptr(&t.buffer) as usize).hash(&mut h);
+            for v in t.origin.iter().chain(&t.color).chain(&t.clip) {
+                v.to_bits().hash(&mut h);
+            }
+            t.scale.to_bits().hash(&mut h);
+        }
+        for g in &self.groups {
+            g.key.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// The same list moved by `-dx, -dy`: drawn into a texture whose corner
+    /// is that point of the surface. The move is composed after each item's
+    /// own matrix, so what depth turned stays turned; clips are measured
+    /// before the matrix and are moved with it.
+    pub fn shifted(mut self, dx: f32, dy: f32) -> DrawList {
+        // Row vectors: p · M · T, T's last row the move.
+        let after = |m: &mut [[f32; 4]; 4]| {
+            for row in m.iter_mut() {
+                row[0] -= dx * row[3];
+                row[1] -= dy * row[3];
+            }
+        };
+        let clip = |c: &mut [f32; 4]| {
+            c[0] -= dx;
+            c[1] -= dy;
+            c[2] -= dx;
+            c[3] -= dy;
+        };
+        for r in &mut self.rects {
+            r.origin[0] -= dx;
+            r.origin[1] -= dy;
+            clip(&mut r.clip);
+            r.fade[0] -= dy;
+        }
+        for i in &mut self.images {
+            i.origin[0] -= dx;
+            i.origin[1] -= dy;
+            clip(&mut i.clip);
+            i.fade[0] -= dy;
+        }
+        for sh in &mut self.shaders {
+            sh.origin[0] -= dx;
+            sh.origin[1] -= dy;
+            clip(&mut sh.clip);
+            sh.fade[0] -= dy;
+        }
+        for e in &mut self.emitters {
+            e.params.points[0] -= dx;
+            e.params.points[1] -= dy;
+            e.params.points[2] -= dx;
+            e.params.points[3] -= dy;
+            e.params.bend[0] -= dx;
+            e.params.bend[1] -= dy;
+            clip(&mut e.params.clip);
+        }
+        for t in &mut self.texts {
+            t.origin[0] -= dx;
+            t.origin[1] -= dy;
+            clip(&mut t.clip);
+        }
+        for p in self.paint.iter_mut().flatten() {
+            clip(p);
+        }
+        // The matrices turn about surface points: moved before and after,
+        // they turn the same way about the moved ones.
+        let before = |m: &mut [[f32; 4]; 4]| {
+            // p · T⁻¹ · M · T with T⁻¹ adding the move back: row 3 of M gains
+            // dx · row 0 + dy · row 1.
+            let (r0, r1) = (m[0], m[1]);
+            for (c, v) in m[3].iter_mut().enumerate() {
+                *v += dx * r0[c] + dy * r1[c];
+            }
+        };
+        for r in &mut self.rects {
+            if r.transform != Rect::IDENTITY {
+                before(&mut r.transform);
+                after(&mut r.transform);
+            }
+        }
+        for i in &mut self.images {
+            if i.transform != Rect::IDENTITY {
+                before(&mut i.transform);
+                after(&mut i.transform);
+            }
+        }
+        for sh in &mut self.shaders {
+            if sh.transform != Rect::IDENTITY {
+                before(&mut sh.transform);
+                after(&mut sh.transform);
+            }
+        }
+        for e in &mut self.emitters {
+            if e.params.transform != Rect::IDENTITY {
+                before(&mut e.params.transform);
+                after(&mut e.params.transform);
+            }
+        }
+        self
+    }
+
     /// `other`'s layers after all of these.
     pub fn append(&mut self, other: DrawList) {
+        self.groups.extend(other.groups);
         self.split();
         let base = self.mark();
         for b in other.breaks {
@@ -472,7 +646,7 @@ unsafe impl Send for Raw {}
 
 enum Message {
     Create { id: SurfaceId, display: Raw, surface: Raw },
-    Draw { id: SurfaceId, width: u32, height: u32, list: DrawList },
+    Draw { id: SurfaceId, width: u32, height: u32, list: Box<DrawList> },
     /// With a sender, answered once the swapchain is gone.
     Destroy { id: SurfaceId, done: Option<std::sync::mpsc::Sender<()>> },
 }
@@ -511,7 +685,7 @@ impl Renderer {
                             }
                         }
                         Message::Draw { id, width, height, list } => {
-                            gpu.draw(id, width, height, list)
+                            gpu.draw(id, width, height, *list)
                         }
                         Message::Destroy { id, done } => {
                             gpu.destroy_target(id);
@@ -544,7 +718,7 @@ impl Renderer {
     /// Whatever the surface's state must say with this frame (a frame
     /// callback, a viewport) has to be requested before this call.
     pub fn draw(&self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
-        let _ = self.tx.send(Message::Draw { id, width, height, list });
+        let _ = self.tx.send(Message::Draw { id, width, height, list: Box::new(list) });
     }
 
     pub fn destroy_target(&self, id: SurfaceId) {

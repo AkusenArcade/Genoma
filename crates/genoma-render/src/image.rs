@@ -242,6 +242,25 @@ impl Pipeline {
         self.shown.remove(&id);
     }
 
+    /// Whether a texture is kept for `key`.
+    pub(crate) fn has(&self, key: u64) -> bool {
+        self.textures.contains_key(&key)
+    }
+
+    /// A texture drawn on the GPU (a blurred subtree), kept by `key` as an
+    /// uploaded one is, and let go the same way.
+    pub(crate) fn adopt(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.textures.insert(key, (group, self.uploads));
+    }
+
     pub(crate) fn upload(
         &mut self,
         id: SurfaceId,

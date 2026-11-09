@@ -24,6 +24,10 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `blur_radius`: a node and its subtree drawn blurred, after depth, the
+  spread in logical units; nothing done at 0, and a blur at rest kept
+  rather than drawn again (the subtree's texture is keyed by what it
+  draws). See `examples/blur`.
 - `shader.pointer` in every `g.shader`: where the pointer is from the
   node's corner, whether it is over the surface and whether a button is
   held. A shader that reads it takes the pointer and is drawn again as it

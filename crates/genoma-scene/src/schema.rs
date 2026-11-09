@@ -130,6 +130,7 @@ pub enum Prop {
     CombineSoft,
     Navigate,
     FocusColor,
+    BlurRadius,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +288,7 @@ pub const PROPS: &[PropInfo] = &[
     p("even_odd", Prop::EvenOdd, Ty::Bool, false, "A path filled by the even-odd rule: where it crosses itself, a hole."),
     p("combine_with", Prop::CombineWith, Ty::Text, false, "A capsule drawn as one shape with the capsule of this id, as `combine` says: metaballs, a bite out of a shape, a lens. Name one earlier in the tree, or the shape follows it a frame late."),
     p("combine", Prop::Combine, Ty::Choice(&["union", "subtract", "intersect"]), false, "How a capsule with `combine_with` meets the other: joined to it (both drawn, in this one's fill), with the other cut out, or only where both are. The other lends only its outline; give it no fill of its own unless it should be drawn too."),
+    p("blur_radius", Prop::BlurRadius, Ty::Number, true, "The node and everything in it drawn blurred, after depth has turned it: the Gaussian's spread, logical units, as CSS's blur(). 0 (the default) costs nothing; a radius at rest is blurred once and kept, a moving one each frame."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
     p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),

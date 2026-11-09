@@ -262,6 +262,8 @@ pub struct Node {
     combine_with: Option<String>,
     combine: u8,
     combine_soft: f32,
+    /// Drawn blurred, this spread, logical units; 0 is not blurred.
+    blur_radius: f32,
     /// The keyboard walks inside it, the focused node ringed in this.
     navigate: bool,
     focus_color: [f32; 4],
@@ -383,6 +385,7 @@ impl Node {
             combine_with: None,
             combine: 0,
             combine_soft: 0.0,
+            blur_radius: 0.0,
             navigate: false,
             focus_color: [0.478, 0.635, 0.969, 1.0],
         }
@@ -1356,6 +1359,7 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::ToY => Value::Number(n.path[5]),
             Prop::Bud => Value::Number(n.bud),
             Prop::CombineSoft => Value::Number(n.combine_soft),
+            Prop::BlurRadius => Value::Number(n.blur_radius),
             Prop::Halo => Value::Number(n.halo),
             Prop::RotateX => Value::Number(n.turn[0]),
             Prop::RotateY => Value::Number(n.turn[1]),
@@ -1666,6 +1670,7 @@ impl Scene {
             }
             Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
             Prop::Navigate => n.navigate = take!(flag),
+            Prop::BlurRadius => n.blur_radius = take!(number).max(0.0),
             Prop::FocusColor => n.focus_color = take!(colour),
             Prop::Hollow => n.hollow = take!(flag),
             Prop::Blur => n.blur = take!(flag),
@@ -2596,11 +2601,64 @@ fn collect(
         std::mem::swap(out.list, &mut out.upper);
         out.raised = true;
     }
-    collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+    // Blurred: the node and its subtree drawn into a list of their own,
+    // shown as the image the renderer makes of it.
+    let radius = tree.get_node_context(node).filter(|n| n.present).map_or(0.0, |n| n.blur_radius);
+    if radius > 0.0 {
+        let mut own = DrawList::default();
+        std::mem::swap(out.list, &mut own);
+        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        std::mem::swap(out.list, &mut own);
+        blurred(own, radius * scale, out);
+    } else {
+        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+    }
     if raise {
         std::mem::swap(out.list, &mut out.upper);
         out.raised = false;
     }
+}
+
+/// `own`, a subtree's list, as a blurred group: its paint's bounds grown by
+/// three spreads (where the Gaussian has faded out), within the surface,
+/// and keyed by what it draws and how blurred, so one at rest is kept.
+fn blurred(mut own: DrawList, sigma: f32, out: &mut Out) {
+    let Some([x0, y0, x1, y1]) = own.paint_bounds() else { return };
+    let margin = (sigma * 3.0).ceil();
+    let bounds = [
+        (x0 - margin).max(0.0).floor(),
+        (y0 - margin).max(0.0).floor(),
+        (x1 + margin).min(out.viewport[0]).ceil(),
+        (y1 + margin).min(out.viewport[1]).ceil(),
+    ];
+    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+        return;
+    }
+    // Inner blurred groups are drawn before this one, which shows them.
+    let inner = std::mem::take(&mut own.groups);
+    out.list.groups.extend(inner);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (own.fingerprint(), sigma.to_bits(), bounds.map(f32::to_bits)).hash(&mut h);
+        h.finish() | (1 << 63)
+    };
+    let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
+    out.list.groups.push(genoma_render::Group { key, list: own, bounds, sigma });
+    out.list.push_image(genoma_render::Image {
+        key,
+        pixels: Arc::new(Vec::new()),
+        width: size[0] as u32,
+        height: size[1] as u32,
+        origin: [bounds[0], bounds[1]],
+        size,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        radius: 0.0,
+        alpha: 1.0,
+        clip: out.clip,
+        fade: out.fade_of(),
+        transform: Rect::IDENTITY,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3448,6 +3506,38 @@ mod tests {
         assert_eq!(scene.draw_list(1.0).rects.len(), before + 1);
         scene.set_highlight(Some(999_999));
         assert_eq!(scene.draw_list(1.0).rects.len(), before);
+    }
+
+    #[test]
+    fn a_blurred_subtree_is_a_group_kept_by_what_it_draws() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, card);
+        for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 20.0)] {
+            scene.set(card, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(card, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let plain = scene.draw_list(2.0);
+        assert!(plain.groups.is_empty() && plain.rects.len() == 1, "no blur, no group: nothing more than before");
+        scene.set(card, Prop::BlurRadius, Value::Number(4.0), None).unwrap();
+        let first = scene.draw_list(2.0);
+        assert_eq!(first.groups.len(), 1);
+        assert!(first.rects.is_empty(), "the card is drawn in its group, not here");
+        let g = &first.groups[0];
+        assert_eq!((g.sigma, g.list.rects.len()), (8.0, 1));
+        // Its paint (a pixel past the shape, for the antialiased edge) grown
+        // by three spreads, within the surface.
+        assert_eq!(g.bounds, [0.0, 0.0, 81.0 + 24.0, 41.0 + 24.0]);
+        assert_eq!(first.images.len(), 1);
+        assert_eq!(first.images[0].key, g.key);
+        // At rest, the same key: the renderer keeps what it blurred.
+        let again = scene.draw_list(2.0);
+        assert_eq!(again.groups[0].key, g.key);
+        scene.set(card, Prop::BlurRadius, Value::Number(5.0), None).unwrap();
+        assert_ne!(scene.draw_list(2.0).groups[0].key, g.key, "another radius, another picture");
     }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {

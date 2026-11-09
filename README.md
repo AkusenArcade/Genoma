@@ -106,6 +106,14 @@ return g.surface {
   `grain`), and `require("@genoma/kit/effects")` gives them as nodes with
   named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
+- **Blur:** `blur_radius = 6` draws a node and everything in it blurred,
+  after depth has turned it, the spread in logical units as CSS's
+  `blur()`. At 0, the default, nothing is done. The subtree is drawn into
+  a texture of its own and blurred there (halved first for a wide
+  spread); a radius and a content at rest are blurred once and kept, a
+  moving radius is blurred each frame. It animates with `transition`. See
+  `examples/blur`. (`blur = true` is the compositor's blur behind a
+  shape, another thing.)
 - **Shapes drawn as one:** a capsule with `combine_with = "id"` is drawn
   as one shape with the capsule of that id, by their distance fields:
   `combine = "union"` (a neck grows between them as `combine_soft`

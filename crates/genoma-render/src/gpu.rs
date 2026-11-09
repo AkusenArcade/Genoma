@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
-use crate::{Damage, DrawList, Error, Fonts, Layer, SurfaceId, image, particles, raw_handles, rect, shader};
+use crate::{Damage, DrawList, Error, Fonts, Layer, SurfaceId, blur, image, particles, raw_handles, rect, shader};
 
 pub(crate) struct Gpu {
     instance: wgpu::Instance,
@@ -15,6 +15,7 @@ pub(crate) struct Gpu {
     particles: Option<particles::Pipeline>,
     shaders: Option<shader::Pipeline>,
     clear: Option<Clear>,
+    blur: Option<blur::Pipeline>,
     text: Option<Text>,
     targets: HashMap<SurfaceId, Target>,
     /// The last frame's wait for its buffer, and each surface's minute of
@@ -114,6 +115,7 @@ impl Gpu {
             particles: None,
             shaders: None,
             clear: None,
+            blur: None,
             text: None,
             targets: HashMap::new(),
             waited: std::time::Duration::ZERO,
@@ -214,6 +216,13 @@ impl Gpu {
             if t.canvas.is_some() && t.drawn.is_some_and(|d| now.duration_since(d) > CANVAS_IDLE) {
                 t.canvas = None;
             }
+        }
+        // Blurred subtrees first, each drawn into a texture of its own and
+        // blurred, unless one of the same key is kept: at rest, none is.
+        if !list.groups.is_empty()
+            && let Some(format) = self.targets.get(&id).map(|t| t.format)
+        {
+            self.draw_groups(id, format, &list);
         }
         let Some(target) = self.targets.get_mut(&id) else {
             log::warn!("draw for unknown surface {id}");
@@ -342,6 +351,36 @@ impl Gpu {
         let target = self.targets.get_mut(&id).expect("target");
         target.viewport = Some(viewport);
         target.last = Some(list);
+    }
+
+    /// Each blurred subtree of `list` not already kept: drawn into a texture
+    /// its bounds' size, blurred, and kept by its key for the image that
+    /// shows it. Each is submitted on its own: the pipelines hold one
+    /// frame's data, and the surface's frame comes after.
+    fn draw_groups(&mut self, id: SurfaceId, format: wgpu::TextureFormat, list: &DrawList) {
+        for group in &list.groups {
+            if self.images.as_ref().is_some_and(|i| i.has(group.key)) {
+                continue;
+            }
+            let [x0, y0, x1, y1] = group.bounds;
+            let size = [((x1 - x0).max(1.0)) as u32, ((y1 - y0).max(1.0)) as u32];
+            let sheet = blur::Sheet::new(&self.device, format, size, "blurred subtree");
+            let moved = group.list_for_texture(x0, y0);
+            let cache = &self.text.get_or_insert_with(|| Text::new(&self.device, &self.queue, format)).cache;
+            let mut viewport = glyphon::Viewport::new(&self.device, cache);
+            viewport.update(&self.queue, glyphon::Resolution { width: size[0], height: size[1] });
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            self.render(&mut encoder, &sheet.view, format, id, size, &moved, &mut viewport, None);
+            self.queue.submit([encoder.finish()]);
+            let blur = self.blur.get_or_insert_with(|| blur::Pipeline::new(&self.device, format));
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            let blurred = blur.blur(&self.device, &mut encoder, sheet, group.sigma);
+            self.queue.submit([encoder.finish()]);
+            if let Some(images) = &mut self.images {
+                images.adopt(&self.device, group.key, &blurred.view);
+            }
+            log::debug!("surface {id}: blurred a subtree, {}×{} px over {:.1} px", size[0], size[1], group.sigma);
+        }
     }
 
     /// Draws `list` into `view`: the whole of it cleared first, or only
