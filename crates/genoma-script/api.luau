@@ -576,3 +576,44 @@ export type Notifications = {
     -- The action; then dismissed unless the notification is resident.
     invoke: (self: Notifications, id: number, key: string) -> (),
 }
+
+export type AppAction = { id: string, name: string, icon: string }
+
+export type AppEntry = {
+    -- The desktop file's name without .desktop: "org.gnome.Nautilus".
+    id: string,
+    -- In the user's language where the file has it.
+    name: string,
+    generic_name: string,
+    comment: string,
+    icon: string,
+    exec: string,
+    terminal: boolean,
+    startup_class: string,
+    keywords: { string },
+    categories: { string },
+    file: string,
+    -- What it offers beside starting: a new window, a private one.
+    actions: { AppAction },
+}
+
+-- @genoma/apps: the applications the menu offers, found, ranked by use, started.
+export type Apps = {
+    -- Every application, by name; read the first time it is asked for.
+    read list: { AppEntry },
+    -- The best matches first: the name, its words, what else describes it,
+    -- letters in order; the most used rise among equals. With nothing
+    -- typed, the most used first. A limit of 0 is all of them.
+    search: (self: Apps, query: string, limit: number?) -> { AppEntry },
+    -- The application a window's app_id or class, or a process's name,
+    -- belongs to, or nil.
+    find: (self: Apps, name: string) -> AppEntry?,
+    -- Started out of the shell's session (an action by its id, files for
+    -- its %f and %u), in a terminal when it asks for one, and counted.
+    launch: (self: Apps, id: string, action: string?, files: { string }?) -> (),
+    -- How often and when last it was started from here (seconds since the
+    -- epoch), kept in $XDG_STATE_HOME/genoma/apps.json.
+    usage: (self: Apps, id: string) -> { count: number, last: number },
+    -- Read again, after an installation.
+    refresh: (self: Apps) -> (),
+}

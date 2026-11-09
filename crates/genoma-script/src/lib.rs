@@ -27,6 +27,7 @@ use genoma_core::{
 };
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
+    apps::{App as AppEntry, Apps},
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
     clipboard::{Clipboard, Request as ClipboardRequest, TEXT_TYPES},
@@ -328,6 +329,8 @@ pub struct Services {
     pub polkit: Rc<Polkit>,
     pub notifications: Rc<Notifications>,
     pub clipboard: Rc<Clipboard>,
+    /// The applications the menu offers.
+    pub apps: Rc<Apps>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -925,6 +928,83 @@ impl UserData for ClipboardRef {
             }
             this.0.ask(ClipboardRequest::Save { mime, path: crate::io::expand(&path) });
             Ok(true)
+        });
+    }
+}
+
+struct AppsRef(Rc<Apps>);
+
+/// One application as Luau sees it.
+fn app_table(lua: &Lua, a: AppEntry) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", a.id)?;
+    t.set("name", a.name)?;
+    t.set("generic_name", a.generic_name)?;
+    t.set("comment", a.comment)?;
+    t.set("icon", a.icon)?;
+    t.set("exec", a.exec)?;
+    t.set("terminal", a.terminal)?;
+    t.set("startup_class", a.startup_class)?;
+    t.set("keywords", a.keywords)?;
+    t.set("categories", a.categories)?;
+    t.set("file", a.file.display().to_string())?;
+    let actions = lua.create_table()?;
+    for (i, x) in a.actions.into_iter().enumerate() {
+        let at = lua.create_table()?;
+        at.set("id", x.id)?;
+        at.set("name", x.name)?;
+        at.set("icon", x.icon)?;
+        actions.set(i + 1, at)?;
+    }
+    t.set("actions", actions)?;
+    Ok(t)
+}
+
+impl UserData for AppsRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // apps.list → { app, … } by name: what the menu offers.
+        fields.add_field_method_get("list", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, a) in this.0.all().into_iter().enumerate() {
+                list.set(i + 1, app_table(lua, a)?)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // apps:search("fire", 20) → the best matches first; with nothing
+        // typed, the most used first. A binding that calls it follows the list.
+        methods.add_method("search", |lua, this, (query, limit): (String, Option<usize>)| {
+            let list = lua.create_table()?;
+            for (i, a) in this.0.search(&query, limit.unwrap_or(0)).into_iter().enumerate() {
+                list.set(i + 1, app_table(lua, a)?)?;
+            }
+            Ok(list)
+        });
+        // apps:find("firefox") → the application a window's app_id or class,
+        // or a process's name, belongs to, or nil.
+        methods.add_method("find", |lua, this, name: String| match this.0.find(&name) {
+            Some(a) => Ok(LuaValue::Table(app_table(lua, a)?)),
+            None => Ok(LuaValue::Nil),
+        });
+        // apps:launch(id, action, { files… }): started out of the shell's
+        // session, and counted for the ranking.
+        methods.add_method("launch", |_, this, (id, action, files): (String, Option<String>, Option<Vec<String>>)| {
+            this.0.launch(&id, action.as_deref(), &files.unwrap_or_default()).map_err(err)
+        });
+        // apps:usage(id) → { count, last }: how often and when last started.
+        methods.add_method("usage", |lua, this, id: String| {
+            let u = this.0.usage(&id);
+            let t = lua.create_table()?;
+            t.set("count", u.count)?;
+            t.set("last", u.last)?;
+            Ok(t)
+        });
+        // apps:refresh(): read again, after an installation.
+        methods.add_method("refresh", |_, this, ()| {
+            this.0.refresh();
+            Ok(())
         });
     }
 }
@@ -2085,7 +2165,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2103,6 +2183,7 @@ impl Script {
                         "polkit" => "polkit",
                         "notifications" => "notifications",
                         "clipboard" => "clipboard",
+                        "apps" => "apps",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2130,6 +2211,7 @@ impl Script {
                         "polkit" => lua.create_userdata(PolkitRef(services.polkit.clone()))?,
                         "notifications" => lua.create_userdata(NotificationsRef(services.notifications.clone()))?,
                         "clipboard" => lua.create_userdata(ClipboardRef(services.clipboard.clone()))?,
+                        "apps" => lua.create_userdata(AppsRef(services.apps.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -2193,6 +2275,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("polkit", "Polkit"),
     ("notifications", "Notifications"),
     ("clipboard", "Clipboard"),
+    ("apps", "Apps"),
 ];
 
 /// The kit's modules by name, as built in.

@@ -24,6 +24,13 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `@genoma/apps`: the applications the menu offers, read in the user's
+  language with their actions; `apps:search` ranks by name, words,
+  description and letters in order, the most used rising among equals
+  (kept in `$XDG_STATE_HOME/genoma/apps.json`); `apps:launch` expands
+  `%f`/`%u`/`%i`/`%c`/`%k`, opens a terminal for those that want one and
+  starts them out of the shell's session; `apps:find` names the
+  application of a window's class or a process. See `examples/launcher`.
 - Keyboard navigation: `navigate = true` on a node lets Tab, Shift+Tab
   and the arrows walk its buttons and sliders, a ring (`focus_color`)
   round the focused one, Return and space press it; a focused slider takes

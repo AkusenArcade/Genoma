@@ -110,7 +110,7 @@ fn services() -> (Services, Streams) {
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
-    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default() }, streams)
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default() }, streams)
 }
 
 /// The event streams opened with the services, read once required.
@@ -304,6 +304,8 @@ impl Sources {
                     };
                     read_lines(handle, "the compositor", stream, move |line| c.line(line));
                 }
+                // Read when asked, nothing to drive.
+                "apps" => {}
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.streams.niri.take()) else {
                         continue;
@@ -533,6 +535,11 @@ fn probe() {
     Effect::new(move || {
         println!("vitals  cpu {:.2}  ram {:.2}  gpu {:?}", s.vitals.cpu.get(), s.vitals.ram.get(), s.vitals.gpu.get())
     });
+    {
+        let apps = services.apps.clone();
+        let found = apps.search("", 3);
+        println!("apps    {} applications; most used: {:?}", apps.all().len(), found.iter().map(|a| a.name.as_str()).collect::<Vec<_>>());
+    }
     if let Some(c) = services.compositor.clone() {
         let k = c.clone();
         Effect::new(move || println!("{:<8}title {:?}", k.name(), k.title.get()));

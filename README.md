@@ -205,6 +205,7 @@ first use, and every field is a signal.
 | `niri` | the same from niri alone, with niri's numeric ids (niri IPC); kept for shells written against it |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |
 | `clipboard` | every copy's types and text, set, save to a file, clear (`ext-data-control`) |
+| `apps` | the applications the menu offers: search ranked by use, launch with actions and files, find by window class (desktop entries) |
 
 Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 `g.timer`, in Luau. `g.pam` and `g.greetd` serve lock screens and greeters.

@@ -358,6 +358,7 @@ mod tests {
             ("PolkitRef", "Polkit"),
             ("NotificationsRef", "Notifications"),
             ("ClipboardRef", "Clipboard"),
+            ("AppsRef", "Apps"),
             ("Process", "Process"),
             ("Watched", "WatchedFile"),
             ("Folder", "Folder"),
