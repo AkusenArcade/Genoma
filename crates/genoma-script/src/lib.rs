@@ -29,6 +29,7 @@ use genoma_services::{
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
     clipboard::{Clipboard, Request as ClipboardRequest, TEXT_TYPES},
+    compositor::Compositor,
     clock::Clock,
     idle::Idle,
     lock::Lock,
@@ -310,6 +311,8 @@ impl UserData for State {
 pub struct Services {
     pub clock: Rc<Clock>,
     pub niri: Option<Rc<Niri>>,
+    /// Whichever compositor runs (niri, Hyprland, Umbriel), as one model.
+    pub compositor: Option<Rc<Compositor>>,
     pub vitals: Rc<Vitals>,
     pub power: Rc<Power>,
     pub network: Rc<Network>,
@@ -377,6 +380,91 @@ impl UserData for NiriRef {
             t.set("app_id", w.app_id)?;
             Ok(LuaValue::Table(t))
         });
+    }
+}
+
+struct CompositorRef(Rc<Compositor>);
+
+/// An id handed back by the interface: a string, or a number it read as one.
+fn id_arg(v: LuaValue) -> mlua::Result<String> {
+    match v {
+        LuaValue::String(s) => Ok(s.to_string_lossy()),
+        LuaValue::Integer(n) => Ok(n.to_string()),
+        LuaValue::Number(n) if n.fract() == 0.0 => Ok((n as i64).to_string()),
+        _ => Err(err("an id: a string or a whole number")),
+    }
+}
+
+fn window_table(lua: &Lua, w: genoma_services::compositor::Window) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", w.id)?;
+    t.set("title", w.title)?;
+    t.set("app_id", w.app_id)?;
+    t.set("workspace", w.workspace)?;
+    Ok(t)
+}
+
+impl UserData for CompositorRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // compositor.name → "niri", "hyprland" or "umbriel".
+        fields.add_field_method_get("name", |_, this| Ok(this.0.name()));
+        // compositor.title → the focused window's title, or nil.
+        fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
+        // compositor.focused_output → "DP-1": where a shortcut means.
+        fields.add_field_method_get("focused_output", |_, this| Ok(this.0.focused_output()));
+        // compositor.focused → { id, title, app_id, workspace } or nil.
+        fields.add_field_method_get("focused", |lua, this| match this.0.focused_window() {
+            Some(w) => Ok(LuaValue::Table(window_table(lua, w)?)),
+            None => Ok(LuaValue::Nil),
+        });
+        // compositor.windows → { { id, title, app_id, workspace }, … }
+        fields.add_field_method_get("windows", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, w) in this.0.windows.get().into_iter().enumerate() {
+                list.set(i + 1, window_table(lua, w)?)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // compositor:workspaces("DP-1") → { { id, idx, name, output, active,
+        // focused, vacant, urgent }, … } in order; every output's without one.
+        methods.add_method("workspaces", |lua, this, output: Option<String>| {
+            let list = lua.create_table()?;
+            for (i, w) in this.0.on_output(output.as_deref()).into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", w.id)?;
+                t.set("idx", w.idx)?;
+                t.set("name", w.name)?;
+                t.set("output", w.output)?;
+                t.set("active", w.active)?;
+                t.set("focused", w.focused)?;
+                t.set("vacant", w.vacant)?;
+                t.set("urgent", w.urgent)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // compositor:active("DP-1") → { id, idx, name } or nil
+        methods.add_method("active", |lua, this, output: String| {
+            let Some(w) = this.0.active(&output) else { return Ok(LuaValue::Nil) };
+            let t = lua.create_table()?;
+            t.set("id", w.id)?;
+            t.set("idx", w.idx)?;
+            t.set("name", w.name)?;
+            Ok(LuaValue::Table(t))
+        });
+        // compositor:focused_on("DP-1") → the focused window if it is there.
+        methods.add_method("focused_on", |lua, this, output: String| match this.0.focused_on(&output) {
+            Some(w) => Ok(LuaValue::Table(window_table(lua, w)?)),
+            None => Ok(LuaValue::Nil),
+        });
+        // compositor:focus_workspace(id), :focus_window(id), :close_window(id):
+        // each on a connection of its own.
+        methods.add_method("focus_workspace", |_, this, id: LuaValue| this.0.focus_workspace(&id_arg(id)?).map_err(err));
+        methods.add_method("focus_window", |_, this, id: LuaValue| this.0.focus_window(&id_arg(id)?).map_err(err));
+        methods.add_method("close_window", |_, this, id: LuaValue| this.0.close_window(&id_arg(id)?).map_err(err));
     }
 }
 
@@ -2003,11 +2091,12 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
                         "niri" => "niri",
+                        "compositor" => "compositor",
                         "power" => "power",
                         "network" => "network",
                         "media" => "media",
@@ -2030,6 +2119,10 @@ impl Script {
                         "niri" => match &services.niri {
                             Some(niri) => lua.create_userdata(NiriRef(niri.clone()))?,
                             None => return Err(err("niri's socket is not available")),
+                        },
+                        "compositor" => match &services.compositor {
+                            Some(c) => lua.create_userdata(CompositorRef(c.clone()))?,
+                            None => return Err(err("no compositor IPC found (niri, Hyprland, Umbriel)")),
                         },
                         "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
                         "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,

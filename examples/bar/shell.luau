@@ -12,7 +12,8 @@
 -- when one of them changes.
 local g = require("@genoma")
 local clock = require("@genoma/clock")
-local niri = require("@genoma/niri")
+-- niri, Hyprland or Umbriel, whichever runs: the same calls on each.
+local compositor = require("@genoma/compositor")
 local vitals = require("@genoma/vitals")
 local power = require("@genoma/power")
 local audio = require("@genoma/audio")
@@ -25,12 +26,12 @@ g.timing {
 }
 
 local HEIGHT = 32
-local OUTPUT = g.env("GENOMA_OUTPUT") or niri.focused_output
+local OUTPUT = g.env("GENOMA_OUTPUT") or compositor.focused_output
 
 -- ---- Workspaces ----------------------------------------------------------
 
 local function workspaces()
-    return niri:workspaces(OUTPUT)
+    return compositor:workspaces(OUTPUT)
 end
 
 local function step(delta: number)
@@ -38,7 +39,7 @@ local function step(delta: number)
     for i, w in list do
         if w.active then
             local next = list[math.clamp(i + delta, 1, #list)]
-            if next then niri:focus_workspace(next.id) end
+            if next then compositor:focus_workspace(next.id) end
             return
         end
     end
@@ -55,7 +56,7 @@ local function button(ws: () -> any, _index: () -> number)
         padding_x = 8,
         radius = 6,
         fill = function() return if ws().active then theme.accent else theme.none end,
-        on_click = function() niri:focus_workspace(ws().id) end,
+        on_click = function() compositor:focus_workspace(ws().id) end,
         g.text {
             size = 13,
             weight = 600,
@@ -90,7 +91,7 @@ local middle = g.text {
     ellipsize = "end",
     max_width = 640,
     text = function()
-        local w = niri:focused_on(OUTPUT)
+        local w = if OUTPUT then compositor:focused_on(OUTPUT) else compositor.focused
         return if w then w.title or "" else ""
     end,
 }

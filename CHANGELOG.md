@@ -24,7 +24,12 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
-- `examples/bar`: a classic top bar written against Genoma alone.
+- `@genoma/compositor`: workspaces, windows and the focused window under
+  niri, Hyprland or Umbriel, one model for all three, with
+  `focus_workspace`, `focus_window` and `close_window`. Requiring it fails
+  where none of them runs. `@genoma/niri` is unchanged.
+- `examples/bar`: a classic top bar written against Genoma alone. It runs
+  under niri, Hyprland and Umbriel.
 - `g.field`, a line of text to type into: caret and selection by key and
   by pointer (double and triple click), word moves (Ctrl+arrows,
   Ctrl+BackSpace), undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) with typing

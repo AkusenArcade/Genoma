@@ -71,6 +71,12 @@ impl Niri {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "NIRI_SOCKET is not set"))?;
         let mut stream = UnixStream::connect(path)?;
         stream.write_all(b"\"EventStream\"\n")?;
+        Ok((Niri::model(), stream))
+    }
+
+    /// The state alone, empty, filled by [`Niri::line`]: what the
+    /// compositor service reads niri's stream into.
+    pub fn model() -> Niri {
         let workspaces = Signal::new(Vec::new());
         let windows: Signal<Vec<Window>> = Signal::new(Vec::new());
         let focused: Signal<Option<u64>> = Signal::new(None);
@@ -78,7 +84,7 @@ impl Niri {
             let id = focused.get()?;
             windows.get().into_iter().find(|w| w.id == id)?.title
         });
-        Ok((Niri { workspaces, windows, focused, title }, stream))
+        Niri { workspaces, windows, focused, title }
     }
 
     /// The output the keyboard is pointed at: the focused workspace's.

@@ -33,7 +33,7 @@ use std::{
 use genoma_core::reactive::Effect;
 use genoma_render::{Renderer, cosmic_text::FontSystem};
 use genoma_script::{Script, Services};
-use genoma_services::{bus::Bus, clock::Clock, niri::Niri, vitals::{self, Vitals}};
+use genoma_services::{bus::Bus, clock::Clock, compositor::Compositor, niri::Niri, vitals::{self, Vitals}};
 use notify::Watcher;
 use smithay_client_toolkit::reexports::{
     calloop::{
@@ -83,22 +83,69 @@ fn fail(message: &str) -> ! {
 }
 
 /// The services, before anything depends on them.
-fn services() -> (Services, Option<UnixStream>) {
-    let (niri, stream) = match Niri::connect() {
-        Ok((niri, stream)) => (Some(Rc::new(niri)), Some(stream)),
-        Err(e) => {
+fn services() -> (Services, Streams) {
+    // niri's own service only under niri; the compositor's under any.
+    let (niri, stream) = match std::env::var_os("NIRI_SOCKET").map(|_| Niri::connect()) {
+        Some(Ok((niri, stream))) => (Some(Rc::new(niri)), Some(stream)),
+        Some(Err(e)) => {
             log::warn!("niri: {e}");
             (None, None)
         }
+        None => (None, None),
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default() }, stream)
+    let (compositor, compositor_stream) = match Compositor::connect() {
+        Ok((c, stream)) => {
+            log::info!("compositor: {}", c.name());
+            (Some(Rc::new(c)), Some(stream))
+        }
+        Err(e) => {
+            log::warn!("compositor: {e}");
+            (None, None)
+        }
+    };
+    let streams = Streams { niri: stream, compositor: compositor_stream };
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default() }, streams)
+}
+
+/// The event streams opened with the services, read once required.
+struct Streams {
+    niri: Option<UnixStream>,
+    compositor: Option<UnixStream>,
+}
+
+/// Reads a newline-delimited event stream on the loop, handing each line on.
+fn read_lines<D: 'static>(handle: &LoopHandle<'static, D>, name: &'static str, stream: UnixStream, mut each: impl FnMut(&str) + 'static) {
+    stream.set_nonblocking(true).expect("nonblocking");
+    let mut pending = Vec::new();
+    handle
+        .insert_source(Generic::new(stream, Interest::READ, Mode::Level), move |_, stream, _| {
+            let mut chunk = [0u8; 16384];
+            loop {
+                // Safety: only reading from the stream calloop holds.
+                match unsafe { stream.get_mut() }.read(&mut chunk) {
+                    Ok(0) => {
+                        log::warn!("{name} closed the event stream");
+                        return Ok(PostAction::Remove);
+                    }
+                    Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                each(&String::from_utf8_lossy(&line));
+            }
+            Ok(PostAction::Continue)
+        })
+        .expect("event stream source");
 }
 
 /// Starts the source of each service an interface asked for and that is not
 /// running yet: a reload that requires a new service gets it.
 struct Sources {
     services: Services,
-    niri_stream: Option<UnixStream>,
+    streams: Streams,
     /// The D-Bus thread, started with the first service that needs it.
     bus: Option<Bus>,
     started: Vec<&'static str>,
@@ -107,7 +154,7 @@ struct Sources {
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
         for service in
-            ["clock", "vitals", "niri", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications"]
+            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications"]
         {
             if !wants(service) || self.started.contains(&service) {
                 continue;
@@ -245,34 +292,17 @@ impl Sources {
                         .expect("notifications channel");
                     self.services.notifications.start(&bus, post);
                 }
-                _ => {
-                    let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.niri_stream.take()) else {
+                "compositor" => {
+                    let (Some(c), Some(stream)) = (self.services.compositor.clone(), self.streams.compositor.take()) else {
                         continue;
                     };
-                    stream.set_nonblocking(true).expect("nonblocking");
-                    let mut pending = Vec::new();
-                    handle
-                        .insert_source(Generic::new(stream, Interest::READ, Mode::Level), move |_, stream, _| {
-                            let mut chunk = [0u8; 16384];
-                            loop {
-                                // Safety: only reading from the stream calloop holds.
-                                match unsafe { stream.get_mut() }.read(&mut chunk) {
-                                    Ok(0) => {
-                                        log::warn!("niri closed the event stream");
-                                        return Ok(PostAction::Remove);
-                                    }
-                                    Ok(n) => pending.extend_from_slice(&chunk[..n]),
-                                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
-                                let line: Vec<u8> = pending.drain(..=end).collect();
-                                niri.line(&String::from_utf8_lossy(&line));
-                            }
-                            Ok(PostAction::Continue)
-                        })
-                        .expect("niri source");
+                    read_lines(handle, "the compositor", stream, move |line| c.line(line));
+                }
+                _ => {
+                    let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.streams.niri.take()) else {
+                        continue;
+                    };
+                    read_lines(handle, "niri", stream, move |line| niri.line(line));
                 }
             }
         }
@@ -497,6 +527,15 @@ fn probe() {
     Effect::new(move || {
         println!("vitals  cpu {:.2}  ram {:.2}  gpu {:?}", s.vitals.cpu.get(), s.vitals.ram.get(), s.vitals.gpu.get())
     });
+    if let Some(c) = services.compositor.clone() {
+        let k = c.clone();
+        Effect::new(move || println!("{:<8}title {:?}", k.name(), k.title.get()));
+        Effect::new(move || {
+            for w in c.workspaces.get().iter().filter(|w| w.active) {
+                println!("{:<8}{:?} shows workspace {} {:?}{}", c.name(), w.output, w.idx, w.name, if w.focused { " (focused)" } else { "" });
+            }
+        });
+    }
     if let Some(niri) = services.niri.clone() {
         let n = niri.clone();
         Effect::new(move || println!("niri    title {:?}", n.title.get()));
@@ -614,7 +653,7 @@ fn probe() {
             );
         }
     });
-    let mut sources = Sources { services, niri_stream: stream, bus: None, started: Vec::new() };
+    let mut sources = Sources { services, streams: stream, bus: None, started: Vec::new() };
     sources.start(|_| true, &handle);
     event_loop.run(None, &mut (), |_| {}).expect("event loop");
 }
@@ -651,7 +690,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     let handle = event_loop.handle();
     app.start(renderer, fonts.clone(), handle.clone());
 
-    let (services, niri_stream) = services();
+    let (services, streams) = services();
     let host: genoma_script::io::HostRef = Rc::new(LoopHost(handle.clone(), fonts.clone()));
     let script = Rc::new(RefCell::new(Script::new(&dir, services.clone(), host)));
     if let Some(entry) = &entry {
@@ -665,7 +704,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     let services_idle = services.idle.clone();
     let services_lock = services.lock.clone();
     let services_clipboard = services.clipboard.clone();
-    let sources = Rc::new(RefCell::new(Sources { services, niri_stream, bus: None, started: Vec::new() }));
+    let sources = Rc::new(RefCell::new(Sources { services, streams, bus: None, started: Vec::new() }));
     sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
     // On the Wayland connection, so started here rather than among the
     // sources.

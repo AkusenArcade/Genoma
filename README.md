@@ -32,9 +32,11 @@ Bioma's needs and will change between minor versions. Changes are listed in
   ```
 
 It runs on Wayland compositors with `wlr-layer-shell`. Blur behind surfaces
-needs `ext-background-effect-v1`, as niri 26.04 has it. The workspace and
-window services read niri's IPC. On other compositors the rest of the toolkit
-works, and those services stay empty.
+needs `ext-background-effect-v1`, as niri 26.04 has it. Workspaces and
+windows come from the compositor's own IPC: `@genoma/compositor` reads niri,
+Hyprland (0.57, configured in Lua or hyprlang) and Umbriel, whichever it
+finds running. On other compositors the rest of the toolkit works, and
+requiring that service fails (`pcall` it to run anywhere).
 
 ## A first shell
 
@@ -129,7 +131,8 @@ first use, and every field is a signal.
 | `tray` | StatusNotifierItem with DBusMenu |
 | `polkit` | a polkit authentication agent |
 | `idle`, `lock` | idle notification, session lock |
-| `niri` | workspaces, focused window, outputs (niri IPC) |
+| `compositor` | workspaces, windows, the focused one, and switching between them: niri, Hyprland or Umbriel |
+| `niri` | the same from niri alone, with niri's numeric ids (niri IPC); kept for shells written against it |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |
 | `clipboard` | every copy's types and text, set, save to a file, clear (`ext-data-control`) |
 
