@@ -91,7 +91,7 @@ fn services() -> (Services, Option<UnixStream>) {
             (None, None)
         }
     };
-    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default() }, stream)
+    (Services { clock: Rc::new(Clock::new()), niri, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default() }, stream)
 }
 
 /// Starts the source of each service an interface asked for and that is not
@@ -664,6 +664,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     let services_toplevels = services.toplevels.clone();
     let services_idle = services.idle.clone();
     let services_lock = services.lock.clone();
+    let services_clipboard = services.clipboard.clone();
     let sources = Rc::new(RefCell::new(Sources { services, niri_stream, bus: None, started: Vec::new() }));
     sources.borrow_mut().start(|s| script.borrow().wants(s), &handle);
     // On the Wayland connection, so started here rather than among the
@@ -676,6 +677,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
     }
     if script.borrow().wants("lock") {
         app.start_lock(services_lock.clone());
+    }
+    if script.borrow().wants("clipboard") {
+        app.start_clipboard(services_clipboard.clone());
     }
 
     // Hot reload: a save in the directory, settled for a moment because an
@@ -721,6 +725,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
                             if script.borrow().wants("lock") {
                                 app.start_lock(sources.borrow().services.lock.clone());
                             }
+                            if script.borrow().wants("clipboard") {
+                                app.start_clipboard(sources.borrow().services.clipboard.clone());
+                            }
                         }
                         Err(e) => log::error!("reload failed, the last interface stays: {e}"),
                     }
@@ -738,6 +745,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
             // Before the outputs are looked at: a lock asked for or let go
             // makes or takes down the lock surfaces.
             app.sync_lock();
+            app.sync_clipboard();
             if app.take_outputs_changed() {
                 match load(&script, app) {
                     Ok(()) => log::info!("outputs or areas changed: surfaces fitted"),

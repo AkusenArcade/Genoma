@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod bluetooth;
 pub mod bus;
+pub mod clipboard;
 pub mod clock;
 pub mod icons;
 pub mod idle;

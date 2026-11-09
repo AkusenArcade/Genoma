@@ -115,6 +115,7 @@ first use, and every field is a signal.
 | `idle`, `lock` | idle notification, session lock |
 | `niri` | workspaces, focused window, outputs (niri IPC) |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |
+| `clipboard` | every copy's types and text, set, save to a file, clear (`ext-data-control`) |
 
 Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 `g.timer`, in Luau. `g.pam` and `g.greetd` serve lock screens and greeters.

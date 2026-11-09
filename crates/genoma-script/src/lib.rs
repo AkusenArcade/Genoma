@@ -28,6 +28,7 @@ use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
+    clipboard::{Clipboard, Request as ClipboardRequest, TEXT_TYPES},
     clock::Clock,
     idle::Idle,
     lock::Lock,
@@ -288,6 +289,7 @@ pub struct Services {
     pub tray: Rc<Tray>,
     pub polkit: Rc<Polkit>,
     pub notifications: Rc<Notifications>,
+    pub clipboard: Rc<Clipboard>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -745,6 +747,61 @@ impl UserData for LockRef {
         methods.add_method("unlock", |_, this, ()| {
             this.0.wanted.set(false);
             Ok(())
+        });
+    }
+}
+
+struct ClipboardRef(Rc<Clipboard>);
+
+impl UserData for ClipboardRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers ext-data-control.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // clipboard.types → { "text/plain;charset=utf-8", "image/png", … }:
+        // what the current copy is offered as; empty with nothing copied.
+        fields.add_field_method_get("types", |_, this| Ok(this.0.types.get()));
+        // The current copy as text, when it is text and up to 1 MiB; "".
+        fields.add_field_method_get("text", |_, this| Ok(this.0.text.get()));
+        // Moves on every copy, the same text copied twice included.
+        fields.add_field_method_get("changed", |_, this| Ok(this.0.changed.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // clipboard:set_text("…"): the shell owns the clipboard, the text
+        // offered as every text type programs look for. It stays after the
+        // program that copied before is gone.
+        methods.add_method("set_text", |_, this, text: String| {
+            let types = TEXT_TYPES.iter().map(|t| t.to_string()).collect();
+            this.0.ask(ClipboardRequest::Set { types, data: text.into_bytes() });
+            Ok(())
+        });
+        // clipboard:set("image/png", "~/…/shot.png"): a file's content on the
+        // clipboard, offered as the type (or list of types) given. The file
+        // is read now; changing it afterwards changes nothing.
+        methods.add_method("set", |_, this, (types, path): (LuaValue, String)| {
+            let types: Vec<String> = match types {
+                LuaValue::String(s) => vec![s.to_string_lossy()],
+                LuaValue::Table(t) => t.sequence_values::<String>().collect::<mlua::Result<_>>()?,
+                _ => return Err(err("clipboard:set: a type or a list of types, then a path")),
+            };
+            let data = std::fs::read(crate::io::expand(&path)).map_err(|e| err(&format!("clipboard:set: {path}: {e}")))?;
+            this.0.ask(ClipboardRequest::Set { types, data });
+            Ok(())
+        });
+        // clipboard:clear(): nothing on the clipboard.
+        methods.add_method("clear", |_, this, ()| {
+            this.0.ask(ClipboardRequest::Clear);
+            Ok(())
+        });
+        // clipboard:save("image/png", "~/…/1.png") → true when the current
+        // copy is offered in that type: the program that copied writes it
+        // into the file, which is complete once that program is done.
+        methods.add_method("save", |_, this, (mime, path): (String, String)| {
+            if !this.0.types.get_untracked().unwrap_or_default().contains(&mime) {
+                return Ok(false);
+            }
+            this.0.ask(ClipboardRequest::Save { mime, path: crate::io::expand(&path) });
+            Ok(true)
         });
     }
 }
@@ -1871,7 +1928,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -1887,6 +1944,7 @@ impl Script {
                         "tray" => "tray",
                         "polkit" => "polkit",
                         "notifications" => "notifications",
+                        "clipboard" => "clipboard",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -1909,6 +1967,7 @@ impl Script {
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
                         "polkit" => lua.create_userdata(PolkitRef(services.polkit.clone()))?,
                         "notifications" => lua.create_userdata(NotificationsRef(services.notifications.clone()))?,
+                        "clipboard" => lua.create_userdata(ClipboardRef(services.clipboard.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)

@@ -26,7 +26,8 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{
-            LoopHandle, RegistrationToken,
+            Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+            generic::Generic,
             timer::{TimeoutAction, Timer},
         },
         client::{
@@ -37,6 +38,12 @@ use smithay_client_toolkit::{
         protocols::{
             ext::{
                 background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+                data_control::v1::client::{
+                    ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+                    ext_data_control_manager_v1::ExtDataControlManagerV1,
+                    ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+                    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+                },
                 foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
                 idle_notify::v1::client::{
                     ext_idle_notification_v1::{self, ExtIdleNotificationV1},
@@ -257,6 +264,13 @@ pub struct App {
     lock_state: Option<SessionLockState>,
     lock: Option<std::rc::Rc<genoma_services::lock::Lock>>,
     session_lock: Option<SessionLock>,
+    /// `ext-data-control`, bound once an interface requires
+    /// `@genoma/clipboard`: the manager, the seat's device, the offer on the
+    /// clipboard now, and the service they fill.
+    data_control: Option<ExtDataControlManagerV1>,
+    data_device: Option<ExtDataControlDeviceV1>,
+    clip_offer: Option<ExtDataControlOfferV1>,
+    clipboard: Option<std::rc::Rc<genoma_services::clipboard::Clipboard>>,
 }
 
 impl App {
@@ -308,6 +322,10 @@ impl App {
             lock_state: None,
             lock: None,
             session_lock: None,
+            data_control: None,
+            data_device: None,
+            clip_offer: None,
+            clipboard: None,
             globals,
         };
         // The compositor's main device, before any GPU is opened: rendering
@@ -366,6 +384,157 @@ impl App {
         lock.available.set(offered);
         self.lock_state = Some(state);
         self.lock = Some(lock);
+    }
+
+    /// Binds `ext-data-control` and follows the selection from now on:
+    /// called once an interface requires the clipboard. A compositor
+    /// without the protocol leaves it empty and `available` false.
+    pub fn start_clipboard(&mut self, clipboard: std::rc::Rc<genoma_services::clipboard::Clipboard>) {
+        if self.clipboard.is_some() {
+            return;
+        }
+        self.data_control = self.globals.bind(&self.qh, 1..=1, Ignore).ok();
+        clipboard.available.set(self.data_control.is_some());
+        self.clipboard = Some(clipboard);
+        self.make_data_device();
+    }
+
+    /// The seat's device, once there is a seat: the compositor then says
+    /// what is on the clipboard straight away.
+    fn make_data_device(&mut self) {
+        if self.data_device.is_some() {
+            return;
+        }
+        let (Some(manager), Some(seat)) = (&self.data_control, self.seats.seats().next()) else { return };
+        self.data_device = Some(manager.get_data_device(&seat, &self.qh, DeviceData));
+    }
+
+    /// What the interface asked of the clipboard since the last turn.
+    pub fn sync_clipboard(&mut self) {
+        let Some(clipboard) = self.clipboard.clone() else { return };
+        self.make_data_device();
+        for request in clipboard.take_requests() {
+            match request {
+                genoma_services::clipboard::Request::Set { types, data } => self.own_selection(types, data),
+                genoma_services::clipboard::Request::Clear => {
+                    if let Some(device) = &self.data_device {
+                        device.set_selection(None);
+                    }
+                }
+                genoma_services::clipboard::Request::Save { mime, path } => self.save_selection(&mime, &path),
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// The shell's own copy: a source that hands the bytes to whoever
+    /// pastes, until somebody else copies.
+    fn own_selection(&mut self, types: Vec<String>, data: Vec<u8>) {
+        let (Some(manager), Some(device)) = (&self.data_control, &self.data_device) else {
+            log::warn!("clipboard: nothing to copy with (no data-control or no seat)");
+            return;
+        };
+        let source = manager.create_data_source(&self.qh, SourceData(std::sync::Arc::new(data)));
+        for t in types {
+            source.offer(t);
+        }
+        device.set_selection(Some(&source));
+    }
+
+    /// The current copy, in this type, written by its owner into `path`.
+    fn save_selection(&mut self, mime: &str, path: &std::path::Path) {
+        let Some(offer) = &self.clip_offer else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                use std::os::fd::AsFd;
+                offer.receive(mime.to_owned(), file.as_fd());
+                // The descriptor travels with the request: sent, it can close here.
+                let _ = self.conn.flush();
+            }
+            Err(e) => log::warn!("clipboard: {}: {e}", path.display()),
+        }
+    }
+
+    /// A new selection: its types announced now, its text read through a
+    /// pipe on the loop, so a large or slow owner never holds the shell.
+    fn selection(&mut self, offer: Option<ExtDataControlOfferV1>) {
+        if let Some(old) = self.clip_offer.take() {
+            old.destroy();
+        }
+        let Some(clipboard) = self.clipboard.clone() else {
+            if let Some(offer) = offer {
+                offer.destroy();
+            }
+            return;
+        };
+        let Some(offer) = offer else {
+            clipboard.announce(Vec::new());
+            return;
+        };
+        let types = offer.data::<OfferData>().map(|d| d.0.lock().unwrap().clone()).unwrap_or_default();
+        clipboard.announce(types.clone());
+        if let Some(mime) = genoma_services::clipboard::Clipboard::text_type(&types) {
+            self.read_text(&offer, mime, clipboard.changed.get_untracked().unwrap_or(0));
+        }
+        self.clip_offer = Some(offer);
+    }
+
+    fn read_text(&mut self, offer: &ExtDataControlOfferV1, mime: &str, serial: u64) {
+        use std::os::fd::AsFd;
+        let Some(handle) = self.handle.clone() else { return };
+        let (read, write) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
+            Ok(ends) => ends,
+            Err(e) => {
+                log::warn!("clipboard: pipe: {e}");
+                return;
+            }
+        };
+        offer.receive(mime.to_owned(), write.as_fd());
+        let _ = self.conn.flush();
+        drop(write);
+        // Only the reading end waits for nothing; the writer's stays as the
+        // owner expects it.
+        if let Err(e) = rustix::fs::fcntl_setfl(&read, rustix::fs::OFlags::NONBLOCK) {
+            log::warn!("clipboard: {e}");
+            return;
+        }
+        let mut text = Vec::new();
+        let mut too_long = false;
+        let source = Generic::new(read, Interest::READ, Mode::Level);
+        let inserted = handle.insert_source(source, move |_, fd, app: &mut App| {
+            let mut chunk = [0u8; 16384];
+            loop {
+                match rustix::io::read(&**fd, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        // Past the limit the rest is drained, not kept: an
+                        // owner whose pipe closes early may take it badly.
+                        if !too_long && text.len() + n <= genoma_services::clipboard::TEXT_LIMIT {
+                            text.extend_from_slice(&chunk[..n]);
+                        } else {
+                            too_long = true;
+                            text.clear();
+                        }
+                    }
+                    Err(rustix::io::Errno::AGAIN) => return Ok(PostAction::Continue),
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(_) => break,
+                }
+            }
+            if let Some(clipboard) = &app.clipboard {
+                // Only if nobody has copied since.
+                if !too_long && clipboard.changed.get_untracked() == Some(serial) {
+                    clipboard.text.set(String::from_utf8_lossy(&text).into_owned());
+                }
+            }
+            Ok(PostAction::Remove)
+        });
+        if let Err(e) = inserted {
+            log::warn!("clipboard: {e}");
+        }
     }
 
     /// The lock as the interface wants it: asked for, the compositor is
@@ -1255,6 +1424,69 @@ struct Ignore;
 
 impl<I: Proxy> Dispatch2<I, App> for Ignore {
     fn event(&self, _: &mut App, _: &I, _: I::Event, _: &Connection, _: &QueueHandle<App>) {}
+}
+
+/// A clipboard offer's types, as the compositor lists them before it says
+/// which offer the selection is.
+#[derive(Default)]
+struct OfferData(std::sync::Mutex<Vec<String>>);
+
+impl Dispatch2<ExtDataControlOfferV1, App> for OfferData {
+    fn event(&self, _: &mut App, _: &ExtDataControlOfferV1, event: ext_data_control_offer_v1::Event, _: &Connection, _: &QueueHandle<App>) {
+        // Once each: a program may announce a type twice (wl-copy does with
+        // text from stdin).
+        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+            let mut types = self.0.lock().unwrap();
+            if !types.contains(&mime_type) {
+                types.push(mime_type);
+            }
+        }
+    }
+}
+
+/// The seat's clipboard device.
+struct DeviceData;
+
+impl Dispatch2<ExtDataControlDeviceV1, App> for DeviceData {
+    fn event(&self, app: &mut App, device: &ExtDataControlDeviceV1, event: ext_data_control_device_v1::Event, _: &Connection, _: &QueueHandle<App>) {
+        match event {
+            // Its types arrive on the offer itself.
+            ext_data_control_device_v1::Event::DataOffer { .. } => {}
+            ext_data_control_device_v1::Event::Selection { id } => app.selection(id),
+            // The primary selection (middle click) is not followed.
+            ext_data_control_device_v1::Event::PrimarySelection { id: Some(offer) } => offer.destroy(),
+            ext_data_control_device_v1::Event::Finished => {
+                device.destroy();
+                app.data_device = None;
+            }
+            _ => {}
+        }
+    }
+
+    smithay_client_toolkit::reexports::client::event_created_child!(App, ExtDataControlDeviceV1, [
+        ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, OfferData::default())
+    ]);
+}
+
+/// The shell's own copy: its bytes, handed to every program that pastes.
+struct SourceData(std::sync::Arc<Vec<u8>>);
+
+impl Dispatch2<ExtDataControlSourceV1, App> for SourceData {
+    fn event(&self, _: &mut App, source: &ExtDataControlSourceV1, event: ext_data_control_source_v1::Event, _: &Connection, _: &QueueHandle<App>) {
+        match event {
+            // Written apart from the loop: the reader may be the shell itself,
+            // reading the text of its own copy on this very loop.
+            ext_data_control_source_v1::Event::Send { fd, .. } => {
+                let data = self.0.clone();
+                let _ = std::thread::Builder::new().name("genoma-clipboard".into()).spawn(move || {
+                    use std::io::Write;
+                    let _ = std::fs::File::from(fd).write_all(&data);
+                });
+            }
+            ext_data_control_source_v1::Event::Cancelled => source.destroy(),
+            _ => {}
+        }
+    }
 }
 
 /// An idle notification, by the name it was asked for under: idle once the

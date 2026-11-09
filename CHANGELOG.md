@@ -25,6 +25,14 @@ changes what a shell sees.
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
 - `examples/bar`: a classic top bar written against Genoma alone.
+- `@genoma/clipboard`, the clipboard without `wl-copy`/`wl-paste`, through
+  `ext-data-control-v1`: `types` and `text` of every copy (text up to
+  1 MiB), `changed` moving on each copy, the same text twice included;
+  `clipboard:set_text(text)` and `clipboard:set(types, path)` to own the
+  clipboard, kept after the program that copied before is gone;
+  `clipboard:save(type, path)` to write the current copy to a file (a
+  history of images); `clipboard:clear()`. `available` is false on a
+  compositor without the protocol. The primary selection is not followed.
 - This changelog, and a versioning policy in the README.
 
 ## 0.1.2 — 2026-11-07
