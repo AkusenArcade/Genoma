@@ -89,6 +89,20 @@ return g.surface {
   filled with `fill`, stroked with `color` and `stroke`, with `join`,
   `cap`, `dash` and `even_odd`. It is drawn at the exact pixel size, and
   takes its outline's size unless given one.
+- **Shaders:** `g.shader { src = "field.wgsl", values = … }` draws a
+  rectangle whose every pixel is your `fn shade(p: vec2<f32>) ->
+  vec4<f32>`, fed `shader.size`, `shader.scale`, `shader.time` (with
+  `clock = true`) and `value(i)`, the numbers bound. Every shader also has
+  Genoma's library, prefixed `g_`: noise (`g_noise`, `g_noise3`,
+  `g_simplex`, `g_worley`, `g_fbm`, `g_fbm3`, `g_value_noise`,
+  `g_hash`…), distance fields (`g_smin`, `g_smax`, `g_sd_circle`,
+  `g_sd_box`, `g_sd_rounded_box`, `g_sd_segment`, `g_cover` for an
+  antialiased edge) and colour (`g_rgba`, `g_premul`, `g_over`); see
+  `crates/genoma-render/src/shaders/library.wgsl`. Five effects come
+  built in, `src = "genoma:noise"` (`ripple`, `dissolve`, `vignette`,
+  `grain`), and `require("@genoma/kit/effects")` gives them as nodes with
+  named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
+  shader_file` checks a shader without drawing it. See `examples/effects`.
 - **Shapes drawn as one:** a capsule with `combine_with = "id"` is drawn
   as one shape with the capsule of that id, by their distance fields:
   `combine = "union"` (a neck grows between them as `combine_soft`

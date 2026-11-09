@@ -48,6 +48,31 @@ pub struct Shader {
 
 pub const VALUES: usize = 1024;
 
+/// Noise, distance fields and colour, in every shader after the prelude
+/// (`shaders/library.wgsl`), each name prefixed `g_`.
+const LIBRARY: &str = include_str!("shaders/library.wgsl");
+
+/// The effects Genoma ships, by the name a `src` gives them after
+/// `genoma:`: `src = "genoma:ripple"`.
+const BUILT_IN: &[(&str, &str)] = &[
+    ("noise", include_str!("shaders/noise.wgsl")),
+    ("ripple", include_str!("shaders/ripple.wgsl")),
+    ("dissolve", include_str!("shaders/dissolve.wgsl")),
+    ("vignette", include_str!("shaders/vignette.wgsl")),
+    ("grain", include_str!("shaders/grain.wgsl")),
+];
+
+/// A built-in effect's WGSL, by its name without `genoma:`.
+pub fn built_in(name: &str) -> Option<&'static str> {
+    BUILT_IN.iter().find(|(n, _)| *n == name).map(|(_, source)| *source)
+}
+
+/// The whole module a shader node compiles to: the prelude, the library,
+/// then its own source.
+fn module_source(source: &str) -> String {
+    format!("{PRELUDE}\n{LIBRARY}\n{source}")
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
@@ -204,7 +229,7 @@ impl Pipeline {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("g.shader"),
-            source: wgpu::ShaderSource::Wgsl(format!("{PRELUDE}\n{source}").into()),
+            source: wgpu::ShaderSource::Wgsl(module_source(source).into()),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("g.shader"),
@@ -317,9 +342,10 @@ impl Pipeline {
 mod tests {
     use wgpu::naga;
 
-    /// The prelude with `source` after it, validated as the device would.
+    /// The prelude and the library with `source` after them, validated as
+    /// the device would.
     pub(crate) fn validate(source: &str) -> Result<(), String> {
-        let text = format!("{}\n{source}", super::PRELUDE);
+        let text = super::module_source(source);
         let module = naga::front::wgsl::parse_str(&text).map_err(|e| e.emit_to_string(&text))?;
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
@@ -341,5 +367,18 @@ mod tests {
         if let Err(e) = validate(&source) {
             panic!("{e}");
         }
+    }
+    #[test]
+    fn every_built_in_effect_compiles_with_the_library() {
+        for (name, source) in super::BUILT_IN {
+            validate(source).unwrap_or_else(|e| panic!("genoma:{name}: {e}"));
+        }
+        assert!(super::built_in("ripple").is_some() && super::built_in("nothing").is_none());
+    }
+
+    #[test]
+    fn the_library_is_there_for_a_shader_of_ones_own() {
+        let own = "fn shade(p: vec2<f32>) -> vec4<f32> {\n    let n = g_simplex(p) + g_worley(p).x + g_value_noise(p) + g_fbm(p, 3);\n    let d = g_smax(g_sd_rounded_box(p, vec2<f32>(4.0), 1.0), -g_sd_segment(p, vec2<f32>(0.0), vec2<f32>(1.0)), 2.0);\n    return g_over(g_premul(vec4<f32>(n, 0.0, 0.0, g_cover(d))), g_rgba(0));\n}\n";
+        validate(own).unwrap();
     }
 }

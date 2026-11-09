@@ -18,4 +18,5 @@ return {
     list = require("@genoma/kit/list"),
     dialog = require("@genoma/kit/dialog"),
     tabs = require("@genoma/kit/tabs"),
+    effects = require("@genoma/kit/effects"),
 }

@@ -2187,6 +2187,7 @@ const KIT: &[(&str, &str)] = &[
     ("list", include_str!("../../../kit/list.luau")),
     ("dialog", include_str!("../../../kit/dialog.luau")),
     ("tabs", include_str!("../../../kit/tabs.luau")),
+    ("effects", include_str!("../../../kit/effects.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {

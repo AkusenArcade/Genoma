@@ -25,7 +25,7 @@ mod gpu;
 mod image;
 mod particles;
 mod rect;
-mod shader;
+pub mod shader;
 
 pub use particles::{Emitter, EmitterParams};
 pub use rect::Rect;

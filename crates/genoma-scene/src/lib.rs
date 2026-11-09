@@ -1425,8 +1425,15 @@ impl Scene {
             Prop::Src if n.kind == Kind::Shader => {
                 let path = take!(text);
                 // Read when set: a reload sets it again, so an edited file is
-                // seen with the interface that uses it.
-                n.shader = match std::fs::read_to_string(&path) {
+                // seen with the interface that uses it. `genoma:name` is one
+                // of the effects Genoma ships.
+                let read = match path.strip_prefix("genoma:") {
+                    Some(name) => genoma_render::shader::built_in(name)
+                        .map(str::to_owned)
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such built-in effect")),
+                    None => std::fs::read_to_string(&path),
+                };
+                n.shader = match read {
                     Ok(source) => {
                         let mut h = std::collections::hash_map::DefaultHasher::new();
                         std::hash::Hash::hash(&source, &mut h);

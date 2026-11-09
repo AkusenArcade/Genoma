@@ -24,6 +24,14 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- A shader library in every `g.shader`, prefixed `g_`: gradient, simplex,
+  cellular and value noise, fbm, smooth min and max, distance fields of
+  circles, boxes and segments, antialiased coverage, colour helpers.
+  Shaders that define their own names are unaffected.
+- Built-in effects, `src = "genoma:noise"`, `"genoma:ripple"`,
+  `"genoma:dissolve"`, `"genoma:vignette"` and `"genoma:grain"`, and
+  `@genoma/kit/effects` to use them with named parameters. See
+  `examples/effects`.
 - `g.path`: any outline, from SVG path data (`d`) or a polygon
   (`points`), filled, stroked, dashed, with `join`, `cap` and `even_odd`.
 - `combine_with`, `combine` and `combine_soft` on capsules: drawn as one
