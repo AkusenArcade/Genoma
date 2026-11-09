@@ -24,6 +24,7 @@ pub mod niri;
 pub mod pam;
 pub mod polkit;
 pub mod power;
+pub mod session;
 pub mod toplevels;
 pub mod tray;
 pub mod vitals;

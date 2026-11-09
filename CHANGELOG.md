@@ -24,6 +24,13 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `@genoma/session`, logind: `session.can` (each action "yes", "no",
+  "challenge" or "na"), `suspend`, `hibernate`, `hybrid_sleep`, `reboot`,
+  `power_off`, `preparing_for_sleep` and `preparing_for_shutdown`,
+  `lock_requests` (loginctl lock-session), `lock_session`, and inhibitors:
+  `session:inhibit(what, why, mode)` held until `:release()`, and the
+  list of who holds what. A "delay" inhibitor on "sleep" with
+  `preparing_for_sleep` locks before the machine sleeps.
 - `@genoma/apps`: the applications the menu offers, read in the user's
   language with their actions; `apps:search` ranks by name, words,
   description and letters in order, the most used rising among equals

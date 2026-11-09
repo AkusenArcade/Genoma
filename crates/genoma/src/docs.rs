@@ -359,6 +359,8 @@ mod tests {
             ("NotificationsRef", "Notifications"),
             ("ClipboardRef", "Clipboard"),
             ("AppsRef", "Apps"),
+            ("SessionRef", "Session"),
+            ("Inhibition", "Inhibition"),
             ("Process", "Process"),
             ("Watched", "WatchedFile"),
             ("Folder", "Folder"),

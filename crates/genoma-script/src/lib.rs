@@ -28,6 +28,7 @@ use genoma_core::{
 use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
     apps::{App as AppEntry, Apps},
+    session::{Action as SessionAction, Session},
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
     clipboard::{Clipboard, Request as ClipboardRequest, TEXT_TYPES},
@@ -331,6 +332,8 @@ pub struct Services {
     pub clipboard: Rc<Clipboard>,
     /// The applications the menu offers.
     pub apps: Rc<Apps>,
+    /// logind: what the machine can do, sleep, inhibitors.
+    pub session: Rc<Session>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1005,6 +1008,93 @@ impl UserData for AppsRef {
         methods.add_method("refresh", |_, this, ()| {
             this.0.refresh();
             Ok(())
+        });
+    }
+}
+
+struct SessionRef(Rc<Session>);
+
+/// An inhibitor held: `:release()` lets it go.
+struct Inhibition(Rc<Session>, u64);
+
+impl UserData for Inhibition {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether logind has given it and it is not let go.
+        fields.add_field_method_get("held", |_, this| Ok(this.0.holds(this.1)));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("release", |_, this, ()| {
+            this.0.release(this.1);
+            Ok(())
+        });
+    }
+}
+
+impl UserData for SessionRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether logind answers.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // session.can → { suspend, hibernate, hybrid_sleep, reboot, power_off },
+        // each "yes", "no", "challenge" (a password, through polkit) or "na".
+        fields.add_field_method_get("can", |lua, this| {
+            let c = this.0.can.get();
+            let t = lua.create_table()?;
+            t.set("suspend", c.suspend)?;
+            t.set("hibernate", c.hibernate)?;
+            t.set("hybrid_sleep", c.hybrid_sleep)?;
+            t.set("reboot", c.reboot)?;
+            t.set("power_off", c.power_off)?;
+            Ok(t)
+        });
+        // True from logind's PrepareForSleep(true) to (false): lock now.
+        fields.add_field_method_get("preparing_for_sleep", |_, this| Ok(this.0.preparing_for_sleep.get()));
+        fields.add_field_method_get("preparing_for_shutdown", |_, this| Ok(this.0.preparing_for_shutdown.get()));
+        // Moves on each request to lock (or unlock) this session.
+        fields.add_field_method_get("lock_requests", |_, this| Ok(this.0.lock_requests.get()));
+        fields.add_field_method_get("unlock_requests", |_, this| Ok(this.0.unlock_requests.get()));
+        // session.inhibitors → { { what, who, why, mode, uid, pid }, … }
+        fields.add_field_method_get("inhibitors", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, x) in this.0.inhibitors.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("what", x.what)?;
+                t.set("who", x.who)?;
+                t.set("why", x.why)?;
+                t.set("mode", x.mode)?;
+                t.set("uid", x.uid)?;
+                t.set("pid", x.pid)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        for (name, action) in [
+            ("suspend", SessionAction::Suspend),
+            ("hibernate", SessionAction::Hibernate),
+            ("hybrid_sleep", SessionAction::HybridSleep),
+            ("reboot", SessionAction::Reboot),
+            ("power_off", SessionAction::PowerOff),
+        ] {
+            methods.add_method(name, move |_, this, ()| {
+                this.0.act(action);
+                Ok(())
+            });
+        }
+        // session:lock_session(): logind asked to lock this session; every
+        // listener (a lock screen, lock_requests) hears it.
+        methods.add_method("lock_session", |_, this, ()| {
+            this.0.lock_session();
+            Ok(())
+        });
+        // session:inhibit("sleep", "Locking first", "delay") → an inhibitor,
+        // held until :release().
+        methods.add_method("inhibit", |_, this, (what, why, mode): (String, String, Option<String>)| {
+            let who = std::env::args().next().and_then(|a| std::path::Path::new(&a).file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "genoma".into());
+            let handle = this.0.inhibit(what, why, mode.unwrap_or_else(|| "block".into()), who);
+            Ok(Inhibition(this.0.clone(), handle))
         });
     }
 }
@@ -2165,7 +2255,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2184,6 +2274,7 @@ impl Script {
                         "notifications" => "notifications",
                         "clipboard" => "clipboard",
                         "apps" => "apps",
+                        "session" => "session",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2212,6 +2303,7 @@ impl Script {
                         "notifications" => lua.create_userdata(NotificationsRef(services.notifications.clone()))?,
                         "clipboard" => lua.create_userdata(ClipboardRef(services.clipboard.clone()))?,
                         "apps" => lua.create_userdata(AppsRef(services.apps.clone()))?,
+                        "session" => lua.create_userdata(SessionRef(services.session.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -2276,6 +2368,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("notifications", "Notifications"),
     ("clipboard", "Clipboard"),
     ("apps", "Apps"),
+    ("session", "Session"),
 ];
 
 /// The kit's modules by name, as built in.

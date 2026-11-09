@@ -617,3 +617,38 @@ export type Apps = {
     -- Read again, after an installation.
     refresh: (self: Apps) -> (),
 }
+
+-- An inhibitor this interface holds.
+export type Inhibition = {
+    -- Whether logind has given it and it is not let go.
+    read held: boolean,
+    release: (self: Inhibition) -> (),
+}
+
+-- @genoma/session: logind. What the machine can do and doing it, the moment before sleep, inhibitors.
+export type Session = {
+    -- Whether logind answers.
+    read available: boolean,
+    -- Each "yes", "no", "challenge" (a password, through polkit) or "na".
+    read can: { suspend: string, hibernate: string, hybrid_sleep: string, reboot: string, power_off: string },
+    -- True from logind's PrepareForSleep(true) to (false): the moment to
+    -- lock, held open by a "delay" inhibitor on "sleep".
+    read preparing_for_sleep: boolean,
+    read preparing_for_shutdown: boolean,
+    -- Moves on each request to lock this session (loginctl lock-session).
+    read lock_requests: number,
+    -- Moves on each request to unlock it.
+    read unlock_requests: number,
+    read inhibitors: { { what: string, who: string, why: string, mode: string, uid: number, pid: number } },
+    suspend: (self: Session) -> (),
+    hibernate: (self: Session) -> (),
+    hybrid_sleep: (self: Session) -> (),
+    reboot: (self: Session) -> (),
+    power_off: (self: Session) -> (),
+    -- logind asked to lock this session: every listener hears it.
+    lock_session: (self: Session) -> (),
+    -- session:inhibit("sleep", "Locking first", "delay"): what ("sleep",
+    -- "shutdown", "idle", "handle-lid-switch", joined by ':'), why, and the
+    -- mode, "block" (the default) or "delay".
+    inhibit: (self: Session, what: string, why: string, mode: string?) -> Inhibition,
+}

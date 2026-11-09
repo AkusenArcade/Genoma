@@ -110,7 +110,7 @@ fn services() -> (Services, Streams) {
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
-    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default() }, streams)
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default() }, streams)
 }
 
 /// The event streams opened with the services, read once required.
@@ -160,7 +160,7 @@ struct Sources {
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
         for service in
-            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications"]
+            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session"]
         {
             if !wants(service) || self.started.contains(&service) {
                 continue;
@@ -306,6 +306,19 @@ impl Sources {
                 }
                 // Read when asked, nothing to drive.
                 "apps" => {}
+                "session" => {
+                    let Some(bus) = self.bus() else { continue };
+                    let session = self.services.session.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                session.apply(update);
+                            }
+                        })
+                        .expect("session channel");
+                    self.services.session.start(&bus, post);
+                }
                 _ => {
                     let (Some(niri), Some(stream)) = (self.services.niri.clone(), self.streams.niri.take()) else {
                         continue;
@@ -534,6 +547,20 @@ fn probe() {
     let s = services.clone();
     Effect::new(move || {
         println!("vitals  cpu {:.2}  ram {:.2}  gpu {:?}", s.vitals.cpu.get(), s.vitals.ram.get(), s.vitals.gpu.get())
+    });
+    let s = services.clone();
+    Effect::new(move || {
+        let can = s.session.can.get();
+        println!(
+            "session available {}  can suspend {} hibernate {} reboot {} power_off {}  sleeping {}  {} inhibitors",
+            s.session.available.get(),
+            can.suspend,
+            can.hibernate,
+            can.reboot,
+            can.power_off,
+            s.session.preparing_for_sleep.get(),
+            s.session.inhibitors.get().len()
+        )
     });
     {
         let apps = services.apps.clone();
