@@ -16,4 +16,6 @@ return {
     dropdown = require("@genoma/kit/dropdown"),
     tooltip = require("@genoma/kit/tooltip"),
     list = require("@genoma/kit/list"),
+    dialog = require("@genoma/kit/dialog"),
+    tabs = require("@genoma/kit/tabs"),
 }

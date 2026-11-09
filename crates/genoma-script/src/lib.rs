@@ -2172,7 +2172,8 @@ impl Script {
 }
 
 /// The component kit's modules, built in. `GENOMA_KIT_DIR` reads them from
-/// a directory instead, for working on the kit itself.
+/// a directory instead, for working on the kit itself: read at each load,
+/// so saving the interface's own files brings an edit of the kit in.
 const KIT: &[(&str, &str)] = &[
     ("init", include_str!("../../../kit/init.luau")),
     ("theme", include_str!("../../../kit/theme.luau")),
@@ -2184,6 +2185,8 @@ const KIT: &[(&str, &str)] = &[
     ("dropdown", include_str!("../../../kit/dropdown.luau")),
     ("tooltip", include_str!("../../../kit/tooltip.luau")),
     ("list", include_str!("../../../kit/list.luau")),
+    ("dialog", include_str!("../../../kit/dialog.luau")),
+    ("tabs", include_str!("../../../kit/tabs.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {

@@ -25,8 +25,9 @@ changes what a shell sees.
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
 - `@genoma/kit`, a component kit with a neutral look: `button`,
-  `toggle`, `slider`, `progress`, `menu`, `dropdown`, `tooltip` and `list`,
-  restyled live with `kit.theme.set`. See `examples/kit`.
+  `toggle`, `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`,
+  `tabs` and `dialog` (a surface of its own, the rest dimmed), restyled
+  live with `kit.theme.set`. See `examples/kit`.
 - A `g.popup` written as a child of a node becomes a surface of its own
   anchored to that node, so a menu is written inside its button. Before,
   every popup had to be returned beside the surfaces with an `anchor`,
@@ -75,6 +76,16 @@ changes what a shell sees.
   history of images); `clipboard:clear()`. `available` is false on a
   compositor without the protocol. The primary selection is not followed.
 - This changelog, and a versioning policy in the README.
+
+### Fixed
+
+- A `full` surface whose `present` was false took the keyboard when a
+  node in it caught. Asleep, a surface takes no keys. It goes on drawing,
+  as before, so what is closing finishes leaving.
+- A `full` surface naming no output was built for a size it did not have
+  (its content function got no size) and never built again, so what was
+  centred in it could be off screen. It is built again once the
+  compositor gives its size.
 
 ## 0.1.2 — 2026-11-07
 

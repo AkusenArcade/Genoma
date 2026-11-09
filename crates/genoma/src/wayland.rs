@@ -1567,7 +1567,10 @@ impl App {
     fn draw(&mut self, i: usize) {
         let spans = self.spans(i);
         let wish = self.specs.get(self.surfaces[i].spec).map(|s| s.keyboard.clone()).unwrap_or_default();
-        let catching = self.surfaces[i].scene.borrow().catcher().is_some();
+        // Asleep, nothing of it catches. A full surface keeps its output's
+        // size and goes on drawing (what is closing finishes leaving), but
+        // must not keep the pointer or the keys.
+        let catching = !self.surfaces[i].asleep && self.surfaces[i].scene.borrow().catcher().is_some();
         let holes = if catching { self.holes_for(i) } else { Vec::new() };
         let mut inputs_changed = false;
         let display = NonNull::new(self.conn.backend().display_ptr() as *mut c_void).unwrap();
@@ -1689,7 +1692,7 @@ impl App {
         // The keyboard while a cell is catching, with this frame's commit: a
         // full surface never changes size, so it is never placed again. A
         // field with the keys and nothing catching takes it when pressed.
-        let mode = keyboard_mode(&wish, catching, &s.scene.borrow());
+        let mode = if s.asleep { KeyboardInteractivity::None } else { keyboard_mode(&wish, catching, &s.scene.borrow()) };
         let (exclusive, typing) = (mode == KeyboardInteractivity::Exclusive, mode == KeyboardInteractivity::OnDemand);
         if s.keyboard != exclusive || s.typing != typing {
             if let Some(layer) = s.role.layer() {
@@ -2211,9 +2214,12 @@ impl LayerShellHandler for App {
         // keeps it clear of other surfaces' zones: a bottom membrane under
         // another shell's top bar got 56 px less, and its band was laid out
         // below the surface's end, out of sight. Built again for the size
-        // given; the next configure gives the same and nothing follows.
-        // Asleep, it is one unit square: nothing to build for.
-        if full && !s.asleep && w > 0 && h > 0 && s.built.is_some() && s.built != Some((w, h)) {
+        // given; the next configure gives the same and nothing follows. A
+        // tree built before its size was known (a surface naming no
+        // output) is built again once it is, asleep or not: anchored to
+        // every edge, an asleep surface is still the output's size. A
+        // unit square or line is an asleep surface's: nothing to build for.
+        if full && w > 1 && h > 1 && s.built != Some((w, h)) {
             s.area = Some((w, h));
             if !self.areas_changed.contains(&s.id) {
                 self.areas_changed.push(s.id);

@@ -104,8 +104,9 @@ return g.surface {
   One inside a `g.each` row or a function of the output is refused; write
   it beside the surfaces with an `anchor` instead.
 - **The kit:** `require("@genoma/kit")` gives `button`, `toggle`,
-  `slider`, `progress`, `menu`, `dropdown`, `tooltip` and `list`, built
-  on the nodes above and drawn in a neutral look of their own.
+  `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`, `tabs` and
+  `dialog`, built on the nodes above and drawn in a neutral look of their
+  own. A dialog is a surface, returned beside the others.
   `kit.theme.set { accent = "#e6b062", radius = 10 }` changes it for every
   component on screen, the colours moving there. Each is also
   `require("@genoma/kit/button")` and so on, and the sources are in
