@@ -57,6 +57,7 @@ fn main() {
             }
         }
         Some("reference") => print!("{}", docs::reference()),
+        Some("spectrum") => spectrum_command(std::env::args().skip(2).collect()),
         Some("probe") => probe(),
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         Some("polkit-test") => polkit_test(),
@@ -110,7 +111,7 @@ fn services() -> (Services, Streams) {
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
-    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default() }, streams)
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default(), spectrum: Rc::default() }, streams)
 }
 
 /// The event streams opened with the services, read once required.
@@ -147,6 +148,71 @@ fn read_lines<D: 'static>(handle: &LoopHandle<'static, D>, name: &'static str, s
         .expect("event stream source");
 }
 
+/// `genoma spectrum` as a child, its lines read into the service; the
+/// child and the source, to stop them.
+fn start_spectrum<D: 'static>(
+    handle: &LoopHandle<'static, D>,
+    spectrum: Rc<genoma_services::spectrum::Spectrum>,
+) -> Option<(std::process::Child, RegistrationToken)> {
+    let exe = std::env::current_exe().ok()?;
+    let mut command = std::process::Command::new(exe);
+    command.arg("spectrum").stdout(std::process::Stdio::piped()).stdin(std::process::Stdio::null());
+    if spectrum.input.get() {
+        command.args(["--source", "input"]);
+    }
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("spectrum: {e}");
+            return None;
+        }
+    };
+    let stdout = child.stdout.take()?;
+    let _ = rustix::fs::fcntl_setfl(&stdout, rustix::fs::OFlags::NONBLOCK);
+    let mut pending = Vec::new();
+    let token = handle
+        .insert_source(Generic::new(stdout, Interest::READ, Mode::Level), move |_, out, _| {
+            let mut chunk = [0u8; 16384];
+            loop {
+                // Safety: only reading from the pipe calloop holds.
+                match unsafe { out.get_mut() }.read(&mut chunk) {
+                    Ok(0) => return Ok(PostAction::Remove),
+                    Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            // Only the newest frame matters: older ones are already late.
+            let mut last = None;
+            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                last = Some(pending.drain(..=end).collect::<Vec<u8>>());
+            }
+            if let Some(line) = last {
+                spectrum.line(&String::from_utf8_lossy(&line));
+            }
+            Ok(PostAction::Continue)
+        })
+        .ok()?;
+    Some((child, token))
+}
+
+/// `genoma spectrum [--bands N] [--fps N] [--gain F] [--source output|input]`.
+fn spectrum_command(args: Vec<String>) {
+    let mut options = genoma_services::spectrum::Options::default();
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        let mut value = || it.next().unwrap_or_else(|| fail(&format!("genoma spectrum: {arg} wants a value")));
+        match arg.as_str() {
+            "--bands" => options.bands = value().parse::<usize>().unwrap_or(64).clamp(1, 256),
+            "--fps" => options.fps = value().parse::<u32>().unwrap_or(60).clamp(1, 240),
+            "--gain" => options.gain = value().parse::<f32>().unwrap_or(1.0).clamp(0.1, 10.0),
+            "--source" => options.input = value() == "input",
+            other => fail(&format!("genoma spectrum: unknown option {other}")),
+        }
+    }
+    genoma_services::spectrum::run(options);
+}
+
 /// Starts the source of each service an interface asked for and that is not
 /// running yet: a reload that requires a new service gets it.
 struct Sources {
@@ -160,7 +226,7 @@ struct Sources {
 impl Sources {
     fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
         for service in
-            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session"]
+            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session", "spectrum"]
         {
             if !wants(service) || self.started.contains(&service) {
                 continue;
@@ -306,6 +372,25 @@ impl Sources {
                 }
                 // Read when asked, nothing to drive.
                 "apps" => {}
+                // `genoma spectrum` run while somebody holds it.
+                "spectrum" => {
+                    let spectrum = self.services.spectrum.clone();
+                    let handle = handle.clone();
+                    let running: Rc<RefCell<Option<(std::process::Child, RegistrationToken)>>> = Rc::default();
+                    genoma_core::reactive::detached(|| {
+                        Effect::new(move || {
+                            let wanted = spectrum.wanted.get();
+                            let mut now = running.borrow_mut();
+                            if wanted && now.is_none() {
+                                *now = start_spectrum(&handle, spectrum.clone());
+                            } else if !wanted && let Some((mut child, token)) = now.take() {
+                                handle.remove(token);
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
+                        });
+                    });
+                }
                 "session" => {
                     let Some(bus) = self.bus() else { continue };
                     let session = self.services.session.clone();

@@ -24,6 +24,11 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `@genoma/spectrum`: the sound leaving the machine (or the microphone)
+  as 64 logarithmic bands a channel, from Bioma's sinestesia-bands, now
+  `genoma spectrum`: a process of its own, started by the first
+  `spectrum:hold()` and stopped by the last `:release()`. A shader takes
+  the bands as its values; `examples/effects` draws them.
 - `backdrop = true` on a `g.shader`: it reads what its surface drew under
   it through `g_backdrop(p)`, 24 logical units beyond its edges too,
   drawn again only when that changes. `genoma:glass` (and

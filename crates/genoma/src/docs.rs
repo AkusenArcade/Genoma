@@ -361,6 +361,8 @@ mod tests {
             ("AppsRef", "Apps"),
             ("SessionRef", "Session"),
             ("Inhibition", "Inhibition"),
+            ("SpectrumRef", "Spectrum"),
+            ("SpectrumHold", "SpectrumHold"),
             ("Process", "Process"),
             ("Watched", "WatchedFile"),
             ("Folder", "Folder"),

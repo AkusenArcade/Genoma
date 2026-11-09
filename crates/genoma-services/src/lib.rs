@@ -25,6 +25,7 @@ pub mod pam;
 pub mod polkit;
 pub mod power;
 pub mod session;
+pub mod spectrum;
 pub mod toplevels;
 pub mod tray;
 pub mod vitals;

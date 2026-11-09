@@ -652,3 +652,25 @@ export type Session = {
     -- mode, "block" (the default) or "delay".
     inhibit: (self: Session, what: string, why: string, mode: string?) -> Inhibition,
 }
+
+-- A hold on the spectrum: the capture runs while any is held.
+export type SpectrumHold = {
+    release: (self: SpectrumHold) -> (),
+}
+
+-- @genoma/spectrum: the sound as bands, captured by `genoma spectrum` only while held.
+export type Spectrum = {
+    -- Each channel's 64 bands, low to high (30 Hz to 16 kHz, logarithmic),
+    -- 0…1; empty while nobody holds it. A shader's values take them as
+    -- they are.
+    read left: { number },
+    read right: { number },
+    -- The loudest band of either.
+    read level: number,
+    -- Whether the capture runs.
+    read running: boolean,
+    hold: (self: Spectrum) -> SpectrumHold,
+    -- "output" (what leaves the machine, the default) or "input" (the
+    -- microphone), from the next start.
+    listen_to: (self: Spectrum, source: string) -> (),
+}

@@ -9,6 +9,9 @@ local kit = require("@genoma/kit")
 
 local effects = kit.effects
 local theme = kit.theme
+local spectrum = require("@genoma/spectrum")
+-- Held while the panel shows: the capture runs only then.
+local _listening = spectrum:hold()
 local gone = g.signal(0.35)
 
 local function panel(title: string, body: any): any
@@ -70,6 +73,12 @@ return g.surface {
                 width = 200,
                 height = 140,
                 src = g.dir .. "/spotlight.wgsl",
+            }),
+            panel("the sound (@genoma/spectrum)", g.shader {
+                width = 200,
+                height = 140,
+                src = g.dir .. "/spectrum.wgsl",
+                values = function() return spectrum.left end,
             }),
             panel("grain over noise", g.box {
                 width = 200,

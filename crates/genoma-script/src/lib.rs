@@ -29,6 +29,7 @@ use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
     apps::{App as AppEntry, Apps},
     session::{Action as SessionAction, Session},
+    spectrum::Spectrum,
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
     clipboard::{Clipboard, Request as ClipboardRequest, TEXT_TYPES},
@@ -334,6 +335,8 @@ pub struct Services {
     pub apps: Rc<Apps>,
     /// logind: what the machine can do, sleep, inhibitors.
     pub session: Rc<Session>,
+    /// The sound as bands.
+    pub spectrum: Rc<Spectrum>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1007,6 +1010,49 @@ impl UserData for AppsRef {
         // apps:refresh(): read again, after an installation.
         methods.add_method("refresh", |_, this, ()| {
             this.0.refresh();
+            Ok(())
+        });
+    }
+}
+
+struct SpectrumRef(Rc<Spectrum>);
+
+/// A hold on the spectrum: `:release()` lets it go.
+struct SpectrumHold(Rc<Spectrum>, std::cell::Cell<bool>);
+
+impl UserData for SpectrumHold {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("release", |_, this, ()| {
+            if this.1.replace(false) {
+                this.0.release();
+            }
+            Ok(())
+        });
+    }
+}
+
+impl UserData for SpectrumRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // spectrum.left / .right → { 0…1, … } low to high, 64 a channel;
+        // empty while nobody holds it.
+        fields.add_field_method_get("left", |_, this| Ok(this.0.left.get()));
+        fields.add_field_method_get("right", |_, this| Ok(this.0.right.get()));
+        // The loudest band of either, 0…1.
+        fields.add_field_method_get("level", |_, this| Ok(this.0.level.get()));
+        // Whether the capture runs.
+        fields.add_field_method_get("running", |_, this| Ok(this.0.wanted.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // spectrum:hold() → a hold: the capture runs while any is held.
+        methods.add_method("hold", |_, this, ()| {
+            this.0.hold();
+            Ok(SpectrumHold(this.0.clone(), std::cell::Cell::new(true)))
+        });
+        // spectrum:listen_to("input" | "output"): the microphone or what
+        // leaves the machine, from the next start.
+        methods.add_method("listen_to", |_, this, source: String| {
+            this.0.input.set(source == "input");
             Ok(())
         });
     }
@@ -2255,7 +2301,7 @@ impl Script {
             }
             let value = match name.as_str() {
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2275,6 +2321,7 @@ impl Script {
                         "clipboard" => "clipboard",
                         "apps" => "apps",
                         "session" => "session",
+                        "spectrum" => "spectrum",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2304,6 +2351,7 @@ impl Script {
                         "clipboard" => lua.create_userdata(ClipboardRef(services.clipboard.clone()))?,
                         "apps" => lua.create_userdata(AppsRef(services.apps.clone()))?,
                         "session" => lua.create_userdata(SessionRef(services.session.clone()))?,
+                        "spectrum" => lua.create_userdata(SpectrumRef(services.spectrum.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -2369,6 +2417,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("clipboard", "Clipboard"),
     ("apps", "Apps"),
     ("session", "Session"),
+    ("spectrum", "Spectrum"),
 ];
 
 /// The kit's modules by name, as built in.
