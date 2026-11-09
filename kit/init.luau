@@ -19,4 +19,5 @@ return {
     dialog = require("@genoma/kit/dialog"),
     tabs = require("@genoma/kit/tabs"),
     effects = require("@genoma/kit/effects"),
+    field = require("@genoma/kit/field"),
 }

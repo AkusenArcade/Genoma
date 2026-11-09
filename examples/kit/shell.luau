@@ -24,6 +24,7 @@ local said = g.signal("Nothing done yet.")
 local menu_open = g.signal(false)
 local chosen = g.signal(1 :: number?)
 local page = g.signal(1)
+local name = g.signal("")
 local asking = g.signal(false)
 
 local rows = {}
@@ -129,7 +130,17 @@ local panel = g.surface {
             ),
             kit.progress { width = 424, value = function() return level.value end },
 
-            heading("Choices"),
+            heading("Field"),
+        kit.field {
+            width = 300,
+            placeholder = "Your name",
+            clearable = true,
+            text = function() return name.value end,
+            on_change = function(t: string) name.value = t end,
+            on_submit = function(t: string) said.value = `Hello, {t}.` end,
+        },
+
+        heading("Choices"),
             line(
                 kit.dropdown {
                     width = 160,

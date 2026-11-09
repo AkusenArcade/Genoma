@@ -107,7 +107,9 @@ changes what a shell sees.
   cut out, or where both are. See `examples/shapes`.
 - `@genoma/kit`, a component kit with a neutral look: `button`,
   `toggle`, `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`,
-  `tabs` and `dialog` (a surface of its own, the rest dimmed), restyled
+  `tabs`, `field` (a text field, its rim lit while it has the keys,
+  optionally clearable) and `dialog` (a surface of its own, the rest
+  dimmed), restyled
   live with `kit.theme.set`. See `examples/kit`.
 - A `g.popup` written as a child of a node becomes a surface of its own
   anchored to that node, so a menu is written inside its button. Before,
