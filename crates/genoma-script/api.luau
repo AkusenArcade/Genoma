@@ -133,7 +133,9 @@ export type Surface = {
     -- The edges it is held to; none centres it.
     anchor: (Edge | { Edge })?,
     margin: { top: number?, right: number?, bottom: number?, left: number? }?,
-    layer: ("background" | "bottom" | "top" | "overlay")?,
+    -- "lock": a lock screen's, made per output while @genoma/lock holds the
+    -- session.
+    layer: ("background" | "bottom" | "top" | "overlay" | "lock")?,
     -- One output by name; outputs = "all" makes one on each.
     output: string?,
     outputs: "all"?,

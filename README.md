@@ -51,6 +51,19 @@ popup. Edit `shell.luau` while it
 runs and the bar reloads; values kept with `g.state` survive the reload. An
 error keeps the last good tree on screen and is logged.
 
+The other pieces of a desktop are examples too, each a page or two:
+[`launcher`](examples/launcher/shell.luau) (applications found and
+started), [`dock`](examples/dock/shell.luau) (pinned and running, on niri,
+Hyprland or Umbriel), [`notifications`](examples/notifications/shell.luau)
+(a notification centre, Genoma serving the bus name),
+[`osd`](examples/osd/shell.luau) (volume, and `genoma ipc osd show`),
+[`lock`](examples/lock/shell.luau) (ext-session-lock and PAM, its own PAM
+file beside it), [`prompt`](examples/prompt/shell.luau) and
+[`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
+[`shapes`](examples/shapes/shell.luau),
+[`effects`](examples/effects/shell.luau), [`blur`](examples/blur/shell.luau)
+and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
+
 An interface is a directory with a `shell.luau` that returns one or more
 surfaces:
 

@@ -1713,7 +1713,7 @@ g.surface { … }: a layer surface and the node it shows. The content is a node,
 |---|---|---|
 | `anchor` | `(Edge \| { Edge })?` | The edges it is held to; none centres it. |
 | `margin` | `{ top: number?, right: number?, bottom: number?, left: number? }?` |  |
-| `layer` | `("background" \| "bottom" \| "top" \| "overlay")?` |  |
+| `layer` | `("background" \| "bottom" \| "top" \| "overlay" \| "lock")?` | "lock": a lock screen's, made per output while @genoma/lock holds the session. |
 | `output` | `string?` | One output by name; outputs = "all" makes one on each. |
 | `outputs` | `"all"?` |  |
 | `reserve` | `(boolean \| number \| (() -> boolean \| number) \| ((output: string?) -> boolean \| number))?` | Keep windows clear of it: true for its size, a number for a strip. |

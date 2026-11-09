@@ -24,6 +24,13 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- Examples for the rest of a desktop: `examples/dock` (pinned and running
+  applications, their windows focused in turn, one tooltip following the
+  pointer), `examples/osd` (volume, and `genoma ipc osd show`),
+  `examples/notifications` (a notification centre) and `examples/lock`
+  (ext-session-lock with PAM, its own PAM file beside it). The kit's
+  tooltip says it cannot live in a row of `g.each`, and how a list does
+  it instead.
 - `@genoma/spectrum`: the sound leaving the machine (or the microphone)
   as 64 logarithmic bands a channel, from Bioma's sinestesia-bands, now
   `genoma spectrum`: a process of its own, started by the first

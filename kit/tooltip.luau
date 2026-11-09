@@ -10,7 +10,9 @@
 -- (an on_hover of its own is still called) and with the tooltip written
 -- inside it. text may be a function. side and align place it, below and
 -- centred by default; it takes neither the pointer nor the keyboard, and a
--- press on the node hides it.
+-- press on the node hides it. Not inside a row of g.each or g.list: a
+-- popup is a surface, made at load; there, one g.popup for the list whose
+-- anchor follows the row under the pointer does it (examples/dock).
 local g = require("@genoma")
 local theme = require("@genoma/kit/theme")
 
