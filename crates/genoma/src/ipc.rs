@@ -35,7 +35,13 @@ pub fn socket_path() -> PathBuf {
 /// Listens for calls while the interface runs. A socket another instance
 /// still answers on is left to it; one nobody answers on is stale, and
 /// taken over.
-pub fn serve<D: 'static>(handle: &LoopHandle<'static, D>, script: Rc<RefCell<Script>>) {
+/// Calls to the target `genoma` are Genoma's own (the inspector's: `tree`,
+/// `highlight`), answered by `own` with what the loop holds.
+pub fn serve<D: 'static>(
+    handle: &LoopHandle<'static, D>,
+    script: Rc<RefCell<Script>>,
+    own: impl Fn(&mut D, &[String]) -> Result<String, String> + 'static,
+) {
     let path = socket_path();
     if UnixStream::connect(&path).is_ok() {
         log::warn!("ipc: {} is another instance's; this one takes no calls", path.display());
@@ -58,10 +64,10 @@ pub fn serve<D: 'static>(handle: &LoopHandle<'static, D>, script: Rc<RefCell<Scr
     }
     log::info!("ipc on {}", path.display());
     let source = Generic::new(listener, Interest::READ, Mode::Level);
-    let inserted = handle.insert_source(source, move |_, listener, _| {
+    let inserted = handle.insert_source(source, move |_, listener, data| {
         loop {
             match listener.accept() {
-                Ok((stream, _)) => answer(stream, &script.borrow()),
+                Ok((stream, _)) => answer(stream, &script.borrow(), |words| own(&mut *data, words)),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => {
                     log::warn!("ipc: {e}");
@@ -76,7 +82,7 @@ pub fn serve<D: 'static>(handle: &LoopHandle<'static, D>, script: Rc<RefCell<Scr
     }
 }
 
-fn answer(mut stream: UnixStream, script: &Script) {
+fn answer(mut stream: UnixStream, script: &Script, mut own: impl FnMut(&[String]) -> Result<String, String>) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(PATIENCE));
     let mut request = Vec::new();
@@ -87,6 +93,7 @@ fn answer(mut stream: UnixStream, script: &Script) {
     let words: Vec<String> =
         request.split(|b| *b == 0).filter(|w| !w.is_empty()).map(|w| String::from_utf8_lossy(w).into_owned()).collect();
     let reply = match words.as_slice() {
+        [target, rest @ ..] if target == "genoma" => own(rest),
         [target, function, args @ ..] => script.ipc(target, function, args),
         _ => Err("a call is: <target> <function> [arguments…]".into()),
     };

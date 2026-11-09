@@ -1478,6 +1478,72 @@ impl App {
     /// What each surface's description asks for now, by target (the order
     /// [`App::apply`] returned): a surface that goes to sleep or wakes, or
     /// keeps another strip, is placed again.
+    /// The inspector's calls (`genoma ipc genoma …`):
+    ///
+    /// - `tree`: every surface and every node in it, as JSON;
+    /// - `highlight <surface> <node>`: that node outlined, `highlight none`
+    ///   for none.
+    pub fn inspect(&mut self, words: &[String]) -> Result<String, String> {
+        match words {
+            [what] if what == "tree" => {
+                let surfaces: Vec<serde_json::Value> = self
+                    .surfaces
+                    .iter()
+                    .map(|s| {
+                        let spec = self.specs.get(s.spec);
+                        let nodes: Vec<serde_json::Value> = s
+                            .scene
+                            .borrow()
+                            .inspect()
+                            .into_iter()
+                            .map(|n| {
+                                serde_json::json!({
+                                    "node": n.node,
+                                    "parent": n.parent,
+                                    "depth": n.depth,
+                                    "kind": n.kind,
+                                    "role": n.role,
+                                    "name": n.name,
+                                    "id": n.id,
+                                    "text": n.text,
+                                    "bounds": n.bounds,
+                                    "present": n.present,
+                                    "props": n.props.into_iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
+                                })
+                            })
+                            .collect();
+                        serde_json::json!({
+                            "surface": s.id,
+                            "namespace": spec.map(|p| p.namespace.clone()),
+                            "output": s.output,
+                            "size": [s.logical.0, s.logical.1],
+                            "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", _ => "layer" },
+                            "asleep": s.asleep,
+                            "nodes": nodes,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::Value::Array(surfaces).to_string())
+            }
+            [what, none] if what == "highlight" && none == "none" => {
+                for i in 0..self.surfaces.len() {
+                    self.surfaces[i].scene.borrow_mut().set_highlight(None);
+                }
+                Ok(String::new())
+            }
+            [what, surface, node] if what == "highlight" => {
+                let surface: u32 = surface.parse().map_err(|_| format!("no surface {surface}"))?;
+                let node: u64 = node.parse().map_err(|_| format!("no node {node}"))?;
+                for i in 0..self.surfaces.len() {
+                    let mark = (self.surfaces[i].id == surface).then_some(node);
+                    self.surfaces[i].scene.borrow_mut().set_highlight(mark);
+                }
+                Ok(String::new())
+            }
+            _ => Err("genoma: tree, highlight <surface> <node>, highlight none".into()),
+        }
+    }
+
     pub fn apply_wishes(&mut self, wishes: &[Wish]) {
         for (i, wish) in wishes.iter().enumerate() {
             let Some(s) = self.surfaces.get_mut(i) else { break };

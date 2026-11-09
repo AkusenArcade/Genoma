@@ -140,6 +140,12 @@ return g.surface {
   [`kit/`](kit). Its times are `kit_quick`, `kit_move` and `kit_open`,
   defined with `g.timing_default`, so a shell retimes them with
   `g.timing` before or after requiring the kit. See `examples/kit`.
+- **Inspector:** `GENOMA_IPC=inspector GENOMA_INSPECT=<name> genoma
+  examples/inspector` opens a panel beside another running interface (its
+  `GENOMA_IPC`, `genoma` by default): its surfaces, its tree of nodes as
+  they are, and the chosen node's properties, outlined on screen where it
+  is drawn. It is a Genoma interface itself, on `genoma ipc genoma tree`
+  and `highlight`.
 - **Long lists:** `g.list { items = …, key = …, row = …, row_height = 28,
   height = 336, reveal = … }` takes `g.each`'s three functions, but mounts
   only the rows in view and a few beyond, so thousands of items cost what a
@@ -204,6 +210,7 @@ Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 | `genoma reference` | print the API reference in Markdown (`docs/reference.md`) |
 | `genoma probe` | print every service's signals as they change, without UI |
 | `genoma ipc <target> <function> [args…]` | call into a running interface (`g.ipc`) |
+| `genoma ipc genoma tree` | every surface and node of a running interface, as JSON; `genoma ipc genoma highlight <surface> <node>` outlines one, `… highlight none` |
 | `genoma pam <service> [dir]` | one PAM authentication, from the terminal |
 | `genoma polkit-test` | the polkit agent against one process of its own |
 

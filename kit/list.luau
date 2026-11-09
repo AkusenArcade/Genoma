@@ -15,7 +15,7 @@
 -- keyboard can move it: a shell's on_key calls on_select with the next
 -- place. A click selects a row; a click on the selected one activates it.
 -- row_height defaults to the theme's control height; key defaults to the
--- label.
+-- label. label_width ends a long label in an ellipsis.
 local g = require("@genoma")
 local theme = require("@genoma/kit/theme")
 
@@ -30,6 +30,8 @@ export type List = {
     on_select: ((place: number) -> ())?,
     on_activate: ((place: number) -> ())?,
     row_height: number?,
+    -- The label's widest, logical units: past it, an ellipsis.
+    label_width: number?,
     [any]: any,
 }
 
@@ -74,6 +76,7 @@ return function(t: List): any
                     size = function() return theme.get("text_size") end,
                     color = function() return if lit() then theme.get("text") else theme.get("faint") end,
                     ellipsize = "end",
+                    max_width = t.label_width,
                     text = function() return tostring(t.label(item())) end,
                 },
                 g.text {
@@ -86,7 +89,7 @@ return function(t: List): any
         end,
     }
     for k, v in t do
-        if type(k) == "string" and node[k] == nil and not ({ label = true, detail = true, selected = true, on_select = true, on_activate = true } :: any)[k] then
+        if type(k) == "string" and node[k] == nil and not ({ label = true, detail = true, selected = true, on_select = true, on_activate = true, label_width = true } :: any)[k] then
             node[k] = v
         end
     end

@@ -740,7 +740,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     // Recursive: a module the interface requires from a folder of its own
     // (Bioma's structure/, cells/) is as much the interface as shell.luau.
     watcher.watch(&dir, notify::RecursiveMode::Recursive).expect("watch");
-    ipc::serve(&handle, script.clone());
+    ipc::serve(&handle, script.clone(), |app: &mut wayland::App, words: &[String]| app.inspect(words));
     let dispatcher = script.clone();
     app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
     app.on_focus(script.borrow().focus_queue());

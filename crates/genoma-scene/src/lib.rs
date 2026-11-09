@@ -546,6 +546,25 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// One node as an inspector shows it (`Scene::inspect`).
+#[derive(Clone, Debug)]
+pub struct Inspected {
+    pub node: u64,
+    pub parent: Option<u64>,
+    pub depth: usize,
+    pub kind: String,
+    pub role: String,
+    pub name: Option<String>,
+    pub id: Option<String>,
+    pub text: Option<String>,
+    /// Where it was last drawn, logical units.
+    pub bounds: [f32; 4],
+    /// Shown: present, and every ancestor too.
+    pub present: bool,
+    /// Name and value of each property that reads back, zero ones left out.
+    pub props: Vec<(&'static str, String)>,
+}
+
 pub struct Scene {
     tree: TaffyTree<Node>,
     root: NodeId,
@@ -574,6 +593,8 @@ pub struct Scene {
     /// for `on_size`.
     sized: std::collections::HashMap<NodeId, Option<[f32; 2]>>,
     newly_sized: Vec<(NodeId, f32, f32)>,
+    /// The node an inspector points at, outlined over everything.
+    highlight: Option<NodeId>,
     /// Counts the frames drawn, for `drawn_frame`.
     frame: u64,
 }
@@ -618,6 +639,7 @@ impl Scene {
             newly_ready: Vec::new(),
             sized: Default::default(),
             newly_sized: Vec::new(),
+            highlight: None,
             frame: 0,
         }
     }
@@ -1073,6 +1095,64 @@ impl Scene {
     }
 
     /// The node the interface called `id`, if this scene holds one, shown.
+    /// Every node, absent ones too, in tree order: what an inspector shows.
+    /// Properties are those that read back, left out at zero.
+    pub fn inspect(&self) -> Vec<Inspected> {
+        let mut out = Vec::new();
+        self.inspect_under(self.root, None, 0, true, &mut out);
+        out
+    }
+
+    fn inspect_under(&self, node: NodeId, parent: Option<NodeId>, depth: usize, shown: bool, out: &mut Vec<Inspected>) {
+        let Some(n) = self.tree.get_node_context(node) else { return };
+        let present = shown && n.present;
+        // What a new node of its kind reads back is left out.
+        let fresh = Node::new(n.kind, n.role);
+        let fresh_style = Style::default();
+        let style = self.tree.style(node).ok();
+        let mut props = Vec::new();
+        for info in PROPS {
+            let now = style.and_then(|st| value_of(n, st, info.prop));
+            if now.is_some() && now == value_of(&fresh, &fresh_style, info.prop) {
+                continue;
+            }
+            let value = match now {
+                Some(Value::Number(v)) if v != 0.0 => format!("{v}"),
+                Some(Value::Color(c)) if c[3] > 0.0 => {
+                    let [r, g, b, a] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+                }
+                _ => continue,
+            };
+            props.push((info.name, value));
+        }
+        out.push(Inspected {
+            node: u64::from(node),
+            parent: parent.map(u64::from),
+            depth,
+            kind: format!("{:?}", n.kind).to_lowercase(),
+            role: format!("{:?}", n.role).to_lowercase(),
+            name: n.name.clone(),
+            id: n.id.clone(),
+            text: (!n.text.is_empty()).then(|| n.text.clone()),
+            bounds: n.extent,
+            present,
+            props,
+        });
+        for child in self.tree.children(node).unwrap_or_default() {
+            self.inspect_under(child, Some(node), depth + 1, present, out);
+        }
+    }
+
+    /// Outlines `node` over everything this surface draws, or nothing.
+    pub fn set_highlight(&mut self, node: Option<u64>) {
+        let node = node.map(NodeId::from).filter(|n| self.tree.get_node_context(*n).is_some());
+        if node != self.highlight {
+            self.highlight = node;
+            self.dirty = true;
+        }
+    }
+
     /// The shapes named by a `combine_with`, by id: where each was last
     /// drawn and its radius, logical units.
     fn combined_shapes(&self) -> std::collections::HashMap<String, [f32; 5]> {
@@ -1179,6 +1259,13 @@ impl Scene {
     fn current(&self, node: NodeId, prop: Prop) -> Option<Value> {
         let n = self.tree.get_node_context(node)?;
         let style = self.tree.style(node).ok()?;
+        value_of(n, style, prop)
+    }
+}
+
+/// What `prop` reads back as on a node with that style.
+fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
+    {
         let length = |d: Dimension| (d.tag() == taffy::CompactLength::LENGTH_TAG).then(|| d.value());
         Some(match prop {
             Prop::Width => Value::Number(length(style.size.width)?),
@@ -1215,7 +1302,9 @@ impl Scene {
             _ => return None,
         })
     }
+}
 
+impl Scene {
     fn apply(&mut self, node: NodeId, prop: Prop, value: Value) -> Result<(), Error> {
         let bad = || Err(Error(format!("{} wants {:?}, got {value:?}", prop.info().name, prop.info().ty)));
         let mut style = self.tree.style(node).map_err(|e| Error(e.to_string()))?.clone();
@@ -1828,6 +1917,15 @@ impl Scene {
         let others = self.combined_shapes();
         let mut out = Out { frame: self.frame, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
+        // An inspector's mark: the node's box, outlined in magenta, a
+        // translucent wash inside.
+        if let Some([x, y, w, h]) = self.highlight.and_then(|n| self.tree.get_node_context(n)).map(|n| n.extent) {
+            let mut mark = flat([x * scale, y * scale], [w.max(1.0) * scale, h.max(1.0) * scale], 0.0, [1.0, 0.0, 1.0, 0.12], &out);
+            mark.rim = (2.0 * scale).round().max(1.0);
+            mark.rim_top = [1.0, 0.0, 1.0, 1.0];
+            mark.rim_bottom = [1.0, 0.0, 1.0, 1.0];
+            out.list.push_rect(mark);
+        }
         self.blur = out.blur;
         for id in std::mem::take(&mut out.drawn_images) {
             if self.ready.insert(id) {
@@ -3220,6 +3318,35 @@ mod tests {
         scene.set(b, Prop::Combine, Value::Text("union".into()), None).unwrap();
         let list = scene.draw_list(2.0);
         assert_eq!(list.rects.iter().find(|r| r.bud_shape[1] > 0.0).unwrap().bud_shape[3], 3.0);
+    }
+
+    #[test]
+    fn an_inspector_sees_every_node_and_what_is_set_on_it() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::Button);
+        scene.append(root, card);
+        scene.set_id(card, Some("card".into()));
+        scene.set(card, Prop::Width, Value::Number(40.0), None).unwrap();
+        scene.set(card, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        let hidden = scene.create(Kind::Text, Role::None);
+        scene.append(card, hidden);
+        scene.set(hidden, Prop::Present, Value::Bool(false), None).unwrap();
+        let nodes = scene.inspect();
+        assert_eq!(nodes.len(), 3, "root, card, text");
+        let c = &nodes[1];
+        assert_eq!((c.kind.as_str(), c.role.as_str(), c.id.as_deref(), c.depth), ("capsule", "button", Some("card"), 1));
+        assert!(c.props.contains(&("width", "40".into())) && c.props.contains(&("fill", "#ff0000ff".into())));
+        assert!(!c.props.iter().any(|(k, _)| *k == "opacity" || *k == "level"), "what a new capsule has is left out: {:?}", c.props);
+        assert!(!nodes[2].present && nodes[2].parent == Some(u64::from(card)));
+        // Pointed at, it is outlined; a node that is not there is no mark.
+        scene.layout(Some(100.0), Some(100.0));
+        let before = scene.draw_list(1.0).rects.len();
+        scene.set_highlight(Some(u64::from(card)));
+        assert_eq!(scene.draw_list(1.0).rects.len(), before + 1);
+        scene.set_highlight(Some(999_999));
+        assert_eq!(scene.draw_list(1.0).rects.len(), before);
     }
 
     fn spring_scene() -> (Scene, NodeId, Timing) {

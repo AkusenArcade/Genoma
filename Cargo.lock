@@ -1000,6 +1000,7 @@ dependencies = [
  "log",
  "notify",
  "rustix",
+ "serde_json",
  "smithay-client-toolkit",
 ]
 
