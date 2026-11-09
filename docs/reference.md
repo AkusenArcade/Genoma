@@ -1335,6 +1335,36 @@ read changed: number
 
 Moves on every copy.
 
+### `clipboard.history`
+
+```luau
+read history: { { text: string, at: number } }
+```
+
+The texts copied, newest first, each once; in memory only, a copy a password manager marks secret left out. `at` is seconds since the epoch.
+
+### `clipboard:forget`
+
+```luau
+forget: (self: Clipboard, index: number) -> ()
+```
+
+The history's entry i (from 1) taken out.
+
+### `clipboard:clear_history`
+
+```luau
+clear_history: (self: Clipboard) -> ()
+```
+
+### `clipboard:keep`
+
+```luau
+keep: (self: Clipboard, count: number) -> ()
+```
+
+How many texts the history keeps (50).
+
 ### `clipboard:set_text`
 
 ```luau

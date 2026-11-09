@@ -687,7 +687,7 @@ impl App {
             if let Some(clipboard) = &app.clipboard {
                 // Only if nobody has copied since.
                 if !too_long && clipboard.changed.get_untracked() == Some(serial) {
-                    clipboard.text.set(String::from_utf8_lossy(&text).into_owned());
+                    clipboard.read(String::from_utf8_lossy(&text).into_owned());
                 }
             }
             Ok(PostAction::Remove)

@@ -48,7 +48,24 @@ pub struct Clipboard {
     pub changed: Signal<u64>,
     /// What the interface asked since the runtime last looked.
     pub requests: RefCell<Vec<Request>>,
+    /// The texts copied, the newest first, each once (copied again, it
+    /// moves to the front), at most `history_limit` of them. Kept in
+    /// memory only; a copy a password manager marks secret is left out.
+    pub history: Signal<Vec<Copied>>,
+    pub history_limit: std::cell::Cell<usize>,
 }
+
+/// One text in the history.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Copied {
+    pub text: String,
+    /// Seconds since the epoch.
+    pub at: u64,
+}
+
+/// The type password managers (KeePassXC, KDE's) add to a copy that must
+/// not be remembered.
+pub const SECRET_HINT: &str = "x-kde-passwordManagerHint";
 
 impl Clipboard {
     pub fn ask(&self, request: Request) {
@@ -66,6 +83,34 @@ impl Clipboard {
         self.changed.set(self.changed.get_untracked().unwrap_or(0) + 1);
     }
 
+    /// The current selection's text, read: set, and kept in the history
+    /// unless it is empty or marked secret.
+    pub fn read(&self, text: String) {
+        let secret = self.types.get_untracked().unwrap_or_default().iter().any(|t| t == SECRET_HINT);
+        if !text.trim().is_empty() && !secret {
+            let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mut list = self.history.get_untracked().unwrap_or_default();
+            list.retain(|c| c.text != text);
+            list.insert(0, Copied { text: text.clone(), at });
+            list.truncate(self.history_limit.get().max(1));
+            self.history.set(list);
+        }
+        self.text.set(text);
+    }
+
+    /// Takes the entry at `index` (from 0) out of the history.
+    pub fn forget(&self, index: usize) {
+        let mut list = self.history.get_untracked().unwrap_or_default();
+        if index < list.len() {
+            list.remove(index);
+            self.history.set(list);
+        }
+    }
+
+    pub fn clear_history(&self) {
+        self.history.set(Vec::new());
+    }
+
     /// The first text type among `types`, in the order of `TEXT_TYPES`.
     pub fn text_type(types: &[String]) -> Option<&'static str> {
         TEXT_TYPES.iter().copied().find(|t| types.iter().any(|o| o == t))
@@ -78,6 +123,8 @@ impl Default for Clipboard {
             available: Signal::new(false),
             types: Signal::new(Vec::new()),
             text: Signal::new(String::new()),
+            history: Signal::new(Vec::new()),
+            history_limit: std::cell::Cell::new(50),
             changed: Signal::new(0),
             requests: RefCell::new(Vec::new()),
         }
@@ -93,5 +140,28 @@ mod tests {
         let offered = vec!["image/png".to_string(), "STRING".to_string(), "text/plain;charset=utf-8".to_string()];
         assert_eq!(Clipboard::text_type(&offered), Some("text/plain;charset=utf-8"));
         assert_eq!(Clipboard::text_type(&["image/png".to_string()]), None);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn the_history_keeps_each_text_once_newest_first_and_no_secrets() {
+        let c = Clipboard::default();
+        c.history_limit.set(3);
+        for t in ["one", "two", "one", "three", "four"] {
+            c.announce(vec!["text/plain".into()]);
+            c.read(t.into());
+        }
+        let texts: Vec<String> = c.history.get_untracked().unwrap().into_iter().map(|e| e.text).collect();
+        assert_eq!(texts, ["four", "three", "one"]);
+        c.announce(vec!["text/plain".into(), SECRET_HINT.into()]);
+        c.read("hunter2".into());
+        assert_eq!(c.text.get_untracked().unwrap(), "hunter2", "on the clipboard still");
+        assert!(!c.history.get_untracked().unwrap().iter().any(|e| e.text == "hunter2"), "not remembered");
+        c.forget(0);
+        assert_eq!(c.history.get_untracked().unwrap()[0].text, "three");
     }
 }

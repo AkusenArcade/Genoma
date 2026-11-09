@@ -524,6 +524,14 @@ export type Clipboard = {
     read text: string,
     -- Moves on every copy.
     read changed: number,
+    -- The texts copied, newest first, each once; in memory only, a copy a
+    -- password manager marks secret left out. `at` is seconds since the epoch.
+    read history: { { text: string, at: number } },
+    -- The history's entry i (from 1) taken out.
+    forget: (self: Clipboard, index: number) -> (),
+    clear_history: (self: Clipboard) -> (),
+    -- How many texts the history keeps (50).
+    keep: (self: Clipboard, count: number) -> (),
     set_text: (self: Clipboard, text: string) -> (),
     -- clipboard:set("image/png", "~/…/shot.png"): a file's content, offered
     -- as the type (or types) given.

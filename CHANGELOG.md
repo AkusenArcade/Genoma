@@ -24,6 +24,10 @@ changes what a shell sees.
   or `fill_stops`) turned to any angle, CSS degrees, or drawn radial or
   conic. `fill_angle` animates and takes bindings. Without either, fills
   are drawn exactly as before. See `examples/gradients`.
+- `clipboard.history`: the texts copied, newest first, each once, in
+  memory only; a copy a password manager marks secret
+  (`x-kde-passwordManagerHint`) is left out. `clipboard:forget(i)`,
+  `:clear_history()`, `:keep(n)`; restoring one is `clipboard:set_text`.
 - Examples for the rest of a desktop: `examples/dock` (pinned and running
   applications, their windows focused in turn, one tooltip following the
   pointer), `examples/osd` (volume, and `genoma ipc osd show`),

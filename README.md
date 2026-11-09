@@ -232,7 +232,7 @@ first use, and every field is a signal.
 | `compositor` | workspaces, windows, the focused one, and switching between them: niri, Hyprland or Umbriel |
 | `niri` | the same from niri alone, with niri's numeric ids (niri IPC); kept for shells written against it |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |
-| `clipboard` | every copy's types and text, set, save to a file, clear (`ext-data-control`) |
+| `clipboard` | every copy's types and text, a history of texts (secrets left out), set, save to a file, clear (`ext-data-control`) |
 | `spectrum` | the sound as 64 bands a channel, captured (`genoma spectrum`, PipeWire) only while held: for a visualiser, or a shader's values |
 | `session` | logind: suspend, hibernate, reboot, power off, what is allowed, the moment before sleep, lock requests, inhibitors held and listed |
 | `apps` | the applications the menu offers: search ranked by use, launch with actions and files, find by window class (desktop entries) |

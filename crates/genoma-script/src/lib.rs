@@ -892,6 +892,19 @@ impl UserData for ClipboardRef {
         // clipboard.types → { "text/plain;charset=utf-8", "image/png", … }:
         // what the current copy is offered as; empty with nothing copied.
         fields.add_field_method_get("types", |_, this| Ok(this.0.types.get()));
+        // clipboard.history → { { text, at }, … }: the texts copied, newest
+        // first, each once; in memory only, a copy a password manager marks
+        // secret left out.
+        fields.add_field_method_get("history", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, c) in this.0.history.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("text", c.text)?;
+                t.set("at", c.at)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
         // The current copy as text, when it is text and up to 1 MiB; "".
         fields.add_field_method_get("text", |_, this| Ok(this.0.text.get()));
         // Moves on every copy, the same text copied twice included.
@@ -928,6 +941,20 @@ impl UserData for ClipboardRef {
         // clipboard:save("image/png", "~/…/1.png") → true when the current
         // copy is offered in that type: the program that copied writes it
         // into the file, which is complete once that program is done.
+        // clipboard:forget(i): the history's entry i (from 1) taken out.
+        methods.add_method("forget", |_, this, index: usize| {
+            this.0.forget(index.saturating_sub(1));
+            Ok(())
+        });
+        methods.add_method("clear_history", |_, this, ()| {
+            this.0.clear_history();
+            Ok(())
+        });
+        // clipboard:keep(n): how many texts the history keeps (50).
+        methods.add_method("keep", |_, this, n: usize| {
+            this.0.history_limit.set(n.max(1));
+            Ok(())
+        });
         methods.add_method("save", |_, this, (mime, path): (String, String)| {
             if !this.0.types.get_untracked().unwrap_or_default().contains(&mime) {
                 return Ok(false);
