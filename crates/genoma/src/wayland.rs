@@ -419,6 +419,8 @@ pub struct App {
     wm: Option<wm::Wm>,
     /// `@genoma/displays` through wlr-output-management.
     dm: Option<displays::Dm>,
+    /// `@genoma/gamma` through wlr-gamma-control.
+    gm: Option<gamma::Gm>,
     /// `ext-idle-notify`, bound once an interface requires `@genoma/idle`;
     /// the service it sets, and the notification asked for with its seconds.
     idle_notifier: Option<ExtIdleNotifierV1>,
@@ -520,6 +522,7 @@ impl App {
             toplevels: None,
             wm: None,
             dm: None,
+            gm: None,
             idle_notifier: None,
             idle: None,
             idle_notifications: std::collections::HashMap::new(),
@@ -3458,6 +3461,7 @@ impl ProvidesRegistryState for App {
 delegate_registry!(App);
 
 mod displays;
+mod gamma;
 mod wm;
 smithay_client_toolkit::delegate_dispatch2!(App);
 

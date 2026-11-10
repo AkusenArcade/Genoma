@@ -240,6 +240,7 @@ first use, and every field is a signal.
 | `polkit` | a polkit authentication agent |
 | `idle`, `lock` | idle notification, session lock |
 | `displays` | the displays and their setup through `wlr-output-management`: modes, position, scale, transform, adaptive sync, on or off; changed or only tested, the rest kept as it is |
+| `gamma` | colour temperature, brightness and gamma per display through `wlr-gamma-control`: a night light without wlsunset |
 | `compositor` | workspaces, windows, the focused one, switching, closing and (through the protocols) minimizing: niri, Hyprland and Umbriel by their IPC, any other by `ext-workspace` and `wlr-foreign-toplevel-management` |
 | `niri` | the same from niri alone, with niri's numeric ids (niri IPC); kept for shells written against it |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |

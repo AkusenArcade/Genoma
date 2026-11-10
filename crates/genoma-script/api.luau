@@ -644,6 +644,28 @@ export type Displays = {
     test: (self: Displays, changes: { [string]: DisplayChange }) -> number,
 }
 
+-- A colour ramp: Kelvin (1000…10000, 6500 changes nothing), brightness
+-- (0.1…1) and gamma (1 is the display's own).
+export type GammaSetting = { temperature: number, brightness: number, gamma: number }
+
+-- @genoma/gamma: wlr-gamma-control, a night light of the shell's own. One
+-- program at a time holds a display's ramp; a neutral setting lets go and
+-- the compositor restores its own.
+export type Gamma = {
+    read available: boolean,
+    -- The displays whose ramp is ours (their setting), or held by another
+    -- program ("failed"); a display at its own ramp is not listed.
+    read held: { [string]: GammaSetting | string },
+    -- What a display is asked to show; every display's without one.
+    get: (self: Gamma, output: string?) -> GammaSetting,
+    -- What is left out stays; without an output, every display without
+    -- its own setting.
+    set: (self: Gamma, setting: { temperature: number?, brightness: number?, gamma: number? }, output: string?) -> (),
+    -- An output back to every display's setting; with none, every display
+    -- back to its own ramp.
+    reset: (self: Gamma, output: string?) -> (),
+}
+
 -- @genoma/tray: StatusNotifierItem with DBusMenu.
 export type Tray = {
     read items: { { [string]: any } },

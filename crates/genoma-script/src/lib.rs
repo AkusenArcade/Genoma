@@ -45,6 +45,7 @@ use genoma_services::{
     power::Power,
     toplevels::Toplevels,
     displays::{Change, Displays, Head},
+    gamma::{Gamma, Held, Setting},
     tray::{MenuEntry, Tray},
     vitals::Vitals,
 };
@@ -375,6 +376,8 @@ pub struct Services {
     pub toplevels: Rc<Toplevels>,
     /// wlr-output-management: the displays and their setup.
     pub displays: Rc<Displays>,
+    /// wlr-gamma-control: colour temperature and brightness.
+    pub gamma: Rc<Gamma>,
     pub idle: Rc<Idle>,
     pub lock: Rc<Lock>,
     pub tray: Rc<Tray>,
@@ -1363,6 +1366,64 @@ impl UserData for DisplaysRef {
         methods.add_method("apply", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, false).map_err(err));
         // displays:test(changes) → id: only asks whether it would work.
         methods.add_method("test", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, true).map_err(err));
+    }
+}
+
+struct GammaRef(Rc<Gamma>);
+
+fn setting_table(lua: &Lua, s: Setting) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("temperature", s.temperature)?;
+    t.set("brightness", s.brightness)?;
+    t.set("gamma", s.gamma)?;
+    Ok(t)
+}
+
+impl UserData for GammaRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers wlr-gamma-control.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // gamma.held → { ["DP-1"] = { temperature, brightness, gamma } or
+        // "failed" }: the displays whose ramp is ours, or held by another
+        // program. A display at its own ramp is not listed.
+        fields.add_field_method_get("held", |lua, this| {
+            let t = lua.create_table()?;
+            for (name, held) in this.0.held.get() {
+                match held {
+                    Held::Set(s) => t.set(name, setting_table(lua, s)?)?,
+                    Held::Failed => t.set(name, "failed")?,
+                }
+            }
+            Ok(t)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // gamma:get("DP-1") → { temperature, brightness, gamma }: what that
+        // display is asked to show (every display's without one).
+        methods.add_method("get", |lua, this, output: Option<String>| {
+            let _ = this.0.settings.get();
+            setting_table(lua, this.0.wanted(output.as_deref().unwrap_or("*")))
+        });
+        // gamma:set({ temperature = 4000, brightness = 0.9, gamma = 1 },
+        // "DP-1"): what is left out stays as it was; without an output, every
+        // display without its own setting.
+        methods.add_method("set", |_, this, (t, output): (Table, Option<String>)| {
+            let now = this.0.wanted(output.as_deref().unwrap_or("*"));
+            let setting = Setting {
+                temperature: t.get::<Option<f64>>("temperature")?.unwrap_or(now.temperature),
+                brightness: t.get::<Option<f64>>("brightness")?.unwrap_or(now.brightness),
+                gamma: t.get::<Option<f64>>("gamma")?.unwrap_or(now.gamma),
+            };
+            this.0.set(output.as_deref(), setting);
+            Ok(())
+        });
+        // gamma:reset("DP-1"): that display back to every display's setting;
+        // gamma:reset(): every display back to its own ramp.
+        methods.add_method("reset", |_, this, output: Option<String>| {
+            this.0.reset(output.as_deref());
+            Ok(())
+        });
     }
 }
 
@@ -2616,7 +2677,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2629,6 +2690,7 @@ impl Script {
                         "bluetooth" => "bluetooth",
                         "toplevels" => "toplevels",
                         "displays" => "displays",
+                        "gamma" => "gamma",
                         "idle" => "idle",
                         "lock" => "lock",
                         "tray" => "tray",
@@ -2660,6 +2722,7 @@ impl Script {
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         "displays" => lua.create_userdata(DisplaysRef(services.displays.clone()))?,
+                        "gamma" => lua.create_userdata(GammaRef(services.gamma.clone()))?,
                         "idle" => lua.create_userdata(IdleRef(services.idle.clone()))?,
                         "lock" => lua.create_userdata(LockRef(services.lock.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
@@ -2728,6 +2791,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("bluetooth", "Bluetooth"),
     ("toplevels", "Toplevels"),
     ("displays", "Displays"),
+    ("gamma", "Gamma"),
     ("idle", "Idle"),
     ("lock", "Lock"),
     ("tray", "Tray"),

@@ -41,6 +41,14 @@ changes what a shell sees.
   surface. Hidden or turned off, idleness comes back. What
   `@genoma/idle` reports follows it.
 
+- `@genoma/gamma`, over `wlr-gamma-control`: a night light of the
+  shell's own. `gamma:set({ temperature, brightness, gamma }, output)`
+  for one display or every display, `gamma:get`, `gamma:reset`, and
+  `gamma.held` (what each display shows, or `"failed"` when another
+  program such as wlsunset holds its ramp). A neutral setting lets go of
+  the display and the compositor puts its own ramp back; brightness stops
+  at a tenth, so the screen never goes black.
+
 ### Changed
 
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it

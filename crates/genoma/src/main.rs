@@ -129,7 +129,7 @@ pub(crate) fn services() -> (Services, Streams) {
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
-    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), displays: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default(), spectrum: Rc::default() }, streams)
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), displays: Rc::default(), gamma: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default(), spectrum: Rc::default() }, streams)
 }
 
 /// The event streams opened with the services, read once required.
@@ -846,6 +846,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     let services_toplevels = services.toplevels.clone();
     let services_compositor = services.compositor.clone();
     let services_displays = services.displays.clone();
+    let services_gamma = services.gamma.clone();
     let services_idle = services.idle.clone();
     let services_lock = services.lock.clone();
     let services_clipboard = services.clipboard.clone();
@@ -861,6 +862,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
     }
     if script.borrow().wants("displays") {
         app.start_displays(services_displays.clone());
+    }
+    if script.borrow().wants("gamma") {
+        app.start_gamma(services_gamma.clone());
     }
     if script.borrow().wants("idle") {
         app.start_idle(services_idle.clone());
@@ -918,6 +922,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
                             if script.borrow().wants("displays") {
                                 app.start_displays(sources.borrow().services.displays.clone());
                             }
+                            if script.borrow().wants("gamma") {
+                                app.start_gamma(sources.borrow().services.gamma.clone());
+                            }
                             if script.borrow().wants("idle") {
                                 app.start_idle(sources.borrow().services.idle.clone());
                             }
@@ -947,6 +954,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
             app.sync_clipboard();
             app.sync_wm();
             app.sync_displays();
+            app.sync_gamma();
             if app.take_outputs_changed() {
                 match load(&script, app) {
                     Ok(()) => log::info!("outputs or areas changed: surfaces fitted"),
