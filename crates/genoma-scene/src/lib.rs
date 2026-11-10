@@ -189,6 +189,8 @@ pub struct Node {
     catch: bool,
     /// The compositor's shortcuts stand aside while this node is there.
     inhibit_shortcuts: bool,
+    /// The session stays awake while this node is seen.
+    inhibit_idle: bool,
     growth: f32,
     reach: f32,
     clip: bool,
@@ -351,6 +353,7 @@ impl Node {
             attach: 0,
             catch: false,
             inhibit_shortcuts: false,
+            inhibit_idle: false,
             growth: 1.0,
             reach: 1.0,
             clip: false,
@@ -819,6 +822,14 @@ impl Scene {
     pub fn inhibits_shortcuts(&self) -> bool {
         let mut found = false;
         self.walk(self.root, &mut |_, n| found |= n.inhibit_shortcuts);
+        found
+    }
+
+    /// Whether a node asking the session to stay awake is seen now: present,
+    /// laid out in the last frame, with a size.
+    pub fn inhibits_idle(&self) -> bool {
+        let mut found = false;
+        self.walk(self.root, &mut |node, n| found |= n.inhibit_idle && self.seen(node));
         found
     }
 
@@ -1584,6 +1595,7 @@ impl Scene {
             }
             Prop::Catch => n.catch = take!(flag),
             Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
+            Prop::InhibitIdle => n.inhibit_idle = take!(flag),
             Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::Clip => n.clip = take!(flag),

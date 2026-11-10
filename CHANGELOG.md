@@ -35,6 +35,12 @@ changes what a shell sees.
   `displays.result` (`applied`, `works`, `failed`, `cancelled`). Tried on
   niri 26.04 (nested) and Umbriel's headless outputs.
 
+- Node property `inhibit_idle`: while true on a node that is shown
+  (present and given a size), the session does not go idle, through
+  `idle-inhibit` on its surface; the compositor adds whether it sees that
+  surface. Hidden or turned off, idleness comes back. What
+  `@genoma/idle` reports follows it.
+
 ### Changed
 
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it

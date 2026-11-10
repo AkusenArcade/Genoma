@@ -72,6 +72,9 @@ use smithay_client_toolkit::{
                 },
                 linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
                 viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+                idle_inhibit::zv1::client::{
+                    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+                },
             },
         },
     },
@@ -205,6 +208,8 @@ struct Surface {
     holes: Vec<[i32; 4]>,
     /// The compositor's shortcuts standing aside for this surface.
     inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
+    /// The session kept awake while this surface is seen.
+    idle_inhibitor: Option<ZwpIdleInhibitorV1>,
     /// Whether the surface last asked for the keyboard.
     keyboard: bool,
     hovered: Option<NodeId>,
@@ -298,6 +303,7 @@ impl Surface {
             inputs: None,
             holes: Vec::new(),
             inhibitor: None,
+            idle_inhibitor: None,
             keyboard: false,
             hovered: None,
             focused: None,
@@ -359,6 +365,8 @@ pub struct App {
     /// while a node asks it (a field recording a key combination). The seat
     /// is the keyboard's.
     shortcuts_inhibit: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+    /// `idle-inhibit`: the session stays awake while a node asks it.
+    idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
     seat: Option<wl_seat::WlSeat>,
     /// Drag and drop (wl_data_device): the manager, the seat's device, a drag
     /// over one of our surfaces now, and our own drag's source with what it
@@ -494,6 +502,7 @@ impl App {
             pointer: None,
             cursor_shapes: CursorShapeManager::bind(&globals, &qh).ok(),
             shortcuts_inhibit: globals.bind(&qh, 1..=1, Ignore).ok(),
+            idle_inhibit: globals.bind(&qh, 1..=1, Ignore).ok(),
             seat: None,
             cursor_device: None,
             cursor_serial: 0,
@@ -958,6 +967,9 @@ impl App {
         if let Some(inhibitor) = s.inhibitor.take() {
             inhibitor.destroy();
         }
+        if let Some(inhibitor) = s.idle_inhibitor.take() {
+            inhibitor.destroy();
+        }
         if let Some(fraction) = open.fraction {
             fraction.destroy();
         }
@@ -1118,6 +1130,9 @@ impl App {
             effect.destroy();
         }
         if let Some(inhibitor) = s.inhibitor.take() {
+            inhibitor.destroy();
+        }
+        if let Some(inhibitor) = s.idle_inhibitor.take() {
             inhibitor.destroy();
         }
         if let Some(fraction) = open.fraction {
@@ -2262,6 +2277,17 @@ impl App {
             } else if let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit, &self.seat) {
                 s.inhibitor = Some(manager.inhibit_shortcuts(&surface, seat, qh, Ignore));
             }
+        }
+        // The session stays awake while a node asking it is seen; the
+        // compositor adds whether it sees the surface.
+        let awake = !s.asleep && s.scene.borrow().inhibits_idle();
+        if awake != s.idle_inhibitor.is_some() {
+            if let Some(inhibitor) = s.idle_inhibitor.take() {
+                inhibitor.destroy();
+            } else if let Some(manager) = &self.idle_inhibit {
+                s.idle_inhibitor = Some(manager.create_inhibitor(&surface, qh, Ignore));
+            }
+            log::debug!("surface {}: idle {}", s.id, if awake { "inhibited" } else { "allowed" });
         }
         // The scene's own record of this change is consumed by this frame.
         s.scene.borrow_mut().take_dirty();

@@ -156,6 +156,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `raised` | boolean |  | Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it. |
 | `cursor` | "default" \| "pointer" \| "crosshair" \| "text" \| "grab" \| "grabbing" \| "not-allowed" |  | The pointer's shape over this node and what it holds, unless a node inside names its own. |
 | `inhibit_shortcuts` | boolean |  | While true on a catching surface, the compositor's own shortcuts stand aside and their keys reach on_key: a field recording a key combination. |
+| `inhibit_idle` | boolean |  | While true on a node that is shown (present and given a size), the session does not go idle: no blanking, no lock for idleness, while the compositor sees its surface. A video, a presentation, a timer being watched. |
 | `placeholder` | string |  | Shown in a field while it is empty. |
 | `placeholder_color` | colour |  | The placeholder's colour; unset, the text's, faded. |
 | `selection_color` | colour |  | What is selected in a field, drawn behind its text; unset, the text's colour at a quarter. |
