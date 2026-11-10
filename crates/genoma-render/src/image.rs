@@ -110,13 +110,27 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (in.fade.y > 0.0) {
         cover *= clamp((in.fade.x - p.y) / in.fade.y, 0.0, 1.0);
     }
-    let shown = textureSample(mask_image, mask_smp, in.uv).a;
-    return filtered(textureSample(image, smp, in.uv), in.grade, in.tint) * in.alpha * cover * shown;
+    let second = textureSample(mask_image, mask_smp, in.uv);
+    let c = filtered(textureSample(image, smp, in.uv), in.grade, in.tint);
+    if in.grade.w > 0.5 {
+        // Overlaid on what is under (the second texture): multiplied where
+        // that is dark, screened where it is light, as much as it is there.
+        let s = c.rgb / max(c.a, 1e-4);
+        let b = second.rgb / max(second.a, 1e-4);
+        let low = 2.0 * s * b;
+        let high = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - s) * (vec3<f32>(1.0) - b);
+        let ov = select(high, low, b < vec3<f32>(0.5));
+        let rgb = mix(s, ov, second.a);
+        let a = c.a * in.alpha * cover;
+        return vec4<f32>(rgb * a, a);
+    }
+    return c * in.alpha * cover * second.a;
 }
 "#;
 
 pub(crate) struct Pipeline {
-    pipeline: wgpu::RenderPipeline,
+    /// Normal, multiply, screen, add (see [`crate::Image::blend`]).
+    pipelines: [wgpu::RenderPipeline; 4],
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
@@ -137,8 +151,8 @@ pub(crate) struct Pipeline {
     shown: HashMap<SurfaceId, Vec<u64>>,
     quads: wgpu::Buffer,
     capacity: usize,
-    /// Each quad's texture, and its mask's.
-    draws: Vec<(u64, Option<u64>)>,
+    /// Each quad's texture, its mask's, and its blend.
+    draws: Vec<(u64, Option<u64>, u8)>,
     last_viewport: [f32; 2],
     last_quads: Vec<u8>,
 }
@@ -199,7 +213,7 @@ impl Pipeline {
             bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout), Some(&texture_layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let make = |blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("image"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -219,7 +233,7 @@ impl Pipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -232,6 +246,20 @@ impl Pipeline {
             multiview_mask: None,
             cache: None,
         });
+        // What a node's `blend` asks, premultiplied: normal (and overlay,
+        // which the shader works out against what is under), multiply,
+        // screen, add.
+        let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
+        let colour = |src_factor, dst_factor| wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor, dst_factor, operation: wgpu::BlendOperation::Add },
+            alpha: over,
+        };
+        let pipelines = [
+            make(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            make(colour(wgpu::BlendFactor::Dst, wgpu::BlendFactor::OneMinusSrcAlpha)),
+            make(colour(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc)),
+            make(colour(wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
+        ];
         // Linear: an icon placed on whole physical pixels samples its own
         // texels exactly; linear only matters for the half-pixel case.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -268,7 +296,7 @@ impl Pipeline {
             ],
         });
         Pipeline {
-            pipeline,
+            pipelines,
             globals,
             globals_group,
             texture_layout,
@@ -415,10 +443,12 @@ impl Pipeline {
                 clip: image.clip,
                 uv: image.uv,
                 m: image.transform,
-                filter: [image.filter[0], image.filter[1], image.filter[2], 0.0],
+                // The fourth: 1 when the second texture is what is under, to
+                // be overlaid, rather than a mask.
+                filter: [image.filter[0], image.filter[1], image.filter[2], if image.blend == crate::Image::OVERLAY { 1.0 } else { 0.0 }],
                 tint: [image.filter[4], image.filter[5], image.filter[6], image.filter[7]],
             });
-            self.draws.push((image.key, image.mask));
+            self.draws.push((image.key, image.mask, image.blend));
         }
         if viewport != self.last_viewport {
             queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&[viewport[0], viewport[1], 0.0, 0.0]));
@@ -436,12 +466,20 @@ impl Pipeline {
         if self.draws.is_empty() || only.is_empty() {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
+        let mut current = u8::MAX;
         pass.set_bind_group(0, &self.globals_group, &[]);
         pass.set_vertex_buffer(0, self.quads.slice(..));
-        for (i, (key, mask)) in self.draws.iter().enumerate() {
+        for (i, (key, mask, blend)) in self.draws.iter().enumerate() {
             if !only.contains(&i) {
                 continue;
+            }
+            let wanted = match *blend {
+                1..=3 => *blend,
+                _ => 0,
+            };
+            if wanted != current {
+                pass.set_pipeline(&self.pipelines[wanted as usize]);
+                current = wanted;
             }
             pass.set_bind_group(1, &self.textures[key].0, &[]);
             let mask = mask.and_then(|m| self.textures.get(&m)).map_or(&self.blank, |t| &t.0);

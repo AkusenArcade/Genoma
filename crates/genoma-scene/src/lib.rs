@@ -211,6 +211,8 @@ pub struct Node {
     slice: Option<[f32; 4]>,
     /// Drawn as its parent's mask rather than as itself.
     mask: bool,
+    /// How it meets what is under: `genoma_render::Image::blend`.
+    blend: u8,
     /// An image's colours: saturation, contrast, brightness, then a tint
     /// (`genoma_render::Image::filter`).
     filter: [f32; 8],
@@ -388,6 +390,7 @@ impl Node {
             frame_left: f32::INFINITY,
             slice: None,
             mask: false,
+            blend: 0,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
             reach: 1.0,
@@ -1652,6 +1655,15 @@ impl Scene {
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
             Prop::Playing => n.playing = take!(flag),
             Prop::Mask => n.mask = take!(flag),
+            Prop::Blend => {
+                n.blend = match take!(text).as_str() {
+                    "multiply" => 1,
+                    "screen" => 2,
+                    "add" => 3,
+                    "overlay" => genoma_render::Image::OVERLAY,
+                    _ => 0,
+                };
+            }
             Prop::Slice => {
                 let v = take!(numbers);
                 n.slice = match v.as_slice() {
@@ -3015,6 +3027,39 @@ fn collect(
     }
     let present = tree.get_node_context(node).is_some_and(|n| n.present);
     let is_mask = present && out.mask.is_some() && tree.get_node_context(node).is_some_and(|n| n.mask);
+    let blend = if present && !is_mask { tree.get_node_context(node).map_or(0, |n| n.blend) } else { 0 };
+    if blend != 0 {
+        // Blended: the node and its subtree (masked, blurred) drawn into a
+        // list of their own, laid as one image meeting what is under it.
+        let mut own = DrawList::default();
+        std::mem::swap(out.list, &mut own);
+        masked_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out, false, true);
+        std::mem::swap(out.list, &mut own);
+        blended(own, blend, out);
+    } else {
+        masked_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out, is_mask, present);
+    }
+    if raise {
+        std::mem::swap(out.list, &mut out.upper);
+        out.raised = false;
+    }
+}
+
+/// A node as its mask children leave it: drawn into its parent's mask when
+/// it is one (`is_mask`), or masked by its own mask children, or as it is.
+#[allow(clippy::too_many_arguments)]
+fn masked_or_not(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    parent_exact: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+    is_mask: bool,
+    present: bool,
+) {
     let masked_here = present
         && tree.children(node).unwrap_or_default().iter().any(|&c| tree.get_node_context(c).is_some_and(|n| n.present && n.mask));
     if is_mask {
@@ -3038,10 +3083,57 @@ fn collect(
     } else {
         blurred_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
     }
-    if raise {
-        std::mem::swap(out.list, &mut out.upper);
-        out.raised = false;
+}
+
+/// `own` laid as one image meeting what is under it as `blend` asks
+/// (`genoma_render::Image::blend`); for overlay, what `out` holds under it
+/// so far is drawn into a second texture over the same rectangle.
+fn blended(mut own: DrawList, blend: u8, out: &mut Out) {
+    let Some([x0, y0, x1, y1]) = own.paint_bounds() else { return };
+    let bounds = [x0.max(0.0).floor(), y0.max(0.0).floor(), x1.min(out.viewport[0]).ceil(), y1.min(out.viewport[1]).ceil()];
+    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+        return;
     }
+    out.list.groups.extend(std::mem::take(&mut own.groups));
+    let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
+    let key = |list: &DrawList, what: u8| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (list.fingerprint(), bounds.map(f32::to_bits), what).hash(&mut h);
+        h.finish() | (1 << 63)
+    };
+    let own_key = key(&own, 3 + blend);
+    // Overlaid on nothing, it is itself.
+    let (blend, under) = if blend == genoma_render::Image::OVERLAY {
+        let under = out.list.within([bounds[0] as u32, bounds[1] as u32, size[0] as u32, size[1] as u32]);
+        if under.is_empty() {
+            (0, None)
+        } else {
+            let under_key = key(&under, 20);
+            out.list.groups.push(genoma_render::Group { key: under_key, list: under, bounds, sigma: 0.0 });
+            (blend, Some(under_key))
+        }
+    } else {
+        (blend, None)
+    };
+    out.list.groups.push(genoma_render::Group { key: own_key, list: own, bounds, sigma: 0.0 });
+    out.list.push_image(genoma_render::Image {
+        key: own_key,
+        pixels: Arc::new(Vec::new()),
+        width: size[0] as u32,
+        height: size[1] as u32,
+        origin: [bounds[0], bounds[1]],
+        size,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        radius: 0.0,
+        alpha: 1.0,
+        clip: out.clip,
+        fade: out.fade_of(),
+        transform: Rect::IDENTITY,
+        filter: genoma_render::Image::NO_FILTER,
+        mask: under,
+        blend,
+    });
 }
 
 /// What `out` holds under a shader node at `rect` (logical units), and a
@@ -3121,6 +3213,7 @@ fn backdrop(rect: [f32; 4], radius: f32, sigma: f32, out: &mut Out) {
         transform: Rect::IDENTITY,
         filter: genoma_render::Image::NO_FILTER,
         mask: None,
+        blend: 0,
     });
 }
 
@@ -3192,6 +3285,7 @@ fn masked(mut own: DrawList, mut mask: DrawList, out: &mut Out) {
         transform: Rect::IDENTITY,
         filter: genoma_render::Image::NO_FILTER,
         mask: Some(mask_key),
+        blend: 0,
     });
 }
 
@@ -3236,6 +3330,7 @@ fn blurred(mut own: DrawList, sigma: f32, out: &mut Out) {
         transform: Rect::IDENTITY,
         filter: genoma_render::Image::NO_FILTER,
         mask: None,
+        blend: 0,
     });
 }
 
@@ -3810,6 +3905,7 @@ fn collect_node(
                         transform: out.transform,
                         filter: genoma_render::Image::NO_FILTER,
                         mask: None,
+                        blend: 0,
                     });
                 }
             }
@@ -3870,6 +3966,7 @@ fn collect_node(
                                     transform: out.transform,
                                     filter: n.filter,
                                     mask: None,
+                                    blend: 0,
                                 });
                             }
                         }
@@ -3908,6 +4005,7 @@ fn collect_node(
                             transform: out.transform,
                             filter: n.filter,
                             mask: None,
+                            blend: 0,
                         });
                     } else {
                     let part = |shown: u32, decoded: u32| {
@@ -3935,6 +4033,7 @@ fn collect_node(
                         transform: out.transform,
                         filter: n.filter,
                         mask: None,
+                        blend: 0,
                     });
                     }
                 }
@@ -3988,6 +4087,7 @@ fn collect_node(
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
                     mask: None,
+                    blend: 0,
                 });
             }
             // Reaching into a clip's fade: glyphon cannot fade it, an image can.
@@ -4059,6 +4159,7 @@ fn collect_node(
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
                     mask: None,
+                    blend: 0,
                 });
             }
         }
@@ -4091,6 +4192,7 @@ fn collect_node(
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
                     mask: None,
+                    blend: 0,
                 });
             }
         }
@@ -4546,6 +4648,40 @@ mod tests {
         scene.set(hole, Prop::Mask, Value::Bool(false), None).unwrap();
         let plain = scene.draw_list(1.0);
         assert!(plain.groups.is_empty() && plain.rects.len() == 2);
+    }
+
+    #[test]
+    fn a_blended_node_is_one_image_and_overlay_reads_what_is_under() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let under = scene.create(Kind::Capsule, Role::None);
+        let top = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, under);
+        scene.append(root, top);
+        for node in [under, top] {
+            for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 20.0)] {
+                scene.set(node, p, Value::Number(v), None).unwrap();
+            }
+            scene.set(node, Prop::Fill, Value::Color([0.5, 0.5, 0.5, 1.0]), None).unwrap();
+        }
+        scene.set(top, Prop::Overlay, Value::Bool(true), None).unwrap();
+        // Under all of the surface, so the overlaid node lies on it.
+        scene.set(under, Prop::Width, Value::Number(200.0), None).unwrap();
+        scene.set(under, Prop::Height, Value::Number(100.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        scene.set(top, Prop::Blend, Value::Text("multiply".into()), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert_eq!((list.rects.len(), list.groups.len(), list.images.len()), (1, 1, 1));
+        assert_eq!((list.images[0].blend, list.images[0].mask), (1, None));
+        scene.set(top, Prop::Blend, Value::Text("overlay".into()), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.groups.len(), 2, "what is under, and the node");
+        let image = &list.images[0];
+        assert_eq!(image.blend, genoma_render::Image::OVERLAY);
+        assert_eq!(image.mask, Some(list.groups[0].key));
+        scene.set(top, Prop::Blend, Value::Text("normal".into()), None).unwrap();
+        assert!(scene.draw_list(1.0).groups.is_empty());
     }
 
     #[test]

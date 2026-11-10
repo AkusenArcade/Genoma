@@ -140,6 +140,9 @@ return g.surface {
   `overlay = true` and `mask = true` lets the picture show through the
   letters; a capsule with a gradient fades what it masks in its shape.
   Both are drawn into textures kept while they rest.
+- **Blend modes:** `blend = "multiply"`, `"screen"`, `"add"` or
+  `"overlay"` lays a node and what it holds over what is under it that
+  way: a stain, a light, a texture over a picture.
 - **Blur:** `blur_radius = 6` draws a node and everything in it blurred,
   after depth has turned it, the spread in logical units as CSS's
   `blur()`. At 0, the default, nothing is done. The subtree is drawn into

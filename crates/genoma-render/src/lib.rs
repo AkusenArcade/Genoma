@@ -108,13 +108,18 @@ pub struct Image {
     /// tint's red, green, blue and strength (0 none): see [`Image::NO_FILTER`].
     pub filter: [f32; 8],
     /// Another texture (a group's) laid over the same rectangle whose alpha
-    /// this one's is multiplied by: a mask. `None` draws it whole.
+    /// this one's is multiplied by: a mask. `None` draws it whole. With
+    /// [`Image::OVERLAY`], what is under instead.
     pub mask: Option<u64>,
+    /// How it meets what is under: 0 normal, 1 multiply, 2 screen, 3 add,
+    /// 4 overlay (against `mask`, which then holds what is under).
+    pub blend: u8,
 }
 
 impl Image {
     /// The picture as it is.
     pub const NO_FILTER: [f32; 8] = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    pub const OVERLAY: u8 = 4;
 }
 
 /// What one surface shows, in layers drawn one after the other. Inside a
@@ -238,6 +243,7 @@ fn same_image(a: &Image, b: &Image) -> bool {
         && a.transform == b.transform
         && a.filter == b.filter
         && a.mask == b.mask
+        && a.blend == b.blend
 }
 
 fn same_shader(a: &Shader, b: &Shader) -> bool {
@@ -549,7 +555,7 @@ impl DrawList {
             }
             (i.width, i.height, i.radius.to_bits(), i.alpha.to_bits()).hash(&mut h);
             i.filter.map(f32::to_bits).hash(&mut h);
-            i.mask.hash(&mut h);
+            (i.mask, i.blend).hash(&mut h);
         }
         for sh in &self.shaders {
             sh.key.hash(&mut h);
@@ -912,6 +918,7 @@ mod tests {
             transform: Rect::IDENTITY,
             filter: Image::NO_FILTER,
             mask: None,
+            blend: 0,
         }
     }
 

@@ -97,6 +97,12 @@ changes what a shell sees.
   image; every image now multiplies its alpha by a mask's, one white
   texel when it has none, so nothing else draws differently.
 
+- Blend modes: `blend` (`normal`, `multiply`, `screen`, `add`,
+  `overlay`) draws a node and its subtree as one group meeting what is
+  under it that way. Multiply, screen and add are the GPU's own blending;
+  overlay reads what is under it in a second texture over the same
+  rectangle. Kept while it rests.
+
 ### Changed
 
 - `shadow_blur` and `shadow_y` are animatable (texts as well).
