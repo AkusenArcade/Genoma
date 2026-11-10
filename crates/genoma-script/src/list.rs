@@ -372,6 +372,7 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
         let mut scene = scene.borrow_mut();
         scene.watch_size(node);
         scene.set_interactive(node, true);
+        scene.mark_list(node);
     }
 
     // The window: the rows in view and a few beyond, the first of them

@@ -21,6 +21,15 @@ changes what a shell sees.
   pressing it twice maximizes it or gives back its size.
 - `kit.titlebar { title, on_close }`: a title bar for a window that moves
   it, with a close button.
+- A `g.popup` opens from a window as it does from a layer surface (a
+  `kit.dropdown` in a window), and closes before its window does.
+
+### Changed
+
+- Inside a `navigate` node, the keyboard's focus walks a whole `g.list`:
+  a row it reaches is scrolled into view the least way, so the rows after
+  it are mounted for the next step. Before, it reached only the rows
+  mounted when it began, then went round to the start.
 
 ## 0.1.3 — 2026-11-09
 

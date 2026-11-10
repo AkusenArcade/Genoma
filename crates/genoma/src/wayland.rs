@@ -86,7 +86,7 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         xdg::{
-            XdgPositioner, XdgShell,
+            XdgPositioner, XdgShell, XdgSurface,
             popup::{Popup, PopupConfigure, PopupHandler},
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
@@ -118,6 +118,13 @@ struct WindowRole {
     fraction: Option<WpFractionalScaleV1>,
     title: String,
     maximized: bool,
+}
+
+/// What a popup opens from: a layer surface, or a window.
+#[derive(Clone)]
+enum PopupParent {
+    Layer(LayerSurface),
+    Window(Window),
 }
 
 /// An open popup's own Wayland objects.
@@ -749,20 +756,24 @@ impl App {
     }
 
     /// Where popup `i` opens from: the layer surface on its output (any,
-    /// for a popup with none) holding the node its anchor names, as last
-    /// drawn, and that node's rectangle there.
-    fn anchor_of(&self, i: usize) -> Option<(usize, LayerSurface, [i32; 4])> {
+    /// for a popup with none), or the window, holding the node its anchor
+    /// names, as last drawn, and that node's rectangle there.
+    fn anchor_of(&self, i: usize) -> Option<(usize, PopupParent, [i32; 4])> {
         let spec = self.specs.get(self.surfaces[i].spec)?.popup.as_ref()?;
         let id = spec.anchor.as_ref().or(self.surfaces[i].anchor_wish.as_ref())?;
         let output = &self.surfaces[i].output;
         self.surfaces.iter().enumerate().find_map(|(j, p)| {
-            let Role::Layer(layer) = &p.role else { return None };
+            let parent = match &p.role {
+                Role::Layer(layer) => PopupParent::Layer(layer.clone()),
+                Role::Window(Some(open)) => PopupParent::Window(open.window.clone()),
+                _ => return None,
+            };
             if j == i || !p.configured || p.asleep || p.frames == 0 || (output.is_some() && &p.output != output) {
                 return None;
             }
             let scene = p.scene.borrow();
             let [x, y, w, h] = scene.extent(scene.find(id)?)?;
-            Some((j, layer.clone(), [x.floor() as i32, y.floor() as i32, w.ceil().max(1.0) as i32, h.ceil().max(1.0) as i32]))
+            Some((j, parent, [x.floor() as i32, y.floor() as i32, w.ceil().max(1.0) as i32, h.ceil().max(1.0) as i32]))
         })
     }
 
@@ -826,7 +837,7 @@ impl App {
         };
         // Until what it opens from is drawn: tried again after the next
         // batch of events.
-        let Some((j, layer, anchor)) = self.anchor_of(i) else { return };
+        let Some((j, parent, anchor)) = self.anchor_of(i) else { return };
         self.surfaces[i].wanted = self.measure(i);
         let Some(positioner) = self.positioner(i, anchor) else { return };
         let qh = self.qh.clone();
@@ -835,7 +846,13 @@ impl App {
         let fraction = self.fractional.as_ref().map(|f| f.get_fractional_scale(&wl, &qh, ScaleData(id)));
         let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&wl, &qh, Ignore));
         let effect = self.effects.get_background_effect(&wl, &qh).ok();
-        let popup = match Popup::from_surface(None, &positioner, &qh, wl, &base) {
+        // A window's popup is its xdg surface's child; a layer surface's
+        // is given its parent once made.
+        let xdg_parent = match &parent {
+            PopupParent::Window(window) => Some(window.xdg_surface().clone()),
+            PopupParent::Layer(_) => None,
+        };
+        let popup = match Popup::from_surface(xdg_parent.as_ref(), &positioner, &qh, wl, &base) {
             Ok(popup) => popup,
             Err(e) => {
                 log::warn!("g.popup: {e}");
@@ -850,11 +867,14 @@ impl App {
         // opened from could take it: the layer surface may, while it is open.
         let seat = self.seat.clone().or_else(|| self.seats.seats().next());
         let grab = spec.grab && self.input_serial != 0 && seat.is_some();
-        if grab && !self.surfaces[j].keyboard && !self.surfaces[j].typing {
-            layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-            layer.commit();
+        // A window takes the keyboard by the compositor's focus, as it is.
+        if let PopupParent::Layer(layer) = &parent {
+            if grab && !self.surfaces[j].keyboard && !self.surfaces[j].typing {
+                layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+                layer.commit();
+            }
+            layer.get_popup(popup.xdg_popup());
         }
-        layer.get_popup(popup.xdg_popup());
         if let (true, Some(seat)) = (grab, seat) {
             popup.xdg_popup().grab(&seat, self.input_serial);
         }
@@ -1034,6 +1054,13 @@ impl App {
     /// Closes window `i`: its renderer target first, then its Wayland
     /// objects, its scene and tree staying for the next opening.
     fn close_window(&mut self, i: usize) {
+        // Its popups first: a parent goes after its children.
+        let id = self.surfaces[i].id;
+        for j in 0..self.surfaces.len() {
+            if matches!(&self.surfaces[j].role, Role::Popup(Some(p)) if p.parent == id) {
+                self.close_popup(j);
+            }
+        }
         let s = &mut self.surfaces[i];
         let Role::Window(Some(open)) = std::mem::replace(&mut s.role, Role::Window(None)) else { return };
         if s.target_made {
@@ -1268,6 +1295,28 @@ impl App {
         if let Some([x, y, w, h]) = extent {
             self.deliver(i, node, Input::FocusWithin(x, y, w, h));
         }
+        self.reveal_focused(i, node);
+    }
+
+    /// A row of a `g.list` that took the keyboard's focus is scrolled into
+    /// view, the least way: the list mounts a few rows past its view, so
+    /// the next row is always there for the next step, and the focus walks
+    /// the whole list rather than only the rows mounted when it began.
+    fn reveal_focused(&mut self, i: usize, node: NodeId) {
+        let (list, delta) = {
+            let scene = self.surfaces[i].scene.borrow();
+            let Some(list) = scene.list_around(node) else { return };
+            let (Some([_, y, _, h]), Some([_, ly, _, lh])) = (scene.extent(node), scene.extent(list)) else { return };
+            let delta = if y < ly {
+                y - ly
+            } else if y + h > ly + lh {
+                (y + h) - (ly + lh)
+            } else {
+                return;
+            };
+            (list, delta)
+        };
+        self.deliver(i, list, Input::Wheel(0.0, delta as f64, false));
     }
 
     /// Where the keyboard walks on surface `i`, if it does: the `navigate`

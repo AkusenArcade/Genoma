@@ -273,6 +273,8 @@ pub struct Node {
     focus_color: [f32; 4],
     /// In a window, a press on it moves the window (a title bar).
     move_window: bool,
+    /// A `g.list`: the keyboard's focus on one of its rows scrolls it.
+    rows_list: bool,
 }
 
 impl Node {
@@ -397,6 +399,7 @@ impl Node {
             navigate: false,
             focus_color: [0.478, 0.635, 0.969, 1.0],
             move_window: false,
+            rows_list: false,
         }
     }
 
@@ -1185,6 +1188,26 @@ impl Scene {
         let mut at = Some(node);
         while let Some(id) = at {
             if self.tree.get_node_context(id).is_some_and(|n| n.navigate) {
+                return Some(id);
+            }
+            at = self.parent(id);
+        }
+        None
+    }
+
+    /// Marks `node` as a `g.list`, which scrolls to the row the keyboard's
+    /// focus is on (its `on_wheel` takes logical units).
+    pub fn mark_list(&mut self, node: NodeId) {
+        if let Some(n) = self.tree.get_node_context_mut(node) {
+            n.rows_list = true;
+        }
+    }
+
+    /// The nearest `g.list` around `node`, not `node` itself.
+    pub fn list_around(&self, node: NodeId) -> Option<NodeId> {
+        let mut at = self.parent(node);
+        while let Some(id) = at {
+            if self.tree.get_node_context(id).is_some_and(|n| n.rows_list) {
                 return Some(id);
             }
             at = self.parent(id);
@@ -3527,6 +3550,28 @@ mod tests {
         assert!(glyphs.iter().any(|g| g.end == n.text.len()), "the extension is kept");
         assert!(run.line_w <= 121.0, "it fits: {}", run.line_w);
         assert!(glyphs.len() < n.text.len(), "something was cut");
+    }
+
+    #[test]
+    fn a_row_finds_the_list_around_it_and_a_window_title_moves() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let list = scene.create(Kind::Box, Role::Group);
+        let row = scene.create(Kind::Box, Role::Group);
+        let button = scene.create(Kind::Capsule, Role::Button);
+        scene.append(root, list);
+        scene.append(list, row);
+        scene.append(row, button);
+        assert_eq!(scene.list_around(button), None, "nothing is a list until marked");
+        scene.mark_list(list);
+        assert_eq!(scene.list_around(button), Some(list));
+        assert_eq!(scene.list_around(list), None, "a list is not around itself");
+        // A title bar takes the press without a handler of its own.
+        assert!(!scene.moves_window(row));
+        scene.set(row, Prop::MoveWindow, Value::Bool(true), None).unwrap();
+        assert!(scene.moves_window(row));
+        assert!(scene.tree.get_node_context(row).unwrap().interactive);
     }
 
     #[test]
