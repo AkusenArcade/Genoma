@@ -2532,8 +2532,9 @@ impl Script {
                     };
                     LuaValue::UserData(data)
                 }
-                kit if kit == "@genoma/kit" || kit.starts_with("@genoma/kit/") => {
-                    let part = kit.strip_prefix("@genoma/kit/").unwrap_or("init");
+                kit if kit == "@genoma/kit" || kit.starts_with("@genoma/kit/") || kit == "@genoma/async" => {
+                    // @genoma/async ships with the kit, a module of its own.
+                    let part = if kit == "@genoma/async" { "async" } else { kit.strip_prefix("@genoma/kit/").unwrap_or("init") };
                     let source = kit_source(part).ok_or_else(|| err(format!("no module {kit}")))?;
                     owned_by(module_owner.get(), || lua.load(&source).set_name(kit).eval())?
                 }
@@ -2637,6 +2638,7 @@ const KIT: &[(&str, &str)] = &[
     ("effects", include_str!("../../../kit/effects.luau")),
     ("field", include_str!("../../../kit/field.luau")),
     ("titlebar", include_str!("../../../kit/titlebar.luau")),
+    ("async", include_str!("../../../kit/async.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {
@@ -3395,6 +3397,7 @@ mod tests {
             lua.load(*source).set_name(*name).into_function().unwrap_or_else(|e| panic!("kit/{name}: {e}"));
         }
         assert!(kit_source("button").is_some() && kit_source("nothing").is_none());
+        assert!(kit_source("async").is_some_and(|s| s.contains("function M.run")), "@genoma/async ships with the kit");
     }
 
     #[test]

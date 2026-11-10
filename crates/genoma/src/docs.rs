@@ -46,6 +46,10 @@ pub fn write_types(dir: &Path) -> std::io::Result<()> {
     }
     for (name, source) in kit_modules() {
         std::fs::write(dir.join("kit").join(format!("{name}.luau")), source)?;
+        // @genoma/async is required by its own name, beside the services.
+        if *name == "async" {
+            std::fs::write(dir.join("async.luau"), source)?;
+        }
     }
     Ok(())
 }

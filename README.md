@@ -168,6 +168,12 @@ return g.surface {
   [`kit/`](kit). Its times are `kit_quick`, `kit_move` and `kit_open`,
   defined with `g.timing_default`, so a shell retimes them with
   `g.timing` before or after requiring the kit. See `examples/kit`.
+- **Waiting without nesting:** `require("@genoma/async")` runs a task
+  (`async.run(function() … end)`) in which `async.process`,
+  `async.sleep`, `async.call` and `async.get` (D-Bus) and
+  `async.activation_token` wait for their answer as if it came at once,
+  and `async.all { … }` waits for several side by side; nothing else stops
+  meanwhile. A coroutine underneath; its source is in [`kit/async.luau`](kit/async.luau).
 - **Keyboard:** a node with `navigate = true` is walked by the keyboard
   once its surface has the keys: Tab and Shift+Tab, or the arrows, move
   the focus among its buttons and sliders, ringed in `focus_color`; a

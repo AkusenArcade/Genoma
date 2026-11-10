@@ -15,6 +15,13 @@ changes what a shell sees.
   `.luaurc` that points `@genoma` at them (luau-analyze passes it in
   strict mode), and a README of the commands. It writes nothing into a
   directory that holds something.
+- `@genoma/async`: waiting written straight down. Inside `async.run(f)`,
+  `async.process(command)` returns the exit status and the output and
+  error lines, `async.sleep(seconds)` waits, `async.call` and `async.get`
+  are `g.dbus.call` and `.get` with their reply returned, and
+  `async.activation_token` the token; `async.all { … }` runs several side
+  by side and returns what each did. A mistake in a task goes to the log
+  with its line; waiting outside a task is an error at the caller's line.
 
 ## 0.1.6 — 2026-11-10
 
