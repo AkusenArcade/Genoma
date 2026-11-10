@@ -2081,10 +2081,23 @@ impl Scene {
     /// shader's clock, an orbit, a filling arc, a wave, a sway, particles,
     /// a pulse). A surface that keeps drawing at rest says why here.
     pub fn moving_report(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.animations.iter().map(|a| format!("{} transition {:?}", u64::from(a.node), a.prop)).collect();
+        // A transition on something unseen waits and asks for nothing: said
+        // after the ones that move.
+        let mut out: Vec<String> = Vec::new();
+        let mut waiting = 0;
+        for a in &self.animations {
+            if self.seen(a.node) || self.parent(a.node).is_some_and(|p| self.seen(p)) {
+                out.push(format!("{} transition {:?}", u64::from(a.node), a.prop));
+            } else {
+                waiting += 1;
+            }
+        }
+        if waiting > 0 {
+            out.push(format!("{waiting} transitions waiting, unseen"));
+        }
         for &node in &self.movers {
             let Some(n) = self.tree.get_node_context(node) else { continue };
-            if !n.present {
+            if !n.present || !self.seen(node) {
                 continue;
             }
             let id = u64::from(node);
