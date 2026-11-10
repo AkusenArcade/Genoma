@@ -15,7 +15,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     mem::MaybeUninit,
     os::{
-        fd::{BorrowedFd, OwnedFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::{
             net::UnixStream,
             process::{CommandExt, ExitStatusExt},
@@ -486,6 +486,33 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 /// `g.file { path = "~/.config/bioma/override.json" }`: read now, and again
 /// whenever the file is written, replaced or removed (`watch = false` reads
 /// once).
+/// What a file's directory is watched for: written, moved in or out, made,
+/// removed.
+const FILE_EVENTS: inotify::WatchFlags = inotify::WatchFlags::CLOSE_WRITE
+    .union(inotify::WatchFlags::MOVED_TO)
+    .union(inotify::WatchFlags::MOVED_FROM)
+    .union(inotify::WatchFlags::CREATE)
+    .union(inotify::WatchFlags::DELETE);
+
+/// `dir` watched for `events`; or, while it does not exist yet, the nearest
+/// directory above it that does, for what is made in it. Called again on
+/// each event, it goes down a level as each one is made, until the watch is
+/// on `dir` itself: true once it is. A file whose folder appears only later
+/// (matugen's output on a first start, `~/.config/bioma/generated/`) is
+/// seen from then on, not never.
+fn watch_toward(fd: BorrowedFd<'_>, dir: &Path, events: inotify::WatchFlags) -> bool {
+    let mut at = dir;
+    while !at.is_dir() {
+        match at.parent() {
+            Some(up) => at = up,
+            None => return false,
+        }
+    }
+    let own = at == dir;
+    let wanted = if own { events } else { inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO };
+    inotify::add_watch(fd, at, wanted).is_ok() && own
+}
+
 pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
     let path = expand(&t.get::<String>("path")?);
     let read = {
@@ -499,35 +526,31 @@ pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
         // replaces the file, and a watch on the old one would see nothing.
         let dir = path.parent().unwrap_or(Path::new("/")).to_owned();
         let name = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
-        let watch = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC).and_then(|fd| {
-            inotify::add_watch(
-                &fd,
-                &dir,
-                inotify::WatchFlags::CLOSE_WRITE
-                    | inotify::WatchFlags::MOVED_TO
-                    | inotify::WatchFlags::MOVED_FROM
-                    | inotify::WatchFlags::CREATE
-                    | inotify::WatchFlags::DELETE,
-            )?;
-            Ok(fd)
-        });
-        match watch {
-            Ok(fd) => stop.hold(host.readable(
-                fd,
-                Box::new(move |fd| {
-                    let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
-                    let mut events = inotify::Reader::new(fd, &mut buf);
-                    let mut ours = false;
-                    while let Ok(event) = events.next() {
-                        ours |= event.file_name().is_some_and(|n| n.to_bytes() == name.as_encoded_bytes());
-                    }
-                    if ours {
-                        text.set(read());
-                    }
-                    true
-                }),
-            )),
-            Err(e) => log::warn!("g.file {}: no watch on {}: {e}", path.display(), dir.display()),
+        match inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC) {
+            Ok(fd) => {
+                let mut armed = watch_toward(fd.as_fd(), &dir, FILE_EVENTS);
+                stop.hold(host.readable(
+                    fd,
+                    Box::new(move |fd| {
+                        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+                        let mut events = inotify::Reader::new(fd, &mut buf);
+                        let mut ours = false;
+                        while let Ok(event) = events.next() {
+                            ours |= event.file_name().is_some_and(|n| n.to_bytes() == name.as_encoded_bytes());
+                        }
+                        // Something made on the way to its folder: a level
+                        // further, and read, as the file may have come with it.
+                        if !armed {
+                            armed = watch_toward(fd, &dir, FILE_EVENTS);
+                            text.set(read());
+                        } else if ours {
+                            text.set(read());
+                        }
+                        true
+                    }),
+                ))
+            }
+            Err(e) => log::warn!("g.file {}: no watch: {e}", path.display()),
         }
     }
     Ok(Watched { path, text, stop })
@@ -601,27 +624,20 @@ pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
     let entries = Signal::new(list_folder(&path));
     let stop = Stop::new(host);
     if t.get::<Option<bool>>("watch")?.unwrap_or(true) {
-        let watch = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC).and_then(|fd| {
-            inotify::add_watch(
-                &fd,
-                &path,
-                inotify::WatchFlags::MOVED_TO
-                    | inotify::WatchFlags::MOVED_FROM
-                    | inotify::WatchFlags::CREATE
-                    | inotify::WatchFlags::DELETE
-                    | inotify::WatchFlags::CLOSE_WRITE,
-            )?;
-            Ok(fd)
-        });
-        match watch {
+        match inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC) {
             Ok(fd) => {
                 let (path, entries) = (path.clone(), entries.clone());
+                // A folder not there yet is waited for, as a file's is.
+                let mut armed = watch_toward(fd.as_fd(), &path, FILE_EVENTS);
                 stop.hold(host.readable(
                     fd,
                     Box::new(move |fd| {
                         let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
                         let mut events = inotify::Reader::new(fd, &mut buf);
                         while events.next().is_ok() {}
+                        if !armed {
+                            armed = watch_toward(fd, &path, FILE_EVENTS);
+                        }
                         // Set only when the list differs: a file written in
                         // place is a change of content, not of the folder.
                         let now = list_folder(&path);
@@ -712,4 +728,24 @@ pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
         s.borrow_mut().take();
     }));
     Ok(Socket { stream, stop })
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn a_watch_goes_down_toward_a_folder_made_later() {
+        let base = std::env::temp_dir().join(format!("genoma-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join("bioma").join("generated");
+        let fd = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC).unwrap();
+        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "two levels missing: the base is watched");
+        std::fs::create_dir(base.join("bioma")).unwrap();
+        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "one level missing: a level down");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "there: its own watch");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

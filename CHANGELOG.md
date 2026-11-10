@@ -22,6 +22,14 @@ changes what a shell sees.
   The compositor's blur is not drawn. Bioma's ten surfaces, with a cell
   opened by `--ipc`, in about four seconds.
 
+### Fixed
+
+- `g.file` and `g.folder` on a path whose folder does not exist yet: the
+  watch waits on the nearest folder that does and goes down as the rest is
+  made, so a file written for the first time later is seen. Before, it was
+  never watched (a "no watch" warning), and a shell saw it only when the
+  watch was made again.
+
 ## 0.1.7 — 2026-11-10
 
 ### Added
