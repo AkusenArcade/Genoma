@@ -83,6 +83,44 @@ fn module_source(source: &str) -> String {
     format!("{PRELUDE}\n{LIBRARY}\n{source}")
 }
 
+/// A shader's WGSL checked as the device will compile it, Genoma's prelude
+/// and library before it: what is wrong, and where, its line counted in
+/// `source` itself (`line 12: …`).
+pub fn check(source: &str) -> Result<(), String> {
+    use std::error::Error as _;
+    use wgpu::naga;
+    let text = module_source(source);
+    let start = text.len() - source.len();
+    let lines_before = text[..start].matches('\n').count() as u32;
+    let place = |at: Option<naga::SourceLocation>| match at {
+        Some(l) if l.offset as usize >= start => format!("line {}: ", l.line_number - lines_before),
+        Some(_) => "in what Genoma puts before it: ".to_owned(),
+        None => String::new(),
+    };
+    // Of the places an error names, the first in the source itself.
+    let mine = |spans: Vec<naga::Span>| {
+        spans.into_iter().find(|s| s.to_range().is_some_and(|r| r.start >= start)).map(|s| s.location(&text))
+    };
+    let module = naga::front::wgsl::parse_str(&text).map_err(|e| {
+        let at = mine(e.labels().map(|(span, _)| span).collect()).or_else(|| e.location(&text));
+        format!("{}{}", place(at), e.message())
+    })?;
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+        .validate(&module)
+        .map_err(|e| {
+            let mut said = e.as_inner().to_string();
+            let mut cause = e.as_inner().source();
+            while let Some(c) = cause {
+                said.push_str(": ");
+                said.push_str(&c.to_string());
+                cause = c.source();
+            }
+            let at = mine(e.spans().map(|(span, _)| *span).collect()).or_else(|| e.location(&text));
+            format!("{}{said}", place(at))
+        })?;
+    Ok(())
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
@@ -471,6 +509,18 @@ mod tests {
             .validate(&module)
             .map_err(|e| e.emit_to_string(&text))?;
         Ok(())
+    }
+
+    #[test]
+    fn a_mistake_is_told_at_its_own_line() {
+        let wrong = "fn shade(p: vec2<f32>) -> vec4<f32> {\n    let a = 1.0;\n    return vec4<f32>(a, b, 0.0, 1.0);\n}\n";
+        let said = super::check(wrong).unwrap_err();
+        assert!(said.starts_with("line 3: "), "{said}");
+        assert!(said.contains('b'), "names what is missing: {said}");
+        let bad_type = "fn shade(p: vec2<f32>) -> vec4<f32> {\n    return 1.0;\n}\n";
+        let said = super::check(bad_type).unwrap_err();
+        assert!(said.contains("line"), "a validation error has its line too: {said}");
+        super::check("fn shade(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(p, 0.0, 1.0); }").unwrap();
     }
 
     #[test]

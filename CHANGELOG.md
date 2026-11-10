@@ -17,6 +17,18 @@ changes what a shell sees.
   textures kept and their memory; and an outline round what the last
   frame drew again. A surface at rest draws nothing, and its line says
   what its last frame cost.
+- `genoma check [dir]`: every `.wgsl` checked as a `g.shader` compiles it
+  (with the prelude and the library) and every `.luau` by the Luau
+  compiler, each mistake told with its file and its own line; exit status
+  1 when there is one.
+
+### Changed
+
+- A `g.shader` whose WGSL does not compile is drawn as a red plate with
+  its file and the mistake, at the line in that file, over the node; it
+  draws again as soon as the file is saved right. Before, the node stayed
+  empty and the mistake went to the log, its line counted in Genoma's
+  prelude.
 
 ## 0.1.4 — 2026-11-10
 

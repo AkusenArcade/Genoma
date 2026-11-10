@@ -2512,6 +2512,23 @@ pub const SERVICES: &[(&str, &str)] = &[
 ];
 
 /// The kit's modules by name, as built in.
+/// A Luau file compiled, not run: a syntax mistake and its line
+/// (`genoma check`). Types are luau-analyze's business (`genoma types`).
+pub fn check_luau(name: &str, source: &str) -> Result<(), String> {
+    let lua = Lua::new();
+    lua.load(source).set_name(format!("={name}")).into_function().map(|_| ()).map_err(|e| {
+        let message = match e {
+            mlua::Error::SyntaxError { message, .. } => message,
+            other => other.to_string(),
+        };
+        // "name:3: …" as "line 3: …", as a shader's mistake is told.
+        match message.strip_prefix(&format!("{name}:")).and_then(|rest| rest.split_once(": ")) {
+            Some((line, what)) if line.chars().all(|c| c.is_ascii_digit()) => format!("line {line}: {what}"),
+            _ => message,
+        }
+    })
+}
+
 pub fn kit_modules() -> &'static [(&'static str, &'static str)] {
     KIT
 }
@@ -3168,6 +3185,13 @@ mod tests {
         let root = scene.borrow().root();
         let (scope, node) = Scope::new(|| mount(&scene, &handlers, 0, &t, root));
         Ok((scene, handlers, node?, scope))
+    }
+
+    #[test]
+    fn a_luau_mistake_is_told_at_its_line() {
+        assert_eq!(check_luau("a.luau", "local x = 1\nreturn x").map_err(|e| e), Ok(()));
+        let said = check_luau("a.luau", "local x = {\nreturn x\n").unwrap_err();
+        assert!(said.starts_with("line 2: "), "{said}");
     }
 
     #[test]

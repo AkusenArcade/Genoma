@@ -242,6 +242,8 @@ pub struct Node {
     /// A shader node's WGSL and its key; the numbers bound to it, the ones
     /// drawn (easing toward them over `follow` seconds), and its clock.
     shader: Option<(Arc<String>, u64)>,
+    /// Why its shader is not drawn: the file, and what WGSL said is wrong.
+    shader_error: Option<String>,
     values: Vec<f32>,
     shown: Vec<f32>,
     follow: f32,
@@ -379,6 +381,7 @@ impl Node {
             sway_range: 0.0,
             sway_phase: 0.0,
             shader: None,
+            shader_error: None,
             values: Vec::new(),
             shown: Vec::new(),
             follow: 0.0,
@@ -1653,14 +1656,28 @@ impl Scene {
                         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such built-in effect")),
                     None => std::fs::read_to_string(&path),
                 };
+                // Checked as the device will compile it, before it goes there:
+                // a mistake is drawn over the node, at its own line, and the
+                // node waits for the file to be saved right.
+                n.shader_error = None;
+                let file = std::path::Path::new(&path).file_name().map_or(path.clone(), |f| f.to_string_lossy().into_owned());
                 n.shader = match read {
                     Ok(source) => {
                         let mut h = std::collections::hash_map::DefaultHasher::new();
                         std::hash::Hash::hash(&source, &mut h);
-                        Some((Arc::new(source), std::hash::Hasher::finish(&h)))
+                        let key = std::hash::Hasher::finish(&h);
+                        match checked(key, &source) {
+                            Ok(()) => Some((Arc::new(source), key)),
+                            Err(e) => {
+                                log::warn!("g.shader {path}: {e}");
+                                n.shader_error = Some(format!("{file}: {e}"));
+                                None
+                            }
+                        }
                     }
                     Err(e) => {
                         log::warn!("g.shader {path}: {e}");
+                        n.shader_error = Some(format!("{file}: {e}"));
                         None
                     }
                 };
@@ -3269,6 +3286,9 @@ fn collect_node(
             }
         }
         Kind::Shader => {
+            if let Some(said) = &n.shader_error {
+                shader_error(fonts, said, [origin[0] * scale, origin[1] * scale], [layout.size.width * scale, layout.size.height * scale], scale, out);
+            }
             if let Some((source, key)) = n.shader.clone() {
                 out.list.push_shader(genoma_render::Shader {
                     source,
@@ -3583,6 +3603,54 @@ fn xml_escape(s: &str) -> String {
 
 /// A path node as an SVG document `pixels` wide and high showing `size`
 /// logical units: drawn by resvg at the exact physical size.
+/// A shader source checked once by its hash: a reload sets every `src`
+/// again, and checking the library each time would be paid at each save.
+fn checked(key: u64, source: &str) -> Result<(), String> {
+    thread_local! {
+        static CHECKED: std::cell::RefCell<std::collections::HashMap<u64, Result<(), String>>> = Default::default();
+    }
+    CHECKED.with(|c| c.borrow_mut().entry(key).or_insert_with(|| genoma_render::shader::check(source)).clone())
+}
+
+/// What is wrong with a node's shader, over the node: a red plate with the
+/// file and the error, wrapped to the node's width.
+fn shader_error(fonts: &mut ct::FontSystem, said: &str, origin: [f32; 2], size: [f32; 2], scale: f32, out: &mut Out) {
+    let width = size[0].max(160.0 * scale);
+    let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(11.0, 14.0));
+    buffer.set_size(Some(width / scale - 12.0), None);
+    buffer.set_text(said, &ct::Attrs::new().family(ct::Family::Monospace), ct::Shaping::Advanced, None);
+    buffer.shape_until_scroll(fonts, false);
+    let lines = buffer.layout_runs().count().max(1) as f32;
+    let height = (lines * 14.0 + 10.0) * scale;
+    out.list.push_rect(Rect {
+        origin,
+        size: [width, height.max(size[1])],
+        radius: 4.0 * scale,
+        rim: 0.0,
+        level: 1.0,
+        cut: 0.0,
+        fill: [0.55, 0.08, 0.12, 0.92],
+        rim_top: [0.0; 4],
+        rim_bottom: [0.0; 4],
+        wave: [0.0; 4],
+        arc: Rect::WHOLE,
+        fill_to: [0.0; 4],
+        stops: Rect::NO_STOPS,
+        shapes: Rect::NO_SHAPES,
+        clip: out.clip,
+        path: [0.0; 4],
+        path_end: [0.0; 4],
+        bud: [0.0; 4],
+        bud_shape: [0.0; 4],
+        fade: out.fade_of(),
+        transform: out.transform,
+    });
+    out.list.push_text(
+        Text { buffer: Arc::new(buffer), origin: [origin[0] + 6.0 * scale, origin[1] + 5.0 * scale], scale, color: [1.0, 0.95, 0.95, 1.0], clip: out.clip },
+        [width, height],
+    );
+}
+
 /// How far past a text's or a path's outline its distance field reaches,
 /// logical units: the softest union it is met with blends within this.
 const OUTLINE_SPREAD: f32 = 24.0;

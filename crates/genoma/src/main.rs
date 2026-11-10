@@ -14,6 +14,7 @@
 //! directory reloads the interface in place.
 
 mod access;
+mod check;
 mod docs;
 mod ipc;
 mod wayland;
@@ -57,6 +58,7 @@ fn main() {
             }
         }
         Some("reference") => print!("{}", docs::reference()),
+        Some("check") => std::process::exit(check::run(std::env::args().nth(2).map(PathBuf::from).as_deref())),
         Some("spectrum") => spectrum_command(std::env::args().skip(2).collect()),
         Some("probe") => probe(),
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
