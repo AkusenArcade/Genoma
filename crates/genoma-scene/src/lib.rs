@@ -209,6 +209,8 @@ pub struct Node {
     /// A nine-slice's edges in the picture's own pixels: top, right,
     /// bottom, left; `None` is an ordinary image.
     slice: Option<[f32; 4]>,
+    /// Drawn as its parent's mask rather than as itself.
+    mask: bool,
     /// An image's colours: saturation, contrast, brightness, then a tint
     /// (`genoma_render::Image::filter`).
     filter: [f32; 8],
@@ -385,6 +387,7 @@ impl Node {
             play_time: 0.0,
             frame_left: f32::INFINITY,
             slice: None,
+            mask: false,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
             reach: 1.0,
@@ -1648,6 +1651,7 @@ impl Scene {
             Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
             Prop::Playing => n.playing = take!(flag),
+            Prop::Mask => n.mask = take!(flag),
             Prop::Slice => {
                 let v = take!(numbers);
                 n.slice = match v.as_slice() {
@@ -2334,7 +2338,7 @@ impl Scene {
         let others = self.combined_shapes();
         self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2817,6 +2821,8 @@ struct Out<'a> {
     drawn_images: Vec<NodeId>,
     /// The animated ones among them.
     animated: Vec<NodeId>,
+    /// While a masked node is gathered: where its `mask` children draw.
+    mask: Option<DrawList>,
     /// The surface, physical pixels: an image reaching past it is decoded
     /// only for what of it is on it.
     viewport: [f32; 2],
@@ -3007,17 +3013,30 @@ fn collect(
         let radius = if n.kind == Kind::Capsule { n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0) } else { n.radius.unwrap_or(0.0) };
         backdrop([x * scale, y * scale, w * scale, h * scale], radius * scale, n.backdrop_blur * scale, out);
     }
-    // Blurred: the node and its subtree drawn into a list of their own,
-    // shown as the image the renderer makes of it.
-    let radius = tree.get_node_context(node).filter(|n| n.present).map_or(0.0, |n| n.blur_radius);
-    if radius > 0.0 {
+    let present = tree.get_node_context(node).is_some_and(|n| n.present);
+    let is_mask = present && out.mask.is_some() && tree.get_node_context(node).is_some_and(|n| n.mask);
+    let masked_here = present
+        && tree.children(node).unwrap_or_default().iter().any(|&c| tree.get_node_context(c).is_some_and(|n| n.present && n.mask));
+    if is_mask {
+        // A mask: drawn into the masked node's mask, not shown itself.
+        let mut mask = out.mask.take().unwrap_or_default();
+        std::mem::swap(out.list, &mut mask);
+        blurred_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        std::mem::swap(out.list, &mut mask);
+        out.mask = Some(mask);
+    } else if masked_here {
+        // Masked: the node and its other children drawn into a list of
+        // their own, its mask children into another, and the first shown
+        // where the second is opaque.
         let mut own = DrawList::default();
         std::mem::swap(out.list, &mut own);
-        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        let saved = out.mask.replace(DrawList::default());
+        blurred_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        let mask = std::mem::replace(&mut out.mask, saved).unwrap_or_default();
         std::mem::swap(out.list, &mut own);
-        blurred(own, radius * scale, out);
+        masked(own, mask, out);
     } else {
-        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        blurred_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
     }
     if raise {
         std::mem::swap(out.list, &mut out.upper);
@@ -3101,6 +3120,78 @@ fn backdrop(rect: [f32; 4], radius: f32, sigma: f32, out: &mut Out) {
         fade: out.fade_of(),
         transform: Rect::IDENTITY,
         filter: genoma_render::Image::NO_FILTER,
+        mask: None,
+    });
+}
+
+/// A node and its subtree, blurred as a group when it asks to be.
+#[allow(clippy::too_many_arguments)]
+fn blurred_or_not(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    parent_exact: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+) {
+    // Blurred: the node and its subtree drawn into a list of their own,
+    // shown as the image the renderer makes of it.
+    let radius = tree.get_node_context(node).filter(|n| n.present).map_or(0.0, |n| n.blur_radius);
+    if radius > 0.0 {
+        let mut own = DrawList::default();
+        std::mem::swap(out.list, &mut own);
+        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        std::mem::swap(out.list, &mut own);
+        blurred(own, radius * scale, out);
+    } else {
+        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+    }
+}
+
+/// `own` shown only where `mask` is opaque: each drawn into a texture over
+/// the same rectangle (what `own` paints, within the surface), the first
+/// laid as an image whose alpha the second's multiplies. Kept by what each
+/// draws, so a mask at rest is drawn once.
+fn masked(mut own: DrawList, mut mask: DrawList, out: &mut Out) {
+    let Some([x0, y0, x1, y1]) = own.paint_bounds() else { return };
+    // A mask that draws nothing shows nothing.
+    if mask.paint_bounds().is_none() {
+        return;
+    }
+    let bounds = [x0.max(0.0).floor(), y0.max(0.0).floor(), x1.min(out.viewport[0]).ceil(), y1.min(out.viewport[1]).ceil()];
+    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+        return;
+    }
+    // Groups inside either are drawn first, which these then show.
+    out.list.groups.extend(std::mem::take(&mut own.groups));
+    out.list.groups.extend(std::mem::take(&mut mask.groups));
+    let key = |list: &DrawList, what: u8| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (list.fingerprint(), bounds.map(f32::to_bits), what).hash(&mut h);
+        h.finish() | (1 << 63)
+    };
+    let (content_key, mask_key) = (key(&own, 1), key(&mask, 2));
+    let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
+    out.list.groups.push(genoma_render::Group { key: content_key, list: own, bounds, sigma: 0.0 });
+    out.list.groups.push(genoma_render::Group { key: mask_key, list: mask, bounds, sigma: 0.0 });
+    out.list.push_image(genoma_render::Image {
+        key: content_key,
+        pixels: Arc::new(Vec::new()),
+        width: size[0] as u32,
+        height: size[1] as u32,
+        origin: [bounds[0], bounds[1]],
+        size,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        radius: 0.0,
+        alpha: 1.0,
+        clip: out.clip,
+        fade: out.fade_of(),
+        transform: Rect::IDENTITY,
+        filter: genoma_render::Image::NO_FILTER,
+        mask: Some(mask_key),
     });
 }
 
@@ -3144,6 +3235,7 @@ fn blurred(mut own: DrawList, sigma: f32, out: &mut Out) {
         fade: out.fade_of(),
         transform: Rect::IDENTITY,
         filter: genoma_render::Image::NO_FILTER,
+        mask: None,
     });
 }
 
@@ -3717,6 +3809,7 @@ fn collect_node(
                         fade: out.fade_of(),
                         transform: out.transform,
                         filter: genoma_render::Image::NO_FILTER,
+                        mask: None,
                     });
                 }
             }
@@ -3776,6 +3869,7 @@ fn collect_node(
                                     fade: out.fade_of(),
                                     transform: out.transform,
                                     filter: n.filter,
+                                    mask: None,
                                 });
                             }
                         }
@@ -3813,6 +3907,7 @@ fn collect_node(
                             fade: out.fade_of(),
                             transform: out.transform,
                             filter: n.filter,
+                            mask: None,
                         });
                     } else {
                     let part = |shown: u32, decoded: u32| {
@@ -3839,6 +3934,7 @@ fn collect_node(
                         fade: out.fade_of(),
                         transform: out.transform,
                         filter: n.filter,
+                        mask: None,
                     });
                     }
                 }
@@ -3891,6 +3987,7 @@ fn collect_node(
                     fade: out.fade_of(),
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
+                    mask: None,
                 });
             }
             // Reaching into a clip's fade: glyphon cannot fade it, an image can.
@@ -3961,6 +4058,7 @@ fn collect_node(
                     fade: out.fade_of(),
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
+                    mask: None,
                 });
             }
         }
@@ -3992,6 +4090,7 @@ fn collect_node(
                     fade: out.fade_of(),
                     transform: out.transform,
                     filter: genoma_render::Image::NO_FILTER,
+                    mask: None,
                 });
             }
         }
@@ -4416,6 +4515,37 @@ mod tests {
         assert_eq!(again.groups[0].key, g.key);
         scene.set(card, Prop::BlurRadius, Value::Number(5.0), None).unwrap();
         assert_ne!(scene.draw_list(2.0).groups[0].key, g.key, "another radius, another picture");
+    }
+
+    #[test]
+    fn a_mask_child_is_drawn_into_its_parents_mask() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::None);
+        let hole = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, card);
+        scene.append(card, hole);
+        for node in [card, hole] {
+            for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 20.0)] {
+                scene.set(node, p, Value::Number(v), None).unwrap();
+            }
+            scene.set(node, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        }
+        scene.layout(Some(200.0), Some(100.0));
+        assert_eq!(scene.draw_list(1.0).rects.len(), 2, "no mask: both drawn");
+        scene.set(hole, Prop::Mask, Value::Bool(true), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert!(list.rects.is_empty(), "the card is in its group, the mask in the other");
+        assert_eq!(list.groups.len(), 2);
+        assert_eq!((list.groups[0].list.rects.len(), list.groups[1].list.rects.len()), (1, 1));
+        assert_eq!(list.groups[0].bounds, list.groups[1].bounds, "one rectangle for both");
+        assert_eq!(list.images.len(), 1);
+        assert_eq!((list.images[0].key, list.images[0].mask), (list.groups[0].key, Some(list.groups[1].key)));
+        // Its mask gone, the card is drawn as before.
+        scene.set(hole, Prop::Mask, Value::Bool(false), None).unwrap();
+        let plain = scene.draw_list(1.0);
+        assert!(plain.groups.is_empty() && plain.rects.len() == 2);
     }
 
     #[test]

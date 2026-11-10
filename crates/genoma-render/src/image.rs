@@ -28,6 +28,10 @@ struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var smp: sampler;
+// A mask over the same rectangle: its alpha multiplies the picture's. One
+// white texel where there is none.
+@group(2) @binding(0) var mask_image: texture_2d<f32>;
+@group(2) @binding(1) var mask_smp: sampler;
 
 struct Varyings {
     @builtin(position) position: vec4<f32>,
@@ -106,7 +110,8 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (in.fade.y > 0.0) {
         cover *= clamp((in.fade.x - p.y) / in.fade.y, 0.0, 1.0);
     }
-    return filtered(textureSample(image, smp, in.uv), in.grade, in.tint) * in.alpha * cover;
+    let shown = textureSample(mask_image, mask_smp, in.uv).a;
+    return filtered(textureSample(image, smp, in.uv), in.grade, in.tint) * in.alpha * cover * shown;
 }
 "#;
 
@@ -116,6 +121,8 @@ pub(crate) struct Pipeline {
     globals_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// One white texel: the mask of an image that has none.
+    blank: wgpu::BindGroup,
     /// Each key's texture, and the upload that last drew it.
     textures: HashMap<u64, (wgpu::BindGroup, u64)>,
     /// Each key's texture's size in bytes, for the overlay's count.
@@ -130,13 +137,14 @@ pub(crate) struct Pipeline {
     shown: HashMap<SurfaceId, Vec<u64>>,
     quads: wgpu::Buffer,
     capacity: usize,
-    draws: Vec<u64>,
+    /// Each quad's texture, and its mask's.
+    draws: Vec<(u64, Option<u64>)>,
     last_viewport: [f32; 2],
     last_quads: Vec<u8>,
 }
 
 impl Pipeline {
-    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipeline {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Pipeline {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("image"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -188,7 +196,7 @@ impl Pipeline {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("image"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout), Some(&texture_layout)],
             ..Default::default()
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -234,12 +242,38 @@ impl Pipeline {
         });
         let capacity = 8;
         let quads = Self::quad_buffer(device, capacity);
+        let white = wgpu::util::DeviceExt::create_texture_with_data(
+            device,
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("image blank mask"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let view = white.create_view(&Default::default());
+        let blank = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image blank mask"),
+            layout: &texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
         Pipeline {
             pipeline,
             globals,
             globals_group,
             texture_layout,
             sampler,
+            blank,
             textures: HashMap::new(),
             sizes: HashMap::new(),
             uploads: 0,
@@ -319,7 +353,7 @@ impl Pipeline {
             let mut resident = RESIDENT.lock().unwrap();
             resident.retain(|key| self.textures.contains_key(key));
         }
-        self.shown.insert(id, images.iter().map(|i| i.key).collect());
+        self.shown.insert(id, images.iter().flat_map(|i| std::iter::once(i.key).chain(i.mask)).collect());
         if images.is_empty() {
             return;
         }
@@ -384,7 +418,7 @@ impl Pipeline {
                 filter: [image.filter[0], image.filter[1], image.filter[2], 0.0],
                 tint: [image.filter[4], image.filter[5], image.filter[6], image.filter[7]],
             });
-            self.draws.push(image.key);
+            self.draws.push((image.key, image.mask));
         }
         if viewport != self.last_viewport {
             queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&[viewport[0], viewport[1], 0.0, 0.0]));
@@ -405,11 +439,13 @@ impl Pipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.globals_group, &[]);
         pass.set_vertex_buffer(0, self.quads.slice(..));
-        for (i, key) in self.draws.iter().enumerate() {
+        for (i, (key, mask)) in self.draws.iter().enumerate() {
             if !only.contains(&i) {
                 continue;
             }
             pass.set_bind_group(1, &self.textures[key].0, &[]);
+            let mask = mask.and_then(|m| self.textures.get(&m)).map_or(&self.blank, |t| &t.0);
+            pass.set_bind_group(2, mask, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }
     }

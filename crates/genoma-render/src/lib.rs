@@ -107,6 +107,9 @@ pub struct Image {
     /// Saturation, contrast, brightness (1 each changes nothing), then a
     /// tint's red, green, blue and strength (0 none): see [`Image::NO_FILTER`].
     pub filter: [f32; 8],
+    /// Another texture (a group's) laid over the same rectangle whose alpha
+    /// this one's is multiplied by: a mask. `None` draws it whole.
+    pub mask: Option<u64>,
 }
 
 impl Image {
@@ -234,6 +237,7 @@ fn same_image(a: &Image, b: &Image) -> bool {
         && a.fade == b.fade
         && a.transform == b.transform
         && a.filter == b.filter
+        && a.mask == b.mask
 }
 
 fn same_shader(a: &Shader, b: &Shader) -> bool {
@@ -545,6 +549,7 @@ impl DrawList {
             }
             (i.width, i.height, i.radius.to_bits(), i.alpha.to_bits()).hash(&mut h);
             i.filter.map(f32::to_bits).hash(&mut h);
+            i.mask.hash(&mut h);
         }
         for sh in &self.shaders {
             sh.key.hash(&mut h);
@@ -906,6 +911,7 @@ mod tests {
             fade: [0.0; 4],
             transform: Rect::IDENTITY,
             filter: Image::NO_FILTER,
+            mask: None,
         }
     }
 

@@ -134,6 +134,12 @@ return g.surface {
   `glass`, a pane that bends what is under it at its rim, and `chart`), and `require("@genoma/kit/effects")` gives them as nodes with
   named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
+- **Masks:** a child with `mask = true` is not drawn but used as its
+  parent's mask: the parent and its other children show only where the
+  mask is opaque, as much as it is. A text over a picture with
+  `overlay = true` and `mask = true` lets the picture show through the
+  letters; a capsule with a gradient fades what it masks in its shape.
+  Both are drawn into textures kept while they rest.
 - **Blur:** `blur_radius = 6` draws a node and everything in it blurred,
   after depth has turned it, the spread in logical units as CSS's
   `blur()`. At 0, the default, nothing is done. The subtree is drawn into

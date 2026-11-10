@@ -89,6 +89,14 @@ changes what a shell sees.
 - A property that takes a list of numbers also takes one number, as a
   list of one.
 
+- Masks: a child with `mask = true` is drawn into its parent's mask
+  instead of on screen, and the parent with its other children shows only
+  where the mask is opaque, as much as it is: a text revealing a picture,
+  a picture fading out in a shape. Content and mask are each drawn into a
+  texture over the same rectangle (kept while unchanged) and laid as one
+  image; every image now multiplies its alpha by a mask's, one white
+  texel when it has none, so nothing else draws differently.
+
 ### Changed
 
 - `shadow_blur` and `shadow_y` are animatable (texts as well).
