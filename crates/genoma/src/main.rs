@@ -865,6 +865,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     let dispatcher = script.clone();
     app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
     app.on_focus(script.borrow().focus_queue());
+    app.on_activation(script.borrow().activation_queue());
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();
     let reloader = script.clone();
@@ -930,6 +931,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
             // wishes are read, so a popup it lets go stays closed.
             for (spec, output) in app.take_dismissed() {
                 script.borrow().dismissed(spec, output);
+            }
+            for (id, token) in app.take_tokens() {
+                script.borrow().activation_done(id, token);
             }
             if let Some(wishes) = script.borrow().take_wishes() {
                 app.apply_wishes(&wishes);

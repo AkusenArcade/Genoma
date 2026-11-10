@@ -356,6 +356,12 @@ pub struct App {
     /// is the keyboard's.
     shortcuts_inhibit: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     seat: Option<wl_seat::WlSeat>,
+    /// xdg-activation: tokens for the programs the interface starts.
+    activation: Option<smithay_client_toolkit::activation::ActivationState>,
+    activation_requests: Option<genoma_script::ActivationQueue>,
+    tokens: Vec<(u64, Option<String>)>,
+    /// The surface of the last press or key: what a token is asked from.
+    input_surface: Option<wl_surface::WlSurface>,
     /// The serial of the pointer's last entry, which a shape is set with,
     /// and the shape set since: none until one is.
     cursor_serial: u32,
@@ -501,6 +507,10 @@ impl App {
             xdg_shell: None,
             input_serial: 0,
             keyboard_on: None,
+            activation: None,
+            activation_requests: None,
+            tokens: Vec::new(),
+            input_surface: None,
             dismissed: Vec::new(),
             text_input_manager: None,
             text_input: None,
@@ -512,6 +522,7 @@ impl App {
             globals,
         };
         app.xdg_shell = XdgShell::bind(&app.globals, &app.qh).ok();
+        app.activation = smithay_client_toolkit::activation::ActivationState::bind(&app.globals, &app.qh).ok();
         app.text_input_manager = app.globals.bind(&app.qh, 1..=1, Ignore).ok();
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
@@ -1239,6 +1250,39 @@ impl App {
         self.input = Some(Box::new(f));
     }
 
+    /// Where `g.activation_token` leaves its requests.
+    pub fn on_activation(&mut self, queue: genoma_script::ActivationQueue) {
+        self.activation_requests = Some(queue);
+    }
+
+    /// The tokens asked for since the last look, sent to the compositor;
+    /// with no xdg-activation, answered at once with none.
+    fn serve_activation(&mut self) {
+        let Some(queue) = &self.activation_requests else { return };
+        let asked: Vec<(u64, Option<String>)> = std::mem::take(&mut *queue.borrow_mut());
+        for (id, app_id) in asked {
+            let Some(activation) = &self.activation else {
+                self.tokens.push((id, None));
+                continue;
+            };
+            let seat = self.seat.clone().or_else(|| self.seats.seats().next());
+            activation.request_token(
+                &self.qh,
+                smithay_client_toolkit::activation::RequestData {
+                    app_id,
+                    seat_and_serial: seat.filter(|_| self.input_serial != 0).map(|s| (s, self.input_serial)),
+                    surface: self.input_surface.clone(),
+                    udata: id,
+                },
+            );
+        }
+    }
+
+    /// The tokens the compositor gave since the last look, by request.
+    pub fn take_tokens(&mut self) -> Vec<(u64, Option<String>)> {
+        std::mem::take(&mut self.tokens)
+    }
+
     /// Where `g.focus_*` leaves its requests.
     pub fn on_focus(&mut self, queue: genoma_script::FocusQueue) {
         self.focus = Some(queue);
@@ -1893,6 +1937,7 @@ impl App {
     /// out and asks for a frame. This is the only place a frame is asked for,
     /// apart from motion in flight.
     pub fn after_events(&mut self) {
+        self.serve_activation();
         self.flush_drag();
         self.sync_idle();
         self.sync_popups();
@@ -2670,6 +2715,14 @@ impl PopupHandler for App {
     }
 }
 
+impl smithay_client_toolkit::activation::ActivationHandler for App {
+    type RequestUdata = u64;
+
+    fn new_token(&mut self, token: String, data: &smithay_client_toolkit::activation::RequestData<u64>) {
+        self.tokens.push((data.udata, Some(token)));
+    }
+}
+
 impl WindowHandler for App {
     /// The compositor asks to close a window (its close key, its title
     /// bar's button): one with no `on_close` closes; one with an
@@ -2798,6 +2851,7 @@ impl KeyboardHandler for App {
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, event: KeyEvent) {
         self.input_serial = serial;
+        self.input_surface = self.keyboard_on.clone();
         self.key(&event);
     }
 
@@ -2878,6 +2932,7 @@ impl PointerHandler for App {
                 }
                 K::Press { button, serial, .. } => {
                     self.input_serial = serial;
+                    self.input_surface = self.surfaces[i].role.wl_surface().cloned();
                     // The pointer takes over from the keyboard's walk: its
                     // ring goes.
                     if self.walk_scope(i).is_some()

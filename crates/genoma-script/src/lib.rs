@@ -159,6 +159,11 @@ pub enum FocusRequest {
 /// The requests waiting, and whether a node has the focus now.
 pub type FocusQueue = (Rc<RefCell<Vec<FocusRequest>>>, Rc<std::cell::Cell<bool>>);
 
+/// Activation tokens asked for (`g.activation_token`), by number, each with
+/// the app id it is for: the runtime asks the compositor and answers with
+/// [`Script::activation_done`].
+pub type ActivationQueue = Rc<RefCell<Vec<(u64, Option<String>)>>>;
+
 /// Handlers by (target, node): node ids of different scenes can coincide.
 type Handlers = Rc<RefCell<HashMap<(usize, genoma_scene::NodeId), HashMap<&'static str, Function>>>>;
 
@@ -1046,9 +1051,14 @@ impl UserData for AppsRef {
         });
         // apps:launch(id, action, { files… }): started out of the shell's
         // session, and counted for the ranking.
-        methods.add_method("launch", |_, this, (id, action, files): (String, Option<String>, Option<Vec<String>>)| {
-            this.0.launch(&id, action.as_deref(), &files.unwrap_or_default()).map_err(err)
-        });
+        // apps:launch(id, action?, files?, token?): the token from
+        // g.activation_token gives its window the focus.
+        methods.add_method(
+            "launch",
+            |_, this, (id, action, files, token): (String, Option<String>, Option<Vec<String>>, Option<String>)| {
+                this.0.launch(&id, action.as_deref(), &files.unwrap_or_default(), token.as_deref()).map_err(err)
+            },
+        );
         // apps:usage(id) → { count, last }: how often and when last started.
         methods.add_method("usage", |lua, this, id: String| {
             let u = this.0.usage(&id);
@@ -1456,6 +1466,10 @@ pub struct Script {
     wishes: Rc<RefCell<Vec<Wish>>>,
     wishes_changed: Rc<std::cell::Cell<bool>>,
     focus: FocusQueue,
+    /// Activation tokens asked for and not yet given, and who waits for each.
+    activation: ActivationQueue,
+    activation_waiting: Rc<RefCell<HashMap<u64, Function>>>,
+    activation_next: Rc<std::cell::Cell<u64>>,
     /// The mounted load's surface contents, each target's own scope, and
     /// the load's owner: one target can be built again alone.
     contents: Vec<LuaValue>,
@@ -1529,6 +1543,9 @@ impl Script {
             wishes: Rc::default(),
             wishes_changed: Rc::default(),
             focus: (Rc::default(), Rc::default()),
+            activation: Rc::default(),
+            activation_waiting: Rc::default(),
+            activation_next: Rc::default(),
             contents: Vec::new(),
             target_scopes: Vec::new(),
             load_owner: None,
@@ -1581,6 +1598,22 @@ impl Script {
     /// The keyboard focus's requests and state, shared with the host.
     pub fn focus_queue(&self) -> FocusQueue {
         (self.focus.0.clone(), self.focus.1.clone())
+    }
+
+    /// Where `g.activation_token` leaves its requests for the host.
+    pub fn activation_queue(&self) -> ActivationQueue {
+        self.activation.clone()
+    }
+
+    /// The compositor's token for request `id`, or none when it gave none
+    /// (no xdg-activation): told to whoever asked.
+    pub fn activation_done(&self, id: u64, token: Option<String>) {
+        let waiting = self.activation_waiting.borrow_mut().remove(&id);
+        if let Some(f) = waiting
+            && let Err(e) = f.call::<()>(token)
+        {
+            log::error!("g.activation_token on_token: {e}");
+        }
     }
 
     pub fn take_wishes(&self) -> Option<Vec<Wish>> {
@@ -1922,6 +1955,25 @@ impl Script {
         })?)?;
         let held = self.focus.1.clone();
         g.set("has_focus", lua.create_function(move |_, ()| Ok(held.get()))?)?;
+        // g.activation_token { app_id = "…", on_token = function(token) … end }:
+        // a token from the compositor for a program about to start, its
+        // window then given the focus (XDG_ACTIVATION_TOKEN in its
+        // environment). nil where the compositor gives none. The requests of
+        // an older load go with it.
+        self.activation_waiting.borrow_mut().clear();
+        self.activation.borrow_mut().clear();
+        let (queue, waiting, next) = (self.activation.clone(), self.activation_waiting.clone(), self.activation_next.clone());
+        g.set(
+            "activation_token",
+            lua.create_function(move |_, t: Table| {
+                let on_token: Function = t.get("on_token").map_err(|_| err("g.activation_token needs on_token, a function"))?;
+                let id = next.get() + 1;
+                next.set(id);
+                waiting.borrow_mut().insert(id, on_token);
+                queue.borrow_mut().push((id, t.get::<Option<String>>("app_id")?));
+                Ok(())
+            })?,
+        )?;
         // g.ipc("cell", { toggle = function(domain) … end }): what a call
         // from outside reaches, for this load.
         lua.set_named_registry_value(IPC, lua.create_table()?)?;

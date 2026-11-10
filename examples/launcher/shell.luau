@@ -25,8 +25,14 @@ end
 
 local function start(app: any?)
     if not app then return end
-    apps:launch(app.id)
-    g.quit()
+    -- Its window takes the focus: the token answers this very key.
+    g.activation_token {
+        app_id = app.id,
+        on_token = function(token)
+            apps:launch(app.id, nil, nil, token)
+            g.quit()
+        end,
+    }
 end
 
 return g.surface {

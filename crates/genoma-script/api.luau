@@ -330,6 +330,11 @@ export type G = {
     focus_press: () -> (),
     focus_clear: () -> (),
     has_focus: () -> boolean,
+    -- A token from the compositor for a program about to start, in answer
+    -- to the press or key just handled: given to it (apps:launch's token, or
+    -- XDG_ACTIVATION_TOKEN in g.process's env), its window takes the focus.
+    -- nil where the compositor gives none.
+    activation_token: (t: { app_id: string?, on_token: (token: string?) -> () }) -> (),
 
     dbus: {
         -- g.dbus.call { bus, destination, path, interface, method,
@@ -641,7 +646,8 @@ export type Apps = {
     find: (self: Apps, name: string) -> AppEntry?,
     -- Started out of the shell's session (an action by its id, files for
     -- its %f and %u), in a terminal when it asks for one, and counted.
-    launch: (self: Apps, id: string, action: string?, files: { string }?) -> (),
+    -- token: from g.activation_token, so its window takes the focus.
+    launch: (self: Apps, id: string, action: string?, files: { string }?, token: string?) -> (),
     -- How often and when last it was started from here (seconds since the
     -- epoch), kept in $XDG_STATE_HOME/genoma/apps.json.
     usage: (self: Apps, id: string) -> { count: number, last: number },

@@ -21,6 +21,14 @@ changes what a shell sees.
   (with the prelude and the library) and every `.luau` by the Luau
   compiler, each mistake told with its file and its own line; exit status
   1 when there is one.
+- `g.activation_token { app_id, on_token }`: a token from the compositor
+  (xdg-activation), asked with the press or key just handled, for a
+  program about to start: its window takes the focus where the compositor
+  would otherwise refuse it, and a program already running (a browser
+  asked for a new window) is raised. `apps:launch` takes it as a fourth
+  argument and sets `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`;
+  `g.process` passes it in `env`. nil where the compositor gives none.
+  `examples/launcher` uses it.
 
 ### Changed
 

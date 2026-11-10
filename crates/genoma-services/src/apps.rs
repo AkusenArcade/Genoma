@@ -127,8 +127,9 @@ impl Apps {
     }
 
     /// Starts `id` (or its action `action`), with `files` for its %f/%F/%u/%U,
-    /// detached from the shell, and counts it.
-    pub fn launch(&self, id: &str, action: Option<&str>, files: &[String]) -> Result<(), String> {
+    /// detached from the shell, and counts it. With an activation `token`
+    /// (`g.activation_token`), its window is given the focus.
+    pub fn launch(&self, id: &str, action: Option<&str>, files: &[String], token: Option<&str>) -> Result<(), String> {
         let list = genoma_core::reactive::untracked(|| self.all());
         let app = list.iter().find(|a| a.id == id).ok_or_else(|| format!("no application {id}"))?;
         let exec = match action {
@@ -153,6 +154,11 @@ impl Apps {
         }
         // What the shell was started with is its own, not the application's.
         process.env_remove("GENOMA_IPC").env_remove("GENOMA_LOG").env_remove("DESKTOP_STARTUP_ID").env_remove("XDG_ACTIVATION_TOKEN");
+        // Its own token, under both names: Wayland's and the older one
+        // GTK 3 and others still read.
+        if let Some(token) = token {
+            process.env("XDG_ACTIVATION_TOKEN", token).env("DESKTOP_STARTUP_ID", token);
+        }
         let mut child = process.spawn().map_err(|e| format!("{id}: {e}"))?;
         // setsid -f returns at once, its child forked away.
         let _ = child.wait();

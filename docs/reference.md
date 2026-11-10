@@ -544,6 +544,14 @@ focus_clear: () -> ()
 has_focus: () -> boolean
 ```
 
+### `g.activation_token`
+
+```luau
+activation_token: (t: { app_id: string?, on_token: (token: string?) -> () }) -> ()
+```
+
+A token from the compositor for a program about to start, in answer to the press or key just handled: given to it (apps:launch's token, or XDG_ACTIVATION_TOKEN in g.process's env), its window takes the focus. nil where the compositor gives none.
+
 ### `g.dbus`
 
 ```luau
@@ -1435,10 +1443,10 @@ The application a window's app_id or class, or a process's name, belongs to, or 
 ### `apps:launch`
 
 ```luau
-launch: (self: Apps, id: string, action: string?, files: { string }?) -> ()
+launch: (self: Apps, id: string, action: string?, files: { string }?, token: string?) -> ()
 ```
 
-Started out of the shell's session (an action by its id, files for its %f and %u), in a terminal when it asks for one, and counted.
+Started out of the shell's session (an action by its id, files for its %f and %u), in a terminal when it asks for one, and counted. token: from g.activation_token, so its window takes the focus.
 
 ### `apps:usage`
 
