@@ -29,6 +29,14 @@ changes what a shell sees.
   argument and sets `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`;
   `g.process` passes it in `env`. nil where the compositor gives none.
   `examples/launcher` uses it.
+- Drag and drop (`wl_data_device`), with other programs and within the
+  shell. A node with `on_drop` takes what is dropped on it: the files of a
+  `text/uri-list` as paths (and the URIs), or the text, and where it fell;
+  `on_drop_hover` hears something come over it and leave, and the offer
+  is accepted only over such a node. A node with `drag_files` (paths, one
+  a line) or `drag_text`, pressed and moved six units, is dragged out as a
+  copy, to a file manager, an editor or another node. See
+  `examples/dragdrop`.
 
 ### Changed
 

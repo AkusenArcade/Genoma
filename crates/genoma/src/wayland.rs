@@ -218,6 +218,9 @@ struct Surface {
     /// faster, until its blur region overflowed niri's i32 (an abort).
     pressed: Option<NodeId>,
     pressed_at: (f32, f32),
+    /// Where the pointer was pressed, surface coordinates: a drag starts
+    /// once it has gone a few units from there.
+    press_point: (f32, f32),
     /// The touchpad's recent movement: when, and how far, for the fling.
     strokes: Vec<(Instant, f64, f64)>,
     /// The surface covers its output: a cell is open, or closing.
@@ -300,6 +303,7 @@ impl Surface {
             focused: None,
             pressed: None,
             pressed_at: (0.0, 0.0),
+            press_point: (0.0, 0.0),
             asleep: false,
             reserve_wish: None,
             dismissed: false,
@@ -356,6 +360,13 @@ pub struct App {
     /// is the keyboard's.
     shortcuts_inhibit: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     seat: Option<wl_seat::WlSeat>,
+    /// Drag and drop (wl_data_device): the manager, the seat's device, a drag
+    /// over one of our surfaces now, and our own drag's source with what it
+    /// gives by type.
+    dnd_manager: Option<smithay_client_toolkit::data_device_manager::DataDeviceManagerState>,
+    dnd_device: Option<smithay_client_toolkit::data_device_manager::data_device::DataDevice>,
+    dnd: Option<DragOver>,
+    drag_source: Option<(smithay_client_toolkit::data_device_manager::data_source::DragSource, Offered)>,
     /// xdg-activation: tokens for the programs the interface starts.
     activation: Option<smithay_client_toolkit::activation::ActivationState>,
     activation_requests: Option<genoma_script::ActivationQueue>,
@@ -509,6 +520,10 @@ impl App {
             keyboard_on: None,
             activation: None,
             activation_requests: None,
+            dnd_manager: None,
+            dnd_device: None,
+            dnd: None,
+            drag_source: None,
             tokens: Vec::new(),
             input_surface: None,
             dismissed: Vec::new(),
@@ -523,6 +538,7 @@ impl App {
         };
         app.xdg_shell = XdgShell::bind(&app.globals, &app.qh).ok();
         app.activation = smithay_client_toolkit::activation::ActivationState::bind(&app.globals, &app.qh).ok();
+        app.dnd_manager = smithay_client_toolkit::data_device_manager::DataDeviceManagerState::bind(&app.globals, &app.qh).ok();
         app.text_input_manager = app.globals.bind(&app.qh, 1..=1, Ignore).ok();
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
@@ -1248,6 +1264,80 @@ impl App {
     /// Where input is delivered: (the surface's tree index, node, input).
     pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) + 'static) {
         self.input = Some(Box::new(f));
+    }
+
+    /// A press on a node that gives something when dragged, moved six units
+    /// from where it was pressed: the compositor carries it from here, to
+    /// another program or to one of ours. True when it started.
+    fn start_drag(&mut self, i: usize, node: NodeId, x: f32, y: f32) -> bool {
+        let (px, py) = self.surfaces[i].press_point;
+        if (x - px).hypot(y - py) < 6.0 {
+            return false;
+        }
+        let Some((files, text)) = self.surfaces[i].scene.borrow().drag_data(node) else { return false };
+        let (Some(manager), Some(device), Some(origin)) =
+            (&self.dnd_manager, &self.dnd_device, self.surfaces[i].role.wl_surface().cloned())
+        else {
+            return false;
+        };
+        let mut offered: Vec<(String, Vec<u8>)> = Vec::new();
+        if !files.is_empty() {
+            let list: String = files.iter().map(|f| format!("{}\r\n", file_uri(f))).collect();
+            offered.push(("text/uri-list".into(), list.into_bytes()));
+        }
+        let plain = text.unwrap_or_else(|| files.join("\n"));
+        for mime in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"] {
+            offered.push((mime.into(), plain.clone().into_bytes()));
+        }
+        let source = manager.create_drag_and_drop_source(
+            &self.qh,
+            offered.iter().map(|(m, _)| m.clone()),
+            smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction::Copy,
+        );
+        source.start_drag(device, &origin, None, self.input_serial);
+        let _ = self.conn.flush();
+        self.drag_source = Some((source, offered));
+        // The compositor has the pointer now: the press ends here, without
+        // a click.
+        self.surfaces[i].pressed = None;
+        let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(node).unwrap_or([0.0; 4]);
+        self.deliver(i, node, Input::Release(0x110, w / 2.0, h / 2.0));
+        log::debug!("surface {}: drag started", self.surfaces[i].id);
+        true
+    }
+
+    /// Something dragged is over surface `i` at (x, y): the drop target
+    /// under it told, and the offer accepted only over one.
+    fn drag_over(&mut self, i: usize, x: f32, y: f32) {
+        let target = self.surfaces[i].scene.borrow().drop_target_at(x, y);
+        let before = self.dnd.as_ref().filter(|d| d.surface == i).and_then(|d| d.target);
+        if before != target {
+            if let Some(old) = before {
+                self.deliver(i, old, Input::DropHover(false));
+            }
+            if let Some(new) = target {
+                self.deliver(i, new, Input::DropHover(true));
+            }
+        }
+        self.dnd = Some(DragOver { surface: i, target, x, y });
+        let Some(offer) = self.dnd_device.as_ref().and_then(|d| d.data().drag_offer()) else { return };
+        let mime = target.and_then(|_| offer.with_mime_types(preferred_mime));
+        offer.accept_mime_type(offer.serial, mime);
+        use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
+        if target.is_some() {
+            offer.set_actions(DndAction::Copy, DndAction::Copy);
+        } else {
+            offer.set_actions(DndAction::empty(), DndAction::empty());
+        }
+    }
+
+    /// The drag left, or was dropped: the target told it is no longer over it.
+    fn drag_gone(&mut self) {
+        if let Some(DragOver { surface, target: Some(node), .. }) = self.dnd.take()
+            && surface < self.surfaces.len()
+        {
+            self.deliver(surface, node, Input::DropHover(false));
+        }
     }
 
     /// Where `g.activation_token` leaves its requests.
@@ -2715,6 +2805,199 @@ impl PopupHandler for App {
     }
 }
 
+/// What our own drag gives, by type: its bytes in each.
+type Offered = Vec<(String, Vec<u8>)>;
+
+/// A drag over one of our surfaces: which, the drop target under it, where.
+#[derive(Clone, Copy)]
+struct DragOver {
+    surface: usize,
+    target: Option<NodeId>,
+    x: f32,
+    y: f32,
+}
+
+/// The type to read of what is offered: the files first, then text.
+fn preferred_mime(mimes: &[String]) -> Option<String> {
+    ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
+        .iter()
+        .find(|m| mimes.iter().any(|x| x == *m))
+        .map(|m| (*m).to_owned())
+}
+
+/// A path as a `file://` URI, what is not plain percent-encoded.
+fn file_uri(path: &str) -> String {
+    let mut out = String::from("file://");
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// What a `text/uri-list` holds: its URIs, and the files among them as
+/// paths.
+fn uri_list(text: &str) -> (Vec<String>, Vec<String>) {
+    let uris: Vec<String> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned).collect();
+    let files = uris
+        .iter()
+        .filter_map(|u| u.strip_prefix("file://"))
+        // file://host/path: the host, usually empty or localhost, goes.
+        .map(|rest| if rest.starts_with('/') { rest } else { rest.find('/').map_or(rest, |at| &rest[at..]) })
+        .map(|p| {
+            let bytes = p.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut k = 0;
+            while k < bytes.len() {
+                if bytes[k] == b'%'
+                    && k + 2 < bytes.len()
+                    && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[k + 1..k + 3]).unwrap_or(""), 16)
+                {
+                    out.push(v);
+                    k += 3;
+                } else {
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        })
+        .collect();
+    (uris, files)
+}
+
+impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice, x: f64, y: f64, surface: &wl_surface::WlSurface) {
+        self.drag_gone();
+        if let Some(i) = self.by_wl(surface) {
+            self.drag_over(i, x as f32, y as f32);
+        }
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice) {
+        self.drag_gone();
+    }
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice, x: f64, y: f64) {
+        if let Some(d) = self.dnd {
+            self.drag_over(d.surface, x as f32, y as f32);
+        }
+    }
+
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice) {}
+
+    /// Dropped: what is offered read in the type preferred, without
+    /// blocking, and given to the target's on_drop; the offer finished.
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice) {
+        let Some(over) = self.dnd else { return };
+        let Some(offer) = self.dnd_device.as_ref().and_then(|d| d.data().drag_offer()) else { return };
+        let (Some(target), Some(mime)) = (over.target, offer.with_mime_types(preferred_mime)) else {
+            offer.finish();
+            offer.destroy();
+            self.drag_gone();
+            return;
+        };
+        let pipe = match offer.receive(mime.clone()) {
+            Ok(pipe) => pipe,
+            Err(e) => {
+                log::warn!("drop: {e}");
+                self.drag_gone();
+                return;
+            }
+        };
+        let _ = self.conn.flush();
+        let Some(handle) = self.handle.clone() else { return };
+        use std::os::fd::AsFd;
+        if let Err(e) = rustix::fs::fcntl_setfl(pipe.as_fd(), rustix::fs::OFlags::NONBLOCK) {
+            log::warn!("drop: {e}");
+            return;
+        }
+        let surface_id = self.surfaces[over.surface].id;
+        let mut read = Vec::new();
+        let inserted = handle.insert_source(Generic::new(pipe, Interest::READ, Mode::Level), move |_, fd, app: &mut App| {
+            let mut chunk = [0u8; 16384];
+            loop {
+                match rustix::io::read(fd.as_fd(), &mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) if read.len() < 16 << 20 => read.extend_from_slice(&chunk[..n]),
+                    Ok(_) => {}
+                    Err(rustix::io::Errno::AGAIN) => return Ok(PostAction::Continue),
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(_) => break,
+                }
+            }
+            let text = String::from_utf8_lossy(&read).into_owned();
+            let mut dropped = genoma_script::Dropped { x: over.x, y: over.y, ..Default::default() };
+            if mime == "text/uri-list" {
+                (dropped.uris, dropped.files) = uri_list(&text);
+            } else {
+                dropped.text = Some(text);
+            }
+            if let Some(i) = app.surfaces.iter().position(|s| s.id == surface_id) {
+                log::debug!("surface {surface_id}: dropped {} files", dropped.files.len());
+                app.deliver(i, target, Input::Drop(dropped));
+            }
+            if let Some(offer) = app.dnd_device.as_ref().and_then(|d| d.data().drag_offer()) {
+                offer.finish();
+                offer.destroy();
+            }
+            app.drag_gone();
+            Ok(PostAction::Remove)
+        });
+        if let Err(e) = inserted {
+            log::warn!("drop: {e}");
+        }
+    }
+}
+
+impl smithay_client_toolkit::data_device_manager::data_offer::DataOfferHandler for App {
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut smithay_client_toolkit::data_device_manager::data_offer::DragOffer, _: smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction) {}
+
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut smithay_client_toolkit::data_device_manager::data_offer::DragOffer, _: smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction) {}
+}
+
+impl smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler for App {
+    fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource, mime: Option<String>) {
+        log::debug!("drag: the target accepts {mime:?}");
+    }
+
+    /// The program it was dropped on asks for it in one of the types offered.
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource,
+        mime: String,
+        mut fd: smithay_client_toolkit::data_device_manager::WritePipe,
+    ) {
+        use std::io::Write;
+        log::debug!("drag: asked for {mime}");
+        if let Some((_, offered)) = &self.drag_source
+            && let Some((_, data)) = offered.iter().find(|(m, _)| *m == mime)
+            && let Err(e) = fd.write_all(data)
+        {
+            log::warn!("drag: {e}");
+        }
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {
+        log::debug!("drag: cancelled");
+        self.drag_source = None;
+    }
+
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {}
+
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {
+        log::debug!("drag: finished");
+        self.drag_source = None;
+    }
+
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource, _: smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction) {}
+}
+
 impl smithay_client_toolkit::activation::ActivationHandler for App {
     type RequestUdata = u64;
 
@@ -2812,6 +3095,11 @@ impl SeatHandler for App {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seats.get_pointer(qh, &seat).ok();
+            if self.dnd_device.is_none()
+                && let Some(manager) = &self.dnd_manager
+            {
+                self.dnd_device = Some(manager.get_data_device(qh, &seat));
+            }
             if let (Some(pointer), Some(shapes)) = (&self.pointer, &self.cursor_shapes) {
                 self.cursor_device = Some(shapes.get_shape_device(pointer, qh));
             }
@@ -2922,6 +3210,11 @@ impl PointerHandler for App {
             }
             match event.kind {
                 K::Motion { .. } => {
+                    if let Some(node) = self.surfaces[i].pressed
+                        && self.start_drag(i, node, x, y)
+                    {
+                        continue;
+                    }
                     if let Some(node) = self.surfaces[i].pressed {
                         let (ox, oy) = self.surfaces[i].pressed_at;
                         self.drag = Some((i, node, x - ox, y - oy));
@@ -2957,6 +3250,7 @@ impl PointerHandler for App {
                         continue;
                     }
                     self.surfaces[i].pressed = hit;
+                    self.surfaces[i].press_point = (x, y);
                     if let Some(node) = hit {
                         let (lx, ly) = scene.borrow().local(node, x, y);
                         self.surfaces[i].pressed_at = (x - lx, y - ly);
@@ -3133,6 +3427,17 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 #[cfg(test)]
 mod tests {
     use super::surrounding_window;
+
+    #[test]
+    fn a_dragged_file_is_a_uri_and_a_dropped_uri_a_file() {
+        let uri = super::file_uri("/home/a/My Pictures/città.png");
+        assert_eq!(uri, "file:///home/a/My%20Pictures/citt%C3%A0.png");
+        let (uris, files) = super::uri_list(&format!("# a comment\r\n{uri}\r\nfile://localhost/tmp/x\r\nhttps://example.org/\r\n"));
+        assert_eq!(uris.len(), 3);
+        assert_eq!(files, vec!["/home/a/My Pictures/città.png".to_owned(), "/tmp/x".to_owned()]);
+        assert_eq!(super::preferred_mime(&["text/plain".into(), "text/uri-list".into()]).as_deref(), Some("text/uri-list"));
+        assert_eq!(super::preferred_mime(&["image/png".into()]), None);
+    }
 
     #[test]
     fn surrounding_text_is_at_most_4000_bytes_around_the_caret() {

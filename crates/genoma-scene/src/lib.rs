@@ -278,6 +278,11 @@ pub struct Node {
     move_window: bool,
     /// A `g.list`: the keyboard's focus on one of its rows scrolls it.
     rows_list: bool,
+    /// It has an `on_drop`: what is dragged over it may be dropped there.
+    drop_target: bool,
+    /// What dragging it gives another program: paths, one a line, and text.
+    drag_files: Option<String>,
+    drag_text: Option<String>,
 }
 
 impl Node {
@@ -404,6 +409,9 @@ impl Node {
             focus_color: [0.478, 0.635, 0.969, 1.0],
             move_window: false,
             rows_list: false,
+            drop_target: false,
+            drag_files: None,
+            drag_text: None,
         }
     }
 
@@ -1202,6 +1210,40 @@ impl Scene {
         None
     }
 
+    /// Marks `node` as one things may be dropped on (it has an `on_drop`).
+    pub fn set_drop_target(&mut self, node: NodeId, on: bool) {
+        if let Some(n) = self.tree.get_node_context_mut(node) {
+            n.drop_target = on;
+        }
+    }
+
+    /// The topmost drop target under a point, logical units, as last drawn.
+    pub fn drop_target_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        let (mut found, mut raised) = (None, None);
+        self.walk_layered(self.root, false, &mut |id, n, up| {
+            let [bx, by, bw, bh] = n.bounds;
+            if n.drop_target && x >= bx && y >= by && x < bx + bw && y < by + bh {
+                if up { raised = Some(id) } else { found = Some(id) }
+            }
+        });
+        raised.or(found)
+    }
+
+    /// What dragging `node` gives, from it or the nearest node around it
+    /// that says: the files (paths) and the text.
+    pub fn drag_data(&self, node: NodeId) -> Option<(Vec<String>, Option<String>)> {
+        let mut at = Some(node);
+        while let Some(id) = at {
+            let n = self.tree.get_node_context(id)?;
+            if n.drag_files.is_some() || n.drag_text.is_some() {
+                let files = n.drag_files.as_deref().map(|f| f.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
+                return Some((files, n.drag_text.clone()));
+            }
+            at = self.parent(id);
+        }
+        None
+    }
+
     /// Marks `node` as a `g.list`, which scrolls to the row the keyboard's
     /// focus is on (its `on_wheel` takes logical units).
     pub fn mark_list(&mut self, node: NodeId) {
@@ -1744,6 +1786,14 @@ impl Scene {
             }
             Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
             Prop::Navigate => n.navigate = take!(flag),
+            Prop::DragFiles => {
+                n.drag_files = Some(take!(text)).filter(|t| !t.is_empty());
+                n.interactive |= n.drag_files.is_some();
+            }
+            Prop::DragText => {
+                n.drag_text = Some(take!(text)).filter(|t| !t.is_empty());
+                n.interactive |= n.drag_text.is_some();
+            }
             Prop::MoveWindow => {
                 n.move_window = take!(flag);
                 // It takes the press even with no handler of its own.

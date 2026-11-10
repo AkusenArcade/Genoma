@@ -114,6 +114,23 @@ pub enum Input {
     /// The fingers left the touchpad while moving: their speed over the last
     /// moment, logical units a second, for the content to carry on.
     Fling(f64, f64),
+    /// Something dropped on the node (drag and drop from another program,
+    /// or from the shell itself). Never passed up: the node is the target
+    /// the runtime found.
+    Drop(Dropped),
+    /// Something being dragged came over the node (true) or left it.
+    DropHover(bool),
+}
+
+/// What a drop brought: the files of a `text/uri-list` as paths, the
+/// text when there was some, and where it fell, surface coordinates.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Dropped {
+    pub files: Vec<String>,
+    pub uris: Vec<String>,
+    pub text: Option<String>,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl Input {
@@ -133,6 +150,8 @@ impl Input {
             Input::FocusWithin(..) => "on_focus_within",
             Input::Change(_) => "on_change",
             Input::Submit(_) => "on_submit",
+            Input::Drop(_) => "on_drop",
+            Input::DropHover(_) => "on_drop_hover",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
         }
@@ -141,7 +160,7 @@ impl Input {
 
 const HANDLERS: &[&str] = &[
     "on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_focus", "on_focus_within", "on_wheel",
-    "on_fling", "on_outside", "on_key", "on_change", "on_submit",
+    "on_fling", "on_outside", "on_key", "on_change", "on_submit", "on_drop", "on_drop_hover",
 ];
 
 /// What `g.focus_*` asks of the keyboard's focus, done by the host once the
@@ -1659,7 +1678,18 @@ impl Script {
                     Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
                     Input::Change(text) | Input::Submit(text) => f.call::<()>(text.as_str()),
-                    Input::Focus(on) => f.call::<()>(*on),
+                    Input::Focus(on) | Input::DropHover(on) => f.call::<()>(*on),
+                    Input::Drop(d) => (|| {
+                        let lua = f.weak_lua().upgrade();
+                        let t = lua.create_table()?;
+                        t.set("files", d.files.clone())?;
+                        t.set("uris", d.uris.clone())?;
+                        t.set("text", d.text.clone())?;
+                        let (lx, ly) = scene.borrow().local(id, d.x, d.y);
+                        t.set("x", lx)?;
+                        t.set("y", ly)?;
+                        f.call::<()>(t)
+                    })(),
                     Input::FocusWithin(x, y, w, h) => {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
                         f.call::<()>((lx, ly, *w, *h))
@@ -1672,7 +1702,10 @@ impl Script {
             }
             // Hover stays with its own node: entering a child is not
             // entering every ancestor again.
-            if matches!(input, Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_)) {
+            if matches!(
+                input,
+                Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_) | Input::Drop(_) | Input::DropHover(_)
+            ) {
                 return;
             }
             at = scene.borrow().parent(id);
@@ -3119,6 +3152,9 @@ fn mount(
                 return Err(err(format!("{key} wants a function")));
             };
             handlers.borrow_mut().entry((target, node)).or_default().insert(name, f);
+            if name == "on_drop" {
+                scene.borrow_mut().set_drop_target(node, true);
+            }
             if name == "on_size" {
                 scene.borrow_mut().watch_size(node);
             } else if !matches!(name, "on_outside" | "on_key" | "on_ready" | "on_focus" | "on_focus_within") {

@@ -131,6 +131,8 @@ pub enum Prop {
     Navigate,
     FocusColor,
     MoveWindow,
+    DragFiles,
+    DragText,
     BlurRadius,
     BackdropBlur,
     Backdrop,
@@ -296,6 +298,8 @@ pub const PROPS: &[PropInfo] = &[
     p("backdrop", Prop::Backdrop, Ty::Bool, false, "A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node; a row of a g.list it reaches is scrolled into view. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
+    p("drag_files", Prop::DragFiles, Ty::Text, false, "Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line. A dock's application, a download, a picture."),
+    p("drag_text", Prop::DragText, Ty::Text, false, "Dragged from, it gives this text to the program it is dropped on."),
     p("move_window", Prop::MoveWindow, Ty::Bool, false, "In a g.window, pressing it moves the window, as a title bar does, and pressing it twice maximizes the window or gives back its size. A button inside it keeps its own press."),
     p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),
 ];
@@ -386,6 +390,11 @@ fn node_fields() -> String {
          \x20   -- A field's text after a change by the person; Return in it.\n\
          \x20   on_change: ((text: string) -> ())?,\n\
          \x20   on_submit: ((text: string) -> ())?,\n\
+         \x20   -- Dropped on it, from another program or the shell: the files of a\n\
+         \x20   -- uri-list as paths (and the URIs), or the text; where, from its corner.\n\
+         \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ())?,\n\
+         \x20   -- Something being dragged came over it (true) or left.\n\
+         \x20   on_drop_hover: ((over: boolean) -> ())?,\n\
          \x20   [number]: Node,\n",
     );
     out

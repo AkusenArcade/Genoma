@@ -174,6 +174,8 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `backdrop` | boolean |  | A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes. |
 | `navigate` | boolean |  | Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node; a row of a g.list it reaches is scrolled into view. Other keys go to the focused node and on up to its ancestors' on_key. |
 | `focus_color` | colour |  | The ring round the focused node inside a `navigate` node. |
+| `drag_files` | string |  | Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line. A dock's application, a download, a picture. |
+| `drag_text` | string |  | Dragged from, it gives this text to the program it is dropped on. |
 | `move_window` | boolean |  | In a g.window, pressing it moves the window, as a title bar does, and pressing it twice maximizes the window or gives back its size. A button inside it keeps its own press. |
 | `combine_soft` | number | yes | How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close. |
 
@@ -197,6 +199,8 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_focus_within`: `(x: number, y: number, width: number, height: number) -> ()`
 - `on_change`: `(text: string) -> ()`
 - `on_submit`: `(text: string) -> ()`
+- `on_drop`: `(drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ()`
+- `on_drop_hover`: `(over: boolean) -> ()`
 
 ## g
 
