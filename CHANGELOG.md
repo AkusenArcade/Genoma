@@ -29,6 +29,11 @@ changes what a shell sees.
   made, so a file written for the first time later is seen. Before, it was
   never watched (a "no watch" warning), and a shell saw it only when the
   watch was made again.
+- A text asking for a weight its font family has no face of is set in
+  that family's nearest weight, as CSS chooses (400 takes 500 before 300,
+  600 takes 700), or in a variable face spanning it. Before, it fell to
+  another family: Orbitron packaged in four static weights (AUR
+  `ttf-orbitron`: 300, 500, 700, 900) lost every text at the default 400.
 
 ## 0.1.7 — 2026-11-10
 

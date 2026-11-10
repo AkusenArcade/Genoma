@@ -2271,8 +2271,52 @@ pub struct TextStyle<'a> {
     pub tracking: f32,
 }
 
+/// The weight a text is set at: the one asked for when its family has a
+/// face of it, or a variable face spanning it; else the family's nearest,
+/// as CSS chooses. cosmic-text keeps a family only at the exact weight and
+/// otherwise falls to another family: Orbitron packaged as 300, 500, 700
+/// and 900 lost every text at the default 400. Remembered by family,
+/// weight, style and stretch while the font database stays the same size.
+fn settled<'a>(db: &ct::fontdb::Database, mut attrs: ct::Attrs<'a>) -> ct::Attrs<'a> {
+    use std::{collections::HashMap, sync::Mutex};
+    type Known = (usize, HashMap<(String, u16, u8, u16), u16>);
+    static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+    let family = match attrs.family {
+        ct::Family::Name(name) => name.to_owned(),
+        other => format!("{other:?}"),
+    };
+    let style = match attrs.style {
+        ct::Style::Normal => 0,
+        ct::Style::Italic => 1,
+        ct::Style::Oblique => 2,
+    };
+    let key = (family, attrs.weight.0, style, attrs.stretch.to_number());
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let known = known.get_or_insert_with(|| (db.len(), HashMap::new()));
+    if known.0 != db.len() {
+        *known = (db.len(), HashMap::new());
+    }
+    let weight = *known.1.entry(key).or_insert_with(|| {
+        let asked = attrs.weight;
+        let query = ct::fontdb::Query { families: &[attrs.family], weight: asked, stretch: attrs.stretch, style: attrs.style };
+        let Some(face) = db.query(&query).and_then(|id| db.face(id)) else { return asked.0 };
+        if face.weight == asked {
+            return asked.0;
+        }
+        let spans = db.with_face_data(face.id, |data, index| {
+            use ct::skrifa::MetadataProvider;
+            let font = ct::skrifa::FontRef::from_index(data, index).ok()?;
+            let axis = font.axes().get_by_tag(ct::skrifa::Tag::new(b"wght"))?;
+            Some((axis.min_value()..=axis.max_value()).contains(&(asked.0 as f32)))
+        });
+        if spans == Some(Some(true)) { asked.0 } else { face.weight.0 }
+    });
+    attrs.weight = ct::Weight(weight);
+    attrs
+}
+
 impl TextStyle<'_> {
-    fn attrs(&self) -> ct::Attrs<'_> {
+    fn attrs(&self, db: &ct::fontdb::Database) -> ct::Attrs<'_> {
         let mut attrs = ct::Attrs::new();
         if let Some(font) = self.font {
             attrs = attrs.family(ct::Family::Name(font));
@@ -2291,7 +2335,7 @@ impl TextStyle<'_> {
             features.enable(ct::FeatureTag::new(b"tnum"));
             attrs = attrs.font_features(features);
         }
-        attrs
+        settled(db, attrs)
     }
 }
 
@@ -2300,7 +2344,7 @@ impl TextStyle<'_> {
 pub fn measure_text(fonts: &mut ct::FontSystem, text: &str, size: f32, style: &TextStyle<'_>) -> f32 {
     let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(size, (size * 1.2).ceil()));
     buffer.set_wrap(ct::Wrap::None);
-    buffer.set_text(text, &style.attrs(), ct::Shaping::Advanced, None);
+    buffer.set_text(text, &style.attrs(fonts.db()), ct::Shaping::Advanced, None);
     buffer.shape_until_scroll(fonts, false);
     buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
 }
@@ -2320,11 +2364,11 @@ pub fn measure_wrapped(
     let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(size, line));
     buffer.set_wrap(ct::Wrap::WordOrGlyph);
     buffer.set_size(Some(width.max(1.0)), None);
-    let attrs = style.attrs();
+    let attrs = style.attrs(fonts.db());
     if runs.is_empty() {
         buffer.set_text(text, &attrs, ct::Shaping::Advanced, None);
     } else {
-        buffer.set_rich_text(spans(text, &attrs, line, runs, &[], [0.0; 4], 1.0), &attrs, ct::Shaping::Advanced, None);
+        buffer.set_rich_text(spans(fonts.db(), text, &attrs, line, runs, &[], [0.0; 4], 1.0), &attrs, ct::Shaping::Advanced, None);
     }
     buffer.shape_until_scroll(fonts, false);
     buffer.layout_runs().count().max(1) as f32 * line
@@ -2336,6 +2380,7 @@ pub fn measure_wrapped(
 /// a size of its own keeps the text's `line` height.
 #[allow(clippy::too_many_arguments)]
 fn spans<'a>(
+    db: &ct::fontdb::Database,
     text: &'a str,
     attrs: &ct::Attrs<'a>,
     line: f32,
@@ -2349,7 +2394,9 @@ fn spans<'a>(
     let marked: std::collections::HashSet<usize> = marks.iter().map(|m| *m as usize).collect();
     let at = |i: usize| {
         let mut a = attrs.clone();
+        let mut face = false;
         for r in runs.iter().filter(|r| r.from <= i && i <= r.to) {
+            face |= r.weight.is_some() || r.italic.is_some() || r.font.is_some();
             if let Some(w) = r.weight {
                 a = a.weight(ct::Weight(w));
             }
@@ -2372,7 +2419,8 @@ fn spans<'a>(
         if marked.contains(&i) {
             a = a.color(colour(mark_color));
         }
-        a
+        // The text's own attributes are settled already.
+        if face { settled(db, a) } else { a }
     };
     let mut out: Vec<(&str, ct::Attrs)> = Vec::new();
     let (mut start, mut was): (usize, Option<ct::Attrs>) = (0, None);
@@ -2407,7 +2455,7 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
         weight: n.weight,
         tracking: n.tracking,
     };
-    let attrs = style.attrs();
+    let attrs = style.attrs(fonts.db());
     // A field is one line, never cut: it scrolls under its caret instead.
     if let Some(edit) = &n.edit {
         let shown = edit.display(n.secret).text;
@@ -2445,7 +2493,7 @@ fn shape(fonts: &mut ct::FontSystem, n: &mut Node) -> Arc<ct::Buffer> {
     if n.marks.is_empty() && n.runs.is_empty() {
         buffer.set_text(&n.text, &attrs, ct::Shaping::Advanced, align);
     } else {
-        let spans = spans(&n.text, &attrs, metrics.line_height, &n.runs, &n.marks, n.mark_color, n.marks_alpha);
+        let spans = spans(fonts.db(), &n.text, &attrs, metrics.line_height, &n.runs, &n.marks, n.mark_color, n.marks_alpha);
         buffer.set_rich_text(spans, &attrs, ct::Shaping::Advanced, align);
     }
     buffer.shape_until_scroll(fonts, false);
