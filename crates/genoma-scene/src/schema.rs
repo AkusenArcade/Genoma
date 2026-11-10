@@ -130,6 +130,7 @@ pub enum Prop {
     CombineSoft,
     Navigate,
     FocusColor,
+    MoveWindow,
     BlurRadius,
     BackdropBlur,
     Backdrop,
@@ -295,6 +296,7 @@ pub const PROPS: &[PropInfo] = &[
     p("backdrop", Prop::Backdrop, Ty::Bool, false, "A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
+    p("move_window", Prop::MoveWindow, Ty::Bool, false, "In a g.window, pressing it moves the window, as a title bar does, and pressing it twice maximizes the window or gives back its size. A button inside it keeps its own press."),
     p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),
 ];
 

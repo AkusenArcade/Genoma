@@ -271,6 +271,8 @@ pub struct Node {
     /// The keyboard walks inside it, the focused node ringed in this.
     navigate: bool,
     focus_color: [f32; 4],
+    /// In a window, a press on it moves the window (a title bar).
+    move_window: bool,
 }
 
 impl Node {
@@ -394,6 +396,7 @@ impl Node {
             reads_backdrop: false,
             navigate: false,
             focus_color: [0.478, 0.635, 0.969, 1.0],
+            move_window: false,
         }
     }
 
@@ -1189,6 +1192,11 @@ impl Scene {
         None
     }
 
+    /// Whether a press on `node` moves its window (`move_window`).
+    pub fn moves_window(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.move_window)
+    }
+
     /// Whether `node` is a slider: the arrows along it are its own.
     pub fn is_slider(&self, node: NodeId) -> bool {
         self.tree.get_node_context(node).is_some_and(|n| n.role == Role::Slider)
@@ -1677,6 +1685,13 @@ impl Scene {
             }
             Prop::CombineSoft => n.combine_soft = take!(number).max(0.0),
             Prop::Navigate => n.navigate = take!(flag),
+            Prop::MoveWindow => {
+                n.move_window = take!(flag);
+                // It takes the press even with no handler of its own.
+                if n.move_window {
+                    n.interactive = true;
+                }
+            }
             Prop::BlurRadius => n.blur_radius = take!(number).max(0.0),
             Prop::BackdropBlur => n.backdrop_blur = take!(number).max(0.0),
             Prop::Backdrop => n.reads_backdrop = take!(flag),

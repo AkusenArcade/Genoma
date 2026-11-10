@@ -86,8 +86,9 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         xdg::{
-            XdgPositioner,
+            XdgPositioner, XdgShell,
             popup::{Popup, PopupConfigure, PopupHandler},
+            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -106,6 +107,17 @@ enum Role {
     /// description is present: `None` while closed. Each opening is a new
     /// Wayland surface, the scene and its tree staying.
     Popup(Option<PopupRole>),
+    /// A window the compositor manages, while its description is present:
+    /// `None` while closed, the scene and its tree staying, as a popup's.
+    Window(Option<WindowRole>),
+}
+
+/// An open window's own Wayland objects, and what its last configure said.
+struct WindowRole {
+    window: Window,
+    fraction: Option<WpFractionalScaleV1>,
+    title: String,
+    maximized: bool,
 }
 
 /// An open popup's own Wayland objects.
@@ -124,18 +136,23 @@ impl Role {
             Role::Layer(layer) => Some(layer.wl_surface()),
             Role::Lock(lock) => Some(lock.wl_surface()),
             Role::Popup(open) => open.as_ref().map(|p| p.popup.wl_surface()),
+            Role::Window(open) => open.as_ref().map(|w| w.window.wl_surface()),
         }
     }
 
     fn layer(&self) -> Option<&LayerSurface> {
         match self {
             Role::Layer(layer) => Some(layer),
-            Role::Lock(_) | Role::Popup(_) => None,
+            Role::Lock(_) | Role::Popup(_) | Role::Window(_) => None,
         }
     }
 
     fn is_popup(&self) -> bool {
         matches!(self, Role::Popup(_))
+    }
+
+    fn is_window(&self) -> bool {
+        matches!(self, Role::Window(_))
     }
 }
 
@@ -225,6 +242,10 @@ struct Surface {
     dismissed: bool,
     /// A popup's anchor as its function gives it now.
     anchor_wish: Option<String>,
+    /// A window's title as its function gives it now.
+    title_wish: Option<String>,
+    /// When a window's title bar was last pressed: twice soon maximizes.
+    title_pressed: Option<Instant>,
     /// A field has the keys while nothing catches: the surface takes the
     /// keyboard when pressed (on demand).
     typing: bool,
@@ -273,6 +294,8 @@ impl Surface {
             reserve_wish: None,
             dismissed: false,
             anchor_wish: None,
+            title_wish: None,
+            title_pressed: None,
             typing: false,
             strokes: Vec::new(),
             tall: false,
@@ -372,9 +395,9 @@ pub struct App {
     /// The clipboard service, started by the first field that copies or
     /// pastes when the interface has not required it.
     clipboard_service: Option<std::rc::Rc<genoma_services::clipboard::Clipboard>>,
-    /// `xdg-shell`, for popups: only its base, bound by hand, since sctk's
-    /// whole shell would ask for windows too.
-    xdg_shell: Option<XdgWmBase>,
+    /// `xdg-shell`, for popups and windows (with the decoration manager,
+    /// where the compositor has one).
+    xdg_shell: Option<XdgShell>,
     /// The serial of the last press or key on one of the shell's surfaces:
     /// a popup takes the keyboard with it, and only in answer to one.
     input_serial: u32,
@@ -473,7 +496,7 @@ impl App {
             text_input_cause: false,
             globals,
         };
-        app.xdg_shell = app.globals.bind(&app.qh, 1..=6, smithay_client_toolkit::globals::GlobalData).ok();
+        app.xdg_shell = XdgShell::bind(&app.globals, &app.qh).ok();
         app.text_input_manager = app.globals.bind(&app.qh, 1..=1, Ignore).ok();
         // The compositor's main device, before any GPU is opened: rendering
         // on another one copies every frame between the two.
@@ -702,6 +725,10 @@ impl App {
     /// moved or its content changed size.
     fn sync_popups(&mut self) {
         for i in 0..self.surfaces.len() {
+            if self.surfaces[i].role.is_window() {
+                self.sync_window(i);
+                continue;
+            }
             if !self.surfaces[i].role.is_popup() {
                 continue;
             }
@@ -748,7 +775,7 @@ impl App {
             Anchor as A, ConstraintAdjustment as C, Gravity as G,
         };
         let spec = self.specs.get(self.surfaces[i].spec)?.popup.as_ref()?;
-        let base = SimpleGlobal::<XdgWmBase, 6>::from_bound(self.xdg_shell.clone()?);
+        let base = SimpleGlobal::<XdgWmBase, 6>::from_bound(self.xdg_shell.as_ref()?.xdg_wm_base().clone());
         let positioner = XdgPositioner::new(&base).ok()?;
         let (w, h) = self.surfaces[i].wanted;
         positioner.set_size(w.max(1) as i32, h.max(1) as i32);
@@ -792,7 +819,7 @@ impl App {
 
     fn open_popup(&mut self, i: usize) {
         let Some(spec) = self.specs.get(self.surfaces[i].spec).and_then(|s| s.popup.clone()) else { return };
-        let Some(base) = self.xdg_shell.clone().map(SimpleGlobal::<XdgWmBase, 5>::from_bound) else {
+        let Some(base) = self.xdg_shell.as_ref().map(|s| SimpleGlobal::<XdgWmBase, 5>::from_bound(s.xdg_wm_base().clone())) else {
             log::warn!("g.popup: the compositor offers no xdg-shell");
             self.surfaces[i].dismissed = true;
             return;
@@ -931,6 +958,146 @@ impl App {
             self.close_popup(i);
             self.open_popup(i);
         }
+    }
+
+    /// Window `i` as its description wants it now: opened, closed, or its
+    /// title changed.
+    fn sync_window(&mut self, i: usize) {
+        let s = &self.surfaces[i];
+        let wanted = !s.asleep && !s.dismissed;
+        match (&s.role, wanted) {
+            (Role::Window(None), true) => self.open_window(i),
+            (Role::Window(Some(_)), false) => self.close_window(i),
+            (Role::Window(Some(open)), true) => {
+                let title = self.title_of(i);
+                if open.title != title {
+                    open.window.set_title(title.clone());
+                    if let Role::Window(Some(open)) = &mut self.surfaces[i].role {
+                        open.title = title;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A window's title: its function's, else its description's.
+    fn title_of(&self, i: usize) -> String {
+        let s = &self.surfaces[i];
+        s.title_wish
+            .clone()
+            .or_else(|| self.specs.get(s.spec).and_then(|spec| spec.window.as_ref()).and_then(|w| w.title.clone()))
+            .unwrap_or_default()
+    }
+
+    fn open_window(&mut self, i: usize) {
+        let Some(spec) = self.specs.get(self.surfaces[i].spec).and_then(|s| s.window.clone()) else { return };
+        let Some(shell) = &self.xdg_shell else {
+            log::warn!("g.window: the compositor offers no xdg-shell");
+            self.surfaces[i].dismissed = true;
+            return;
+        };
+        let qh = self.qh.clone();
+        let id = self.surfaces[i].id;
+        let wl = self.compositor.create_surface(&qh);
+        let fraction = self.fractional.as_ref().map(|f| f.get_fractional_scale(&wl, &qh, ScaleData(id)));
+        let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&wl, &qh, Ignore));
+        let effect = self.effects.get_background_effect(&wl, &qh).ok();
+        // Decorated by the compositor where it decorates; where it does not
+        // (niri draws its border and focus ring only), the interface's own
+        // title bar is what moves it (`move_window`).
+        let window = shell.create_window(wl, WindowDecorations::RequestServer, &qh);
+        let title = self.title_of(i);
+        window.set_title(title.clone());
+        window.set_app_id(spec.app_id.clone());
+        window.set_min_size(spec.min);
+        window.set_max_size(spec.max);
+        // The first commit carries no buffer: the compositor answers it with
+        // the first configure, and the size it gives.
+        window.commit();
+        let s = &mut self.surfaces[i];
+        s.role = Role::Window(Some(WindowRole { window, fraction, title, maximized: false }));
+        s.viewport = viewport;
+        s.effect = effect;
+        s.logical = spec.size;
+        s.wanted = spec.size;
+        s.configured = false;
+        s.target_made = false;
+        s.frame_pending = false;
+        s.frames = 0;
+        s.blurred.clear();
+        s.inputs = None;
+        s.holes.clear();
+        log::debug!("window {id}: open, {}×{} asked", spec.size.0, spec.size.1);
+    }
+
+    /// Closes window `i`: its renderer target first, then its Wayland
+    /// objects, its scene and tree staying for the next opening.
+    fn close_window(&mut self, i: usize) {
+        let s = &mut self.surfaces[i];
+        let Role::Window(Some(open)) = std::mem::replace(&mut s.role, Role::Window(None)) else { return };
+        if s.target_made {
+            if let Some(renderer) = &self.renderer {
+                renderer.destroy_target_now(s.id);
+            }
+            s.target_made = false;
+        }
+        if let Some(viewport) = s.viewport.take() {
+            viewport.destroy();
+        }
+        if let Some(effect) = s.effect.take() {
+            effect.destroy();
+        }
+        if let Some(inhibitor) = s.inhibitor.take() {
+            inhibitor.destroy();
+        }
+        if let Some(fraction) = open.fraction {
+            fraction.destroy();
+        }
+        if let (Some(wake), Some(handle)) = (s.wake.take(), &self.handle) {
+            handle.remove(wake);
+        }
+        if self.keyboard_on.as_ref() == Some(open.window.wl_surface()) {
+            self.keyboard_on = None;
+        }
+        // The toplevel, its xdg surface, then its surface.
+        drop(open.window);
+        let s = &mut self.surfaces[i];
+        s.configured = false;
+        s.frame_pending = false;
+        s.pressed = None;
+        let hovered = s.hovered.take();
+        let focused = s.focused.take();
+        let id = s.id;
+        if self.drag.is_some_and(|d| d.0 == i) {
+            self.drag = None;
+        }
+        if let Some(node) = hovered {
+            self.deliver(i, node, Input::Hover(false));
+        }
+        if let Some(node) = focused {
+            self.deliver(i, node, Input::Focus(false));
+        }
+        let _ = self.conn.flush();
+        log::debug!("window {id}: closed");
+    }
+
+    /// A press on a `move_window` node of window `i`: the compositor moves
+    /// the window with the pointer; a second press soon after maximizes it,
+    /// or gives back its size.
+    fn press_title(&mut self, i: usize, serial: u32) -> bool {
+        let Role::Window(Some(open)) = &self.surfaces[i].role else { return false };
+        let Some(seat) = self.seat.clone().or_else(|| self.seats.seats().next()) else { return false };
+        let now = Instant::now();
+        let twice = self.surfaces[i].title_pressed.is_some_and(|t| now.duration_since(t) < Duration::from_millis(400));
+        if twice {
+            if open.maximized { open.window.unset_maximized() } else { open.window.set_maximized() }
+            self.surfaces[i].title_pressed = None;
+        } else {
+            open.window.move_(&seat, serial);
+            self.surfaces[i].title_pressed = Some(now);
+        }
+        true
     }
 
     /// The popups the compositor closed since the last look, by description
@@ -1336,6 +1503,12 @@ impl App {
         for i in 0..self.surfaces.len() {
             let parent = match &self.surfaces[i].role {
                 Role::Popup(Some(p)) => p.parent,
+                Role::Window(Some(_)) => {
+                    if gone.contains(&self.surfaces[i].id) {
+                        self.close_window(i);
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if gone.contains(&parent) || gone.contains(&self.surfaces[i].id) {
@@ -1392,10 +1565,11 @@ impl App {
             .and_then(|o| self.outputs.info(o))
             .and_then(|i| i.logical_size)
             .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
-        // A popup has no Wayland surface until it opens.
-        if spec.popup.is_some() {
+        // A popup, or a window, has no Wayland surface until it opens.
+        if spec.popup.is_some() || spec.window.is_some() {
             let scene = Rc::new(RefCell::new(Scene::new(fonts)));
-            self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, Role::Popup(None), None, None, output_size));
+            let role = if spec.window.is_some() { Role::Window(None) } else { Role::Popup(None) };
+            self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, role, None, None, output_size));
             return;
         }
         let wl = self.compositor.create_surface(&qh);
@@ -1439,6 +1613,11 @@ impl App {
     fn measure(&mut self, i: usize) -> (u32, u32) {
         if self.surfaces[i].asleep {
             return (1, 1);
+        }
+        // A window is the size the compositor gave it, its content laid out
+        // across it.
+        if self.surfaces[i].role.is_window() {
+            return self.surfaces[i].logical;
         }
         // A popup is its content's size, whatever it catches.
         if self.surfaces[i].role.is_popup() {
@@ -1485,6 +1664,10 @@ impl App {
         if s.role.is_popup() {
             s.dirty = true;
             self.reposition(i);
+            return;
+        }
+        if s.role.is_window() {
+            s.dirty = true;
             return;
         }
         let s = &mut self.surfaces[i];
@@ -1574,7 +1757,7 @@ impl App {
                             "namespace": spec.map(|p| p.namespace.clone()),
                             "output": s.output,
                             "size": [s.logical.0, s.logical.1],
-                            "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", _ => "layer" },
+                            "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", Role::Window(_) => "window", _ => "layer" },
                             "asleep": s.asleep,
                             "nodes": nodes,
                         })
@@ -1607,6 +1790,8 @@ impl App {
             let asleep = !wish.present;
             // A popup's anchor moves it at the next batch (sync_popups).
             s.anchor_wish = wish.anchor.clone();
+            // A window's title is set at the next batch (sync_window).
+            s.title_wish = wish.title.clone();
             if s.asleep == asleep && s.reserve_wish == wish.reserve {
                 continue;
             }
@@ -1689,6 +1874,8 @@ impl App {
 
     fn draw(&mut self, i: usize) {
         let spans = self.spans(i);
+        // A window's content is laid out across the size it was given.
+        let window = self.surfaces[i].role.is_window();
         let wish = self.specs.get(self.surfaces[i].spec).map(|s| s.keyboard.clone()).unwrap_or_default();
         // Asleep, nothing of it catches. A full surface keeps its output's
         // size and goes on drawing (what is closing finishes leaving), but
@@ -1711,7 +1898,7 @@ impl App {
                 // Advanced as a frame would be: that is where finished
                 // decodes are taken in.
                 let _ = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
-                s.scene.borrow_mut().layout(spans.then_some(s.logical.0 as f32), None);
+                s.scene.borrow_mut().layout(if window { Some(s.logical.0 as f32) } else { spans.then_some(s.logical.0 as f32) }, window.then_some(s.logical.1 as f32));
                 let _ = s.scene.borrow_mut().draw_list(s.scale as f32);
                 if let Some(wait) = s.scene.borrow().images_pending() {
                     let id = s.id;
@@ -1748,7 +1935,7 @@ impl App {
             None => surface.set_buffer_scale(s.scale.ceil() as i32),
         }
         let motion = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
-        s.scene.borrow_mut().layout(spans.then_some(s.logical.0 as f32), None);
+        s.scene.borrow_mut().layout(if window { Some(s.logical.0 as f32) } else { spans.then_some(s.logical.0 as f32) }, window.then_some(s.logical.1 as f32));
         let list = s.scene.borrow_mut().draw_list(s.scale as f32);
         let animating = motion.moving;
         // An image asked for by this very frame is decoding now, and the
@@ -2383,6 +2570,40 @@ impl PopupHandler for App {
     }
 }
 
+impl WindowHandler for App {
+    /// The compositor asks to close a window (its close key, its title
+    /// bar's button): one with no `on_close` closes; one with an
+    /// `on_close` is told, and stays until its `present` lets it go.
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
+        let Some(i) = self.by_wl(window.wl_surface()) else { return };
+        let spec = self.surfaces[i].spec;
+        if self.specs.get(spec).and_then(|s| s.window.as_ref()).is_none_or(|w| w.closes_itself) {
+            self.close_window(i);
+            self.surfaces[i].dismissed = true;
+        }
+        let output = self.surfaces[i].output.clone();
+        self.dismissed.push((spec, output));
+    }
+
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window, configure: WindowConfigure, _: u32) {
+        let Some(i) = self.by_wl(window.wl_surface()) else { return };
+        let s = &mut self.surfaces[i];
+        // No size is the window's own choice: the one it has, at first
+        // the one its description asks for.
+        let (w, h) = configure.new_size;
+        s.logical = (w.map_or(s.logical.0, |v| v.get()), h.map_or(s.logical.1, |v| v.get()));
+        s.wanted = s.logical;
+        if let Role::Window(Some(open)) = &mut s.role {
+            open.maximized = configure.is_maximized();
+        }
+        s.configured = true;
+        s.dirty = true;
+        // A configure must be answered with a buffer, frame callback or not.
+        s.frame_pending = false;
+        self.draw(i);
+    }
+}
+
 impl SessionLockHandler for App {
     fn locked(&mut self, _: &Connection, _: &QueueHandle<Self>, _: SessionLock) {
         log::info!("session locked");
@@ -2570,6 +2791,15 @@ impl PointerHandler for App {
                         if hit.is_none_or(|h| !scene.borrow().within(h, c)) {
                             self.deliver(i, c, Input::Outside);
                         }
+                    }
+                    // A title bar's press is the compositor's: it moves the
+                    // window, and nothing is pressed here.
+                    if button == 0x110
+                        && let Some(node) = hit
+                        && scene.borrow().moves_window(node)
+                        && self.press_title(i, serial)
+                    {
+                        continue;
                     }
                     self.surfaces[i].pressed = hit;
                     if let Some(node) = hit {

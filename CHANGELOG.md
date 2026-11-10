@@ -6,6 +6,22 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `g.window { title, app_id, width, height, min, max, present, on_close }`:
+  a surface the compositor manages as a program's window (`xdg_toplevel`),
+  tiled or floating, in its alt-tab, decorated by it where it decorates.
+  Its content is laid out across the size it is given. The title may be a
+  function. Asked to close, a window with `on_close` is only told and goes
+  when `present` lets it go (a question first); one without closes itself.
+  See `examples/window`.
+- `move_window` on a node: in a window, pressing it moves the window and
+  pressing it twice maximizes it or gives back its size.
+- `kit.titlebar { title, on_close }`: a title bar for a window that moves
+  it, with a close button.
+
 ## 0.1.3 — 2026-11-09
 
 ### Changed

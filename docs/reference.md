@@ -174,6 +174,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `backdrop` | boolean |  | A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes. |
 | `navigate` | boolean |  | Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node. Other keys go to the focused node and on up to its ancestors' on_key. |
 | `focus_color` | colour |  | The ring round the focused node inside a `navigate` node. |
+| `move_window` | boolean |  | In a g.window, pressing it moves the window, as a title bar does, and pressing it twice maximizes the window or gives back its size. A button inside it keeps its own press. |
 | `combine_soft` | number | yes | How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close. |
 
 Every node also takes `role`, `name` (for assistive technology), `id` (what a popup's anchor or `combine_with` names it by) and `transition` (property → timing name).
@@ -212,6 +213,14 @@ surface: (t: Surface) -> Surface
 ```luau
 popup: (t: Popup) -> Popup
 ```
+
+### `g.window`
+
+```luau
+window: (t: WindowSurface) -> WindowSurface
+```
+
+A window the compositor manages as a program's: tiled, in alt-tab.
 
 ### `g.signal`
 
@@ -1768,6 +1777,20 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `grab` | `boolean?` | Whether it takes the keyboard and closes on a press outside. |
 | `present` | `(() -> boolean)?` |  |
 | `on_dismiss` | `(() -> ())?` | A press outside, or the compositor closing it. |
+| `[number]` | `any` |  |
+
+### WindowSurface
+
+| Field | Type | |
+|---|---|---|
+| `title` | `(string \| () -> string)?` | Its title, or a function giving it as it changes. |
+| `app_id` | `string?` | What the compositor's rules match, as a program's id ("genoma"). |
+| `width` | `number?` | The size it asks for first (640 × 480); the compositor may give another, and its content is laid out across what it gives. |
+| `height` | `number?` |  |
+| `min` | `{ number }?` | { width, height } |
+| `max` | `{ number }?` |  |
+| `present` | `(() -> boolean)?` |  |
+| `on_close` | `(() -> ())?` | The compositor asks to close it. With this, it is only told, and goes when `present` lets it go; without, it closes itself for good. |
 | `[number]` | `any` |  |
 
 ### Timing

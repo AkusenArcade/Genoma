@@ -172,6 +172,25 @@ export type Popup = {
     [number]: any,
 }
 
+export type WindowSurface = {
+    -- Its title, or a function giving it as it changes.
+    title: (string | () -> string)?,
+    -- What the compositor's rules match, as a program's id ("genoma").
+    app_id: string?,
+    -- The size it asks for first (640 × 480); the compositor may give
+    -- another, and its content is laid out across what it gives.
+    width: number?,
+    height: number?,
+    -- { width, height }
+    min: { number }?,
+    max: { number }?,
+    present: (() -> boolean)?,
+    -- The compositor asks to close it. With this, it is only told, and
+    -- goes when `present` lets it go; without, it closes itself for good.
+    on_close: (() -> ())?,
+    [number]: any,
+}
+
 -- ---- g -----------------------------------------------------------------------
 
 export type Timing = {
@@ -209,6 +228,8 @@ export type G = {
     list: <T>(t: List<T>) -> Node,
     surface: (t: Surface) -> Surface,
     popup: (t: Popup) -> Popup,
+    -- A window the compositor manages as a program's: tiled, in alt-tab.
+    window: (t: WindowSurface) -> WindowSurface,
 
     -- g.signal(value): a value bindings follow, made anew by each load.
     signal: <T>(value: T) -> Signal<T>,

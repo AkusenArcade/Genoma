@@ -192,10 +192,33 @@ pub struct SurfaceSpec {
     pub namespace: String,
     /// A popup (`g.popup`) rather than a layer surface: where it opens.
     pub popup: Option<PopupSpec>,
+    /// A window (`g.window`) rather than a layer surface: what it is called
+    /// and the size it asks for.
+    pub window: Option<WindowSpec>,
     /// When it takes the keyboard: "none" (only while a node catches),
     /// "on_demand" (when pressed: a bar with a search field), "exclusive"
     /// (always).
     pub keyboard: String,
+}
+
+/// A window the compositor manages as it does any program's: tiled or
+/// floating, in its alt-tab, decorated by it where it decorates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowSpec {
+    /// Its title, when the description wrote one; a function's comes as a
+    /// wish.
+    pub title: Option<String>,
+    /// What the compositor's rules match, as an application's id.
+    pub app_id: String,
+    /// The size it asks for first, logical units; the compositor may give
+    /// another.
+    pub size: (u32, u32),
+    pub min: Option<(u32, u32)>,
+    pub max: Option<(u32, u32)>,
+    /// Asked to close, it closes itself: it has no `on_close` to decide.
+    /// With one, it stays until its `present` lets it go (a question
+    /// first, unsaved work).
+    pub closes_itself: bool,
 }
 
 /// Where a popup opens: beside a node of another surface on its output,
@@ -1441,6 +1464,9 @@ pub struct Script {
     /// By surface description: whether its content takes its size as it
     /// changes (`fluid = true`); and by target, that size, for those that do.
     fluid: Vec<bool>,
+    /// By surface description: whether it is a window, whose content is
+    /// stretched across the size the compositor gave it.
+    windows: Vec<bool>,
     /// By surface description: a popup's `on_dismiss`, called when the
     /// compositor closed it (a press elsewhere).
     dismissers: Vec<Option<Function>>,
@@ -1459,11 +1485,13 @@ pub struct Wish {
     /// A popup's anchor, when its description gave a function for it: the
     /// id of the node it opens from now.
     pub anchor: Option<String>,
+    /// A window's title, when its description gave a function for it.
+    pub title: Option<String>,
 }
 
 impl Default for Wish {
     fn default() -> Self {
-        Wish { present: true, reserve: None, anchor: None }
+        Wish { present: true, reserve: None, anchor: None, title: None }
     }
 }
 
@@ -1506,6 +1534,7 @@ impl Script {
             load_owner: None,
             fluid: Vec::new(),
             dismissers: Vec::new(),
+            windows: Vec::new(),
             sizes: Vec::new(),
         }
     }
@@ -1527,7 +1556,8 @@ impl Script {
         }
         self.handlers.borrow_mut().retain(|(t, _), _| *t != index);
         let handlers = self.handlers.clone();
-        let (scope, result) = owned_by(self.load_owner, || Scope::new(|| build_tree(&content, output, size, None, scene, &handlers, index)));
+        let stretch = self.windows.get(*spec).copied().unwrap_or(false);
+        let (scope, result) = owned_by(self.load_owner, || Scope::new(|| build_tree(&content, output, size, None, stretch, scene, &handlers, index)));
         match result {
             Ok(holder) => {
                 let mut s = scene.borrow_mut();
@@ -1644,7 +1674,7 @@ impl Script {
     pub fn dismissed(&self, spec: usize, output: Option<String>) {
         if let Some(Some(f)) = self.dismissers.get(spec) {
             if let Err(e) = f.call::<()>(output) {
-                log::error!("g.popup on_dismiss: {e}");
+                log::error!("g.popup on_dismiss / g.window on_close: {e}");
             }
         }
     }
@@ -1731,7 +1761,16 @@ impl Script {
         let handlers: Handlers = Rc::default();
         let (wishes, wishes_changed) = (self.wishes.clone(), self.wishes_changed.clone());
         let fluid: Vec<bool> = surfaces.iter().map(|t| t.get::<Option<bool>>("fluid").ok().flatten() == Some(true)).collect();
-        let dismissers: Vec<Option<Function>> = surfaces.iter().map(|t| t.get::<Option<Function>>("on_dismiss").ok().flatten()).collect();
+        let windows: Vec<bool> = surfaces.iter().map(|t| t.get::<Option<bool>>("__window").ok().flatten() == Some(true)).collect();
+        // A popup's on_dismiss, a window's on_close: the compositor closed it,
+        // or asks to.
+        let dismissers: Vec<Option<Function>> = surfaces
+            .iter()
+            .map(|t| {
+                let key = if t.get::<Option<bool>>("__window").ok().flatten() == Some(true) { "on_close" } else { "on_dismiss" };
+                t.get::<Option<Function>>(key).ok().flatten()
+            })
+            .collect();
         let (scope, result) = Scope::new(|| -> mlua::Result<(Vec<genoma_scene::NodeId>, Vec<Scope>, Option<usize>, Vec<Option<Signal<(f64, f64)>>>)> {
             let load_owner = current_owner();
             let mut holders = Vec::new();
@@ -1746,7 +1785,8 @@ impl Script {
                     _ => None,
                 };
                 sizes.push(signal);
-                let (target_scope, built) = Scope::new(|| build_tree(content, output, size, signal, scene, &handlers, index));
+                let stretch = windows.get(*spec).copied().unwrap_or(false);
+                let (target_scope, built) = Scope::new(|| build_tree(content, output, size, signal, stretch, scene, &handlers, index));
                 match built {
                     Ok(holder) => {
                         holders.push(holder);
@@ -1773,7 +1813,11 @@ impl Script {
                     LuaValue::Function(f) if surface.get::<Option<bool>>("__popup")? == Some(true) => Some(f),
                     _ => None,
                 };
-                if present.is_none() && reserve.is_none() && anchor.is_none() {
+                let title = match surface.get::<LuaValue>("title")? {
+                    LuaValue::Function(f) if surface.get::<Option<bool>>("__window")? == Some(true) => Some(f),
+                    _ => None,
+                };
+                if present.is_none() && reserve.is_none() && anchor.is_none() && title.is_none() {
                     continue;
                 }
                 let (wishes, changed, output) = (wishes.clone(), wishes_changed.clone(), output.clone());
@@ -1801,7 +1845,14 @@ impl Script {
                             None
                         }
                     });
-                    let wish = Wish { present: is_present, reserve: reserving, anchor: anchoring };
+                    let titled = title.as_ref().and_then(|f| match f.call::<Option<String>>(output.clone()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            log::error!("g.window title: {e}");
+                            None
+                        }
+                    });
+                    let wish = Wish { present: is_present, reserve: reserving, anchor: anchoring, title: titled };
                     let mut all = wishes.borrow_mut();
                     if let Some(w) = all.get_mut(index) {
                         if *w != wish {
@@ -1817,6 +1868,7 @@ impl Script {
             Ok((holders, target_scopes, load_owner, sizes)) => {
                 self.sizes = sizes;
                 self.fluid = fluid;
+                self.windows = windows;
                 self.dismissers = dismissers;
                 self.target_scopes = target_scopes.into_iter().map(Some).collect();
                 self.load_owner = load_owner;
@@ -2240,6 +2292,18 @@ impl Script {
                 Ok(t)
             })?,
         )?;
+        // g.window { title = "Settings", app_id = "…", width, height, … }:
+        // a surface the compositor manages as a program's window, for as
+        // long as its `present` says; `on_close` hears the compositor ask
+        // to close it.
+        g.set(
+            "window",
+            lua.create_function(|_, t: Table| {
+                t.set("__surface", true)?;
+                t.set("__window", true)?;
+                Ok(t)
+            })?,
+        )?;
         // g.timing { open = { duration = 0.25, curve = { … } }, … }: the one
         // place a duration may be written. g.timing_default { … } defines
         // only the names not defined yet: what a library offers, which a
@@ -2470,6 +2534,7 @@ const KIT: &[(&str, &str)] = &[
     ("tabs", include_str!("../../../kit/tabs.luau")),
     ("effects", include_str!("../../../kit/effects.luau")),
     ("field", include_str!("../../../kit/field.luau")),
+    ("titlebar", include_str!("../../../kit/titlebar.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {
@@ -2581,8 +2646,9 @@ fn hoist_popups(surfaces: Vec<Table>) -> mlua::Result<Vec<Table>> {
 fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
     // A popup's anchor is a node, read by popup_spec.
     let is_popup = t.get::<Option<bool>>("__popup")? == Some(true);
+    let is_window = t.get::<Option<bool>>("__window")? == Some(true);
     let anchor = match t.get::<LuaValue>("anchor")? {
-        _ if is_popup => Vec::new(),
+        _ if is_popup || is_window => Vec::new(),
         LuaValue::String(s) => vec![s.to_string_lossy()],
         LuaValue::Table(list) => list.sequence_values::<String>().collect::<mlua::Result<_>>()?,
         LuaValue::Nil => vec!["top".into()],
@@ -2619,12 +2685,45 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
             _ => None,
         },
         popup: popup_spec(t)?,
+        window: window_spec(t)?,
         keyboard: match t.get::<Option<String>>("keyboard")?.as_deref() {
             None | Some("none") => "none".into(),
             Some(k @ ("on_demand" | "exclusive")) => k.into(),
             Some(other) => return Err(err(format!("keyboard: no mode {other} (none, on_demand, exclusive)"))),
         },
     })
+}
+
+fn window_spec(t: &Table) -> mlua::Result<Option<WindowSpec>> {
+    if t.get::<Option<bool>>("__window")? != Some(true) {
+        return Ok(None);
+    }
+    let pair = |key: &str| -> mlua::Result<Option<(u32, u32)>> {
+        match t.get::<LuaValue>(key)? {
+            LuaValue::Nil => Ok(None),
+            LuaValue::Table(p) => {
+                let w = p.get::<f64>(1).map_err(|_| err(format!("g.window {key}: {{ width, height }}")))?;
+                let h = p.get::<f64>(2).map_err(|_| err(format!("g.window {key}: {{ width, height }}")))?;
+                Ok(Some((w.round().max(1.0) as u32, h.round().max(1.0) as u32)))
+            }
+            _ => Err(err(format!("g.window {key}: {{ width, height }}"))),
+        }
+    };
+    let side = |key: &str, default: f64| -> mlua::Result<u32> {
+        Ok(t.get::<Option<f64>>(key)?.unwrap_or(default).round().max(1.0) as u32)
+    };
+    Ok(Some(WindowSpec {
+        title: match t.get::<LuaValue>("title")? {
+            LuaValue::String(s) => Some(s.to_string_lossy()),
+            LuaValue::Nil | LuaValue::Function(_) => None,
+            _ => return Err(err("g.window title: a string, or a function giving one")),
+        },
+        app_id: t.get::<Option<String>>("app_id")?.unwrap_or_else(|| "genoma".into()),
+        size: (side("width", 640.0)?, side("height", 480.0)?),
+        min: pair("min")?,
+        max: pair("max")?,
+        closes_itself: !matches!(t.get::<LuaValue>("on_close")?, LuaValue::Function(_)),
+    }))
 }
 
 fn popup_spec(t: &Table) -> mlua::Result<Option<PopupSpec>> {
@@ -2658,6 +2757,9 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         return Err(err(
             "a g.popup inside a g.each row or a function of the output: write it in the tree a surface returns, or beside the surfaces",
         ));
+    }
+    if t.get::<Option<bool>>("__window")? == Some(true) {
+        return Err(err("a g.window inside a tree: a window is a surface, returned beside the others"));
     }
     Ok(match t.get::<String>("__kind").map_err(|_| err("a child that is not a node"))?.as_str() {
         // A keyed list is a box whose children are its rows.
@@ -2805,11 +2907,13 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
 /// One target's tree: its surface's content (a node, or a function of the
 /// output and its size) mounted under a holder of its own, not yet in the
 /// scene's root.
+#[allow(clippy::too_many_arguments)]
 fn build_tree(
     content: &LuaValue,
     output: &Option<String>,
     size: &Option<(u32, u32)>,
     fluid: Option<Signal<(f64, f64)>>,
+    stretch: bool,
     scene: &Rc<RefCell<Scene>>,
     handlers: &Handlers,
     index: usize,
@@ -2855,6 +2959,13 @@ fn build_tree(
     // The holder takes the surface's whole span, so content that grows (a
     // membrane's row) can reach the far edge.
     let _ = scene.borrow_mut().set(holder, Prop::Grow, Value::Number(1.0), None);
+    // A window's content fills it, across and down: the holder is a column
+    // that stretches it, and a content that grows takes the height.
+    if stretch {
+        let mut s = scene.borrow_mut();
+        let _ = s.set(holder, Prop::Direction, Value::Text("column".into()), None);
+        let _ = s.set(holder, Prop::Align, Value::Text("stretch".into()), None);
+    }
     mount(scene, handlers, index, &tree, holder)?;
     Ok(holder)
 }
@@ -3060,6 +3171,28 @@ mod tests {
         let s = spec(r#"return { __surface = true, __popup = true, anchor = function() return "tray" end }"#).unwrap();
         let popup = s.popup.unwrap();
         assert_eq!((popup.anchor, popup.side.as_str(), popup.align.as_str()), (None, "bottom", "center"));
+    }
+
+    #[test]
+    fn a_window_reads_its_size_and_whether_it_closes_itself() {
+        let s = spec(r#"return { __surface = true, __window = true, title = "Settings", app_id = "x.settings", width = 720.4, height = 620, min = { 480, 360 } }"#).unwrap();
+        assert!(s.anchor.is_empty(), "a window has no edges");
+        assert_eq!(
+            s.window,
+            Some(WindowSpec {
+                title: Some("Settings".into()),
+                app_id: "x.settings".into(),
+                size: (720, 620),
+                min: Some((480, 360)),
+                max: None,
+                closes_itself: true,
+            })
+        );
+        // A title function comes as a wish; an on_close decides.
+        let s = spec(r#"return { __surface = true, __window = true, title = function() return "t" end, on_close = function() end }"#).unwrap();
+        let w = s.window.unwrap();
+        assert_eq!((w.title, w.app_id.as_str(), w.size, w.closes_itself), (None, "genoma", (640, 480), false));
+        assert!(spec(r#"return { __surface = true, __window = true, min = 3 }"#).is_err());
     }
 
     #[test]
