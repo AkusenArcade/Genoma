@@ -3147,7 +3147,10 @@ fn convert(prop: Prop, v: &LuaValue) -> Result<Value, String> {
                 .map(Value::Numbers)
                 .map_err(|_| wrong("a list of numbers")),
             LuaValue::Nil => Ok(Value::Numbers(Vec::new())),
-            _ => Err(wrong("a list of numbers")),
+            // One number is a list of one (`slice = 16`).
+            LuaValue::Integer(n) => Ok(Value::Numbers(vec![*n as f32])),
+            LuaValue::Number(n) => Ok(Value::Numbers(vec![*n as f32])),
+            _ => Err(wrong("a number or a list of numbers")),
         },
         Ty::Stops => match v {
             LuaValue::Table(t) => {

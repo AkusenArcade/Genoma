@@ -206,6 +206,9 @@ pub struct Node {
     playing: bool,
     play_time: f32,
     frame_left: f32,
+    /// A nine-slice's edges in the picture's own pixels: top, right,
+    /// bottom, left; `None` is an ordinary image.
+    slice: Option<[f32; 4]>,
     /// An image's colours: saturation, contrast, brightness, then a tint
     /// (`genoma_render::Image::filter`).
     filter: [f32; 8],
@@ -381,6 +384,7 @@ impl Node {
             playing: true,
             play_time: 0.0,
             frame_left: f32::INFINITY,
+            slice: None,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
             reach: 1.0,
@@ -1644,6 +1648,16 @@ impl Scene {
             Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
             Prop::Playing => n.playing = take!(flag),
+            Prop::Slice => {
+                let v = take!(numbers);
+                n.slice = match v.as_slice() {
+                    [] => None,
+                    [a] => Some([*a; 4]),
+                    [t, r, b, l, ..] => Some([*t, *r, *b, *l]),
+                    [v, h] | [v, h, _] => Some([*v, *h, *v, *h]),
+                }
+                .map(|s| s.map(|x| x.max(0.0)));
+            }
             Prop::Saturation => n.filter[0] = take!(number).max(0.0),
             Prop::Contrast => n.filter[1] = take!(number).max(0.0),
             Prop::Brightness => n.filter[2] = take!(number).max(0.0),
@@ -3715,7 +3729,59 @@ fn collect_node(
             // rather than asking for a new one every frame.
             let dw = n.decode[0].map_or(w, |d| (d * scale).round() as u32).max(1);
             let dh = n.decode[1].map_or(h, |d| (d * scale).round() as u32).max(1);
-            if let (Some(source), true) = (n.src.clone(), w > 0 && h > 0) {
+            if let (Some(source), Some([st, sr, sb, sl]), true) = (n.src.clone(), n.slice, w > 0 && h > 0) {
+                // A nine-slice: the picture at its own size (a pixel of it a
+                // logical unit), drawn as nine parts of one texture.
+                if let Some((iw, ih)) = out.images.size_of(&source) {
+                    let (tw, th) = (((iw as f32) * scale).round().max(1.0) as u32, ((ih as f32) * scale).round().max(1.0) as u32);
+                    if let Some((key, data, left)) = out.images.get_part(&source, tw, th, images::Fit::Fill, 0.0, 0.0, None, n.play_time) {
+                        out.drawn_images.push(node);
+                        n.frame_left = left.unwrap_or(f32::INFINITY);
+                        if left.is_some() {
+                            out.animated.push(node);
+                        }
+                        let (bw, bh) = (w as f32, h as f32);
+                        // Edges kept within the picture and the box: a box
+                        // smaller than two corners shrinks them alike.
+                        let fit = |a: f32, b: f32, room: f32| {
+                            let (a, b) = (a.max(0.0), b.max(0.0));
+                            if a + b > room && a + b > 0.0 { (a * room / (a + b), b * room / (a + b)) } else { (a, b) }
+                        };
+                        let (sl, sr) = fit(sl.min(iw as f32), sr.min(iw as f32), iw as f32);
+                        let (st, sb) = fit(st.min(ih as f32), sb.min(ih as f32), ih as f32);
+                        let (dl, dr) = fit(sl * scale, sr * scale, bw);
+                        let (dt, db) = fit(st * scale, sb * scale, bh);
+                        let xs = [0.0, sl / iw as f32, 1.0 - sr / iw as f32, 1.0];
+                        let ys = [0.0, st / ih as f32, 1.0 - sb / ih as f32, 1.0];
+                        let xd = [0.0, dl, bw - dr, bw];
+                        let yd = [0.0, dt, bh - db, bh];
+                        let at = [(origin[0] * scale).round(), (origin[1] * scale).round()];
+                        for row in 0..3 {
+                            for col in 0..3 {
+                                let (dw, dh) = (xd[col + 1] - xd[col], yd[row + 1] - yd[row]);
+                                if dw <= 0.0 || dh <= 0.0 || xs[col + 1] <= xs[col] || ys[row + 1] <= ys[row] {
+                                    continue;
+                                }
+                                out.list.push_image(genoma_render::Image {
+                                    key,
+                                    pixels: data.clone(),
+                                    width: tw,
+                                    height: th,
+                                    origin: [at[0] + xd[col], at[1] + yd[row]],
+                                    size: [dw, dh],
+                                    uv: [xs[col], ys[row], xs[col + 1], ys[row + 1]],
+                                    radius: 0.0,
+                                    alpha,
+                                    clip: out.clip,
+                                    fade: out.fade_of(),
+                                    transform: out.transform,
+                                    filter: n.filter,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if let (Some(source), true) = (n.src.clone(), w > 0 && h > 0) {
                 let radius = n.radius.unwrap_or(0.0) * scale;
                 // The blur's radius in the decoded picture's own pixels.
                 let soften = n.soften * scale * dw as f32 / w.max(1) as f32;

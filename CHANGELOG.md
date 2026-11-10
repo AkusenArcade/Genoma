@@ -81,6 +81,14 @@ changes what a shell sees.
   changes. A new `src` starts from the first frame. At most 600 frames or
   256 MB of them are kept.
 
+- Nine-slice images: `slice` on `g.image` (one number or `{ top, right,
+  bottom, left }`, in the picture's own pixels, as CSS's
+  border-image-slice) draws the picture at its own size as nine parts of
+  one texture: corners kept, edges stretched along, the middle both ways;
+  a box smaller than two corners shrinks them alike. Raster pictures only.
+- A property that takes a list of numbers also takes one number, as a
+  list of one.
+
 ### Changed
 
 - `shadow_blur` and `shadow_y` are animatable (texts as well).

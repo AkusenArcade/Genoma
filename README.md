@@ -104,7 +104,9 @@ return g.surface {
   `g.image`, `g.shader` and particle emitters. `g.each` is a keyed list.
   An image may be an animated GIF, WebP or PNG: it loops in its own frame
   times while `playing` (true by default), and the surface is drawn again
-  only when the frame changes.
+  only when the frame changes. `slice = 16` (or `{ top, right, bottom,
+  left }`, in the picture's own pixels) draws it as a nine-slice: corners
+  kept, edges and middle stretched, a frame of any size from one picture.
   An image takes `saturation`, `contrast`, `brightness` and `tint`, applied
   as it is drawn and animatable (a cover greyed while paused, a wallpaper
   dimmed and blurred behind a lock with `soften`).

@@ -88,6 +88,8 @@ const WORKERS: usize = 3;
 #[derive(Default)]
 pub struct Images {
     cache: HashMap<u64, (Entry, u64)>,
+    /// Pictures' own sizes, read from their headers, for a nine-slice.
+    sizes: HashMap<String, Option<(u32, u32)>>,
     done: Done,
     queue: Arc<Queue>,
     /// Counts the frames drawn, to let go of what no frame has asked for in
@@ -195,6 +197,12 @@ impl Images {
             }
         }
         any
+    }
+
+    /// A picture's own size in pixels, from its header (once per file);
+    /// `None` for one that cannot be read, or an SVG.
+    pub fn size_of(&mut self, source: &str) -> Option<(u32, u32)> {
+        *self.sizes.entry(source.to_owned()).or_insert_with(|| image::image_dimensions(source).ok())
     }
 
     /// Whether something is still being decoded.
