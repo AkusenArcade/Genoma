@@ -523,3 +523,80 @@ pub fn watch_from(dbus: &Rc<Dbus>, t: Table) -> mlua::Result<Watch> {
     });
     Ok(Watch { task })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(text: &str) -> Dyn {
+        Dyn::Str(text.into())
+    }
+
+    /// What goes out comes back the same, through the bus's own types.
+    fn round_trip(signature: &str, args: Vec<Dyn>) -> Vec<Dyn> {
+        let body = body(signature, &args).expect("a body").expect("not empty");
+        body.fields().iter().map(from_wire).collect()
+    }
+
+    #[test]
+    fn a_hint_map_goes_out_as_a_dict_of_variants_and_comes_back() {
+        let hints = Dyn::Map(vec![(s("urgency"), Dyn::Int(2)), (s("transient"), Dyn::Bool(true))]);
+        let back = round_trip("sa{sv}u", vec![s("app"), hints, Dyn::Int(7)]);
+        let [Dyn::Str(app), Dyn::Map(pairs), Dyn::Int(7)] = back.as_slice() else { panic!("{back:?}") };
+        assert_eq!(app, "app");
+        assert!(pairs.iter().any(|(k, v)| matches!((k, v), (Dyn::Str(k), Dyn::Int(2)) if k == "urgency")));
+        assert!(pairs.iter().any(|(k, v)| matches!((k, v), (Dyn::Str(k), Dyn::Bool(true)) if k == "transient")));
+    }
+
+    #[test]
+    fn a_variant_guesses_its_signature_unless_told() {
+        assert_eq!(guess(&Dyn::Int(5)).to_string(), "i");
+        assert_eq!(guess(&Dyn::Int(1 << 40)).to_string(), "x", "too big for int32");
+        assert_eq!(guess(&Dyn::Num(0.5)).to_string(), "d");
+        assert_eq!(guess(&Dyn::List(vec![s("a"), s("b")])).to_string(), "as");
+        assert_eq!(guess(&Dyn::List(vec![Dyn::Int(1)])).to_string(), "av");
+        // g.dbus.variant("y", 2): a byte, which a guess would never make.
+        let typed = Dyn::Typed("y".into(), Box::new(Dyn::Int(2)));
+        match to_wire(&typed, &Signature::Variant).unwrap() {
+            Variant::Variant(inner) => assert!(matches!(*inner, Variant::U8(2))),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn numbers_that_do_not_fit_are_refused_not_wrapped() {
+        assert!(to_wire(&Dyn::Int(256), &Signature::U8).unwrap_err().contains("byte"));
+        assert!(to_wire(&Dyn::Int(-1), &Signature::U32).is_err());
+        assert!(to_wire(&Dyn::Num(1.5), &Signature::I32).is_err(), "not an integer");
+        assert!(matches!(to_wire(&Dyn::Num(3.0), &Signature::I32).unwrap(), Variant::I32(3)), "a whole float is one");
+        assert!(matches!(to_wire(&Dyn::Int(2), &Signature::F64).unwrap(), Variant::F64(f) if f == 2.0));
+        assert!(to_wire(&s("x"), &Signature::Bool).is_err());
+    }
+
+    #[test]
+    fn an_empty_table_is_an_empty_list_or_dict_and_structures_count_fields() {
+        // Luau cannot tell an empty list from an empty map.
+        assert!(matches!(to_wire(&Dyn::Map(vec![]), &Signature::from_str("as").unwrap()).unwrap(), Variant::Array(_)));
+        assert!(matches!(to_wire(&Dyn::List(vec![]), &Signature::from_str("a{sv}").unwrap()).unwrap(), Variant::Dict(_)));
+        let pair = Signature::from_str("(si)").unwrap();
+        assert!(to_wire(&Dyn::List(vec![s("a")]), &pair).unwrap_err().contains("1 fields"));
+        assert!(body("", &[]).unwrap().is_none());
+        assert!(body("", &[Dyn::Int(1)]).is_err(), "arguments need a signature");
+        assert!(to_wire(&s("not a path"), &Signature::ObjectPath).is_err());
+    }
+
+    #[test]
+    fn a_luau_table_is_a_list_when_it_is_only_a_sequence() {
+        let lua = Lua::new();
+        let list: LuaValue = lua.load("return { 'a', 'b' }").eval().unwrap();
+        assert!(matches!(from_lua(&list), Dyn::List(ref l) if l.len() == 2));
+        let map: LuaValue = lua.load("return { 'a', key = 1 }").eval().unwrap();
+        assert!(matches!(from_lua(&map), Dyn::Map(ref m) if m.len() == 2));
+        let typed: LuaValue = lua.load("return { __dbus_signature = 'u', __dbus_value = 4 }").eval().unwrap();
+        assert!(matches!(from_lua(&typed), Dyn::Typed(ref sig, _) if sig == "u"));
+        // And back: a map's keys stay keys.
+        let back = to_lua(&lua, &Dyn::Map(vec![(s("k"), Dyn::Num(1.5))])).unwrap();
+        let LuaValue::Table(t) = back else { panic!() };
+        assert_eq!(t.get::<f64>("k").unwrap(), 1.5);
+    }
+}

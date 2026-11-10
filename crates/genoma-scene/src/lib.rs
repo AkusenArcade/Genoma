@@ -3552,6 +3552,86 @@ mod tests {
         assert!(glyphs.len() < n.text.len(), "something was cut");
     }
 
+    /// A box of `kind` under `parent`, with these props.
+    fn boxed(scene: &mut Scene, parent: NodeId, props: &[(Prop, Value)]) -> NodeId {
+        let n = scene.create(Kind::Box, Role::None);
+        scene.append(parent, n);
+        for (prop, value) in props {
+            scene.set(n, *prop, value.clone(), None).unwrap();
+        }
+        n
+    }
+
+    fn laid_out(scene: &mut Scene, width: f32, height: f32) {
+        scene.layout(Some(width), Some(height));
+        let _ = scene.draw_list(1.0);
+    }
+
+    fn empty_scene() -> Scene {
+        Scene::new(Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty()))))
+    }
+
+    #[test]
+    fn a_row_places_its_children_with_padding_and_gap() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let row = boxed(&mut scene, root, &[(Prop::Padding, Value::Number(10.0)), (Prop::Gap, Value::Number(5.0))]);
+        let a = boxed(&mut scene, row, &[(Prop::Width, Value::Number(20.0)), (Prop::Height, Value::Number(20.0))]);
+        let b = boxed(&mut scene, row, &[(Prop::Width, Value::Number(30.0)), (Prop::Height, Value::Number(10.0))]);
+        laid_out(&mut scene, 400.0, 300.0);
+        let at = scene.extent(row).unwrap();
+        let rel = |n: NodeId| {
+            let e = scene.extent(n).unwrap();
+            [e[0] - at[0], e[1] - at[1], e[2], e[3]]
+        };
+        // The root stretches the row down its height; a box centres its
+        // children across.
+        let h = at[3];
+        assert_eq!(rel(a), [10.0, (h - 20.0) / 2.0, 20.0, 20.0]);
+        assert_eq!(rel(b), [35.0, (h - 10.0) / 2.0, 30.0, 10.0], "after a and the gap");
+        assert_eq!(at[2], 75.0, "10 + 20 + 5 + 30 + 10: its content, gap and padding");
+    }
+
+    #[test]
+    fn grow_shares_the_space_left_and_stretch_fills_across() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let column = boxed(&mut scene, root, &[
+            (Prop::Width, Value::Number(100.0)),
+            (Prop::Height, Value::Number(300.0)),
+            (Prop::Direction, Value::Text("column".into())),
+            (Prop::Align, Value::Text("stretch".into())),
+        ]);
+        let fixed = boxed(&mut scene, column, &[(Prop::Height, Value::Number(60.0))]);
+        let one = boxed(&mut scene, column, &[(Prop::Grow, Value::Number(1.0))]);
+        let two = boxed(&mut scene, column, &[(Prop::Grow, Value::Number(2.0))]);
+        laid_out(&mut scene, 400.0, 400.0);
+        let column_at = scene.extent(column).unwrap();
+        let rel = |n: NodeId| {
+            let e = scene.extent(n).unwrap();
+            [e[0] - column_at[0], e[1] - column_at[1], e[2], e[3]]
+        };
+        assert_eq!(rel(fixed), [0.0, 0.0, 100.0, 60.0], "stretched across");
+        assert_eq!(rel(one), [0.0, 60.0, 100.0, 80.0], "a third of the 240 left");
+        assert_eq!(rel(two), [0.0, 140.0, 100.0, 160.0], "two thirds");
+    }
+
+    #[test]
+    fn an_absent_node_takes_no_room_and_is_not_drawn() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let row = boxed(&mut scene, root, &[(Prop::Gap, Value::Number(4.0))]);
+        let a = boxed(&mut scene, row, &[(Prop::Width, Value::Number(10.0)), (Prop::Height, Value::Number(10.0))]);
+        let b = boxed(&mut scene, row, &[(Prop::Width, Value::Number(10.0)), (Prop::Height, Value::Number(10.0))]);
+        let c = boxed(&mut scene, row, &[(Prop::Width, Value::Number(10.0)), (Prop::Height, Value::Number(10.0))]);
+        laid_out(&mut scene, 200.0, 100.0);
+        let c_before = scene.extent(c).unwrap()[0];
+        scene.set(b, Prop::Present, Value::Bool(false), None).unwrap();
+        laid_out(&mut scene, 200.0, 100.0);
+        assert_eq!(scene.extent(c).unwrap()[0], c_before - 14.0, "b's width and its gap given back");
+        assert_eq!(scene.extent(a).unwrap()[0] + 14.0, scene.extent(c).unwrap()[0]);
+    }
+
     #[test]
     fn a_row_finds_the_list_around_it_and_a_window_title_moves() {
         let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));

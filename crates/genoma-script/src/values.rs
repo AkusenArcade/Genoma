@@ -426,3 +426,56 @@ pub fn json_set(lua: &Lua, (text, first, second): (Option<String>, LuaValue, Lua
     out.push('\n');
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_colour_is_six_or_eight_hex_digits() {
+        assert_eq!(parse_colour("#ff0000"), Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(parse_colour("#00000080").map(|c| (c[3] * 255.0).round()), Some(128.0));
+        assert_eq!(parse_colour("ff0000"), None, "the # is needed");
+        assert_eq!(parse_colour("#f00"), None, "no short form");
+        assert_eq!(parse_colour("#gg0000"), None);
+        assert_eq!(hex([1.0, 0.5, 0.0, 1.0]), "#ff8000ff");
+        assert_eq!(hex([2.0, -1.0, 0.0, 1.0]), "#ff0000ff", "clamped");
+    }
+
+    #[test]
+    fn values_in_motion_mix_by_kind() {
+        assert_eq!(mix(Kind::Number(0.0), Kind::Number(10.0), 0.25), Kind::Number(2.5));
+        let Kind::Colour(c) = mix(Kind::Colour([0.0, 0.0, 0.0, 1.0]), Kind::Colour([1.0, 1.0, 1.0, 0.0]), 0.5) else { panic!() };
+        assert_eq!(c, [0.5, 0.5, 0.5, 0.5]);
+        // A number told to become a colour jumps there.
+        assert_eq!(mix(Kind::Number(1.0), Kind::Colour([1.0; 4]), 0.1), Kind::Colour([1.0; 4]));
+    }
+
+    #[test]
+    fn json_set_makes_the_path_and_keeps_the_rest() {
+        let lua = Lua::new();
+        let s = |v: &str| LuaValue::String(lua.create_string(v).unwrap());
+        let out = json_set(&lua, (Some(r#"{ "a": 1, "b": { "c": 2 } }"#.into()), s("b.d.e"), LuaValue::Integer(3))).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc, serde_json::json!({ "a": 1, "b": { "c": 2, "d": { "e": 3 } } }));
+        assert!(out.ends_with("}\n") && out.contains("\n  \"a\""), "two spaces and a final newline");
+        // A key on the way that is not an object becomes one.
+        let out = json_set(&lua, (Some(r#"{ "a": 5 }"#.into()), s("a.b"), LuaValue::Boolean(true))).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&out).unwrap(), serde_json::json!({ "a": { "b": true } }));
+        // Nothing yet is an empty document.
+        let out = json_set(&lua, (None, s("x"), LuaValue::Integer(1))).unwrap();
+        assert_eq!(out, "{\n  \"x\": 1\n}\n");
+    }
+
+    #[test]
+    fn json_set_keeps_an_emptied_list_a_list() {
+        let lua = Lua::new();
+        let pairs: LuaValue = lua.load("return { { 'list', {} }, { 'deep', { inner = {} } } }").eval().unwrap();
+        let text = r#"{ "list": [1, 2], "deep": { "inner": ["x"] }, "map": {} }"#;
+        let out = json_set(&lua, (Some(text.into()), pairs, LuaValue::Nil)).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["list"], serde_json::json!([]));
+        assert_eq!(doc["deep"]["inner"], serde_json::json!([]), "however deep");
+        assert_eq!(doc["map"], serde_json::json!({}), "an untouched map stays a map");
+    }
+}

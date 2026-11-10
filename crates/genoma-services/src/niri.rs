@@ -204,3 +204,72 @@ impl Niri {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fed(lines: &[&str]) -> Niri {
+        let niri = Niri::model();
+        for line in lines {
+            niri.line(line);
+        }
+        niri
+    }
+
+    const WORKSPACES: &str = r#"{"WorkspacesChanged":{"workspaces":[
+        {"id":1,"idx":1,"name":null,"output":"DP-1","is_active":true,"is_focused":true,"active_window_id":7},
+        {"id":2,"idx":2,"name":"web","output":"DP-1","is_active":false,"is_focused":false,"active_window_id":null},
+        {"id":3,"idx":1,"name":null,"output":"HDMI-A-1","is_active":true,"is_focused":false}]}}"#;
+    const WINDOWS: &str = r#"{"WindowsChanged":{"windows":[
+        {"id":7,"title":"Terminal","app_id":"foot","workspace_id":1,"is_focused":true},
+        {"id":8,"title":"Docs","app_id":"zen","workspace_id":3,"is_focused":false}]}}"#;
+
+    #[test]
+    fn workspaces_are_read_by_output_in_order() {
+        let niri = fed(&[WORKSPACES]);
+        assert_eq!(niri.focused_output().as_deref(), Some("DP-1"));
+        assert_eq!(niri.on_output("DP-1").iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(niri.active("HDMI-A-1").map(|w| w.id), Some(3));
+        let ws = niri.on_output("DP-1");
+        assert!(!ws[0].vacant && ws[1].vacant, "a null or missing window is vacant");
+        assert_eq!(ws[1].name.as_deref(), Some("web"));
+        assert!(niri.on_output("DP-1").iter().all(|w| w.output.is_some()));
+    }
+
+    #[test]
+    fn activating_a_workspace_moves_only_its_output() {
+        let niri = fed(&[WORKSPACES, r#"{"WorkspaceActivated":{"id":2,"focused":true}}"#]);
+        assert_eq!(niri.active("DP-1").map(|w| w.id), Some(2));
+        assert_eq!(niri.active("HDMI-A-1").map(|w| w.id), Some(3), "the other output keeps its own");
+        assert_eq!(niri.workspaces.get().iter().filter(|w| w.is_focused).count(), 1);
+        // Shown without the focus: the focus stays where it was.
+        let niri = fed(&[WORKSPACES, r#"{"WorkspaceActivated":{"id":2,"focused":false}}"#]);
+        assert_eq!(niri.focused_output().as_deref(), Some("DP-1"));
+        assert!(niri.workspaces.get().iter().find(|w| w.id == 1).is_some_and(|w| w.is_focused));
+    }
+
+    #[test]
+    fn the_focused_title_follows_opens_changes_and_closes() {
+        let niri = fed(&[WORKSPACES, WINDOWS]);
+        assert_eq!(niri.title.get().as_deref(), Some("Terminal"));
+        assert_eq!(niri.focused_on("DP-1").map(|w| w.id), Some(7));
+        assert_eq!(niri.focused_on("HDMI-A-1"), None, "a membrane speaks only of its screen");
+        niri.line(r#"{"WindowOpenedOrChanged":{"window":{"id":7,"title":"vim","app_id":"foot","workspace_id":1,"is_focused":true}}}"#);
+        assert_eq!(niri.title.get().as_deref(), Some("vim"));
+        assert_eq!(niri.windows.get().len(), 2, "changed, not added");
+        niri.line(r#"{"WindowFocusChanged":{"id":8}}"#);
+        assert_eq!(niri.title.get().as_deref(), Some("Docs"));
+        niri.line(r#"{"WindowClosed":{"id":8}}"#);
+        assert_eq!(niri.title.get(), None);
+        assert_eq!(niri.focused.get(), None);
+        niri.line(r#"{"WindowFocusChanged":{"id":null}}"#);
+        assert_eq!(niri.focused.get(), None);
+    }
+
+    #[test]
+    fn what_is_not_understood_changes_nothing() {
+        let niri = fed(&[WORKSPACES, "not json", r#"{"SomethingNew":{}}"#, r#"{"WorkspaceActivated":{}}"#, "[]"]);
+        assert_eq!(niri.workspaces.get().len(), 3);
+    }
+}

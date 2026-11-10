@@ -3159,6 +3159,52 @@ mod tests {
         surface_spec(&t)
     }
 
+    /// `source` mounted under a fresh scene's root, in a scope of its own.
+    fn mounted(lua: &Lua, source: &str) -> mlua::Result<(Rc<RefCell<Scene>>, Handlers, genoma_scene::NodeId, Scope)> {
+        let fonts = std::sync::Arc::new(std::sync::Mutex::new(genoma_render::cosmic_text::FontSystem::new_with_fonts(std::iter::empty())));
+        let scene = Rc::new(RefCell::new(Scene::new(fonts)));
+        let handlers: Handlers = Rc::default();
+        let t: Table = lua.load(source).eval()?;
+        let root = scene.borrow().root();
+        let (scope, node) = Scope::new(|| mount(&scene, &handlers, 0, &t, root));
+        Ok((scene, handlers, node?, scope))
+    }
+
+    #[test]
+    fn a_binding_follows_what_it_reads_until_its_scope_goes() {
+        let lua = Lua::new();
+        let level = genoma_core::reactive::Signal::new(10.0_f64);
+        lua.globals().set("level", lua.create_function(move |_, ()| Ok(level.get())).unwrap()).unwrap();
+        let (scene, handlers, node, scope) = mounted(
+            &lua,
+            r#"return { __kind = "box", width = function() return level() end, on_click = function() end,
+                { __kind = "text", id = "label", text = function() return "at " .. level() end } }"#,
+        )
+        .unwrap();
+        let width = || scene.borrow().value(node, Prop::Width);
+        assert_eq!(width(), Some(Value::Number(10.0)));
+        level.set(25.0);
+        assert_eq!(width(), Some(Value::Number(25.0)));
+        // Text reads back through the inspector.
+        let label = scene.borrow().inspect().into_iter().find(|n| n.id.as_deref() == Some("label")).and_then(|n| n.text);
+        assert_eq!(label.as_deref(), Some("at 25"), "Luau writes a whole number without its point");
+        assert!(handlers.borrow().get(&(0, node)).is_some_and(|h| h.contains_key("on_click")));
+        scope.dispose();
+        level.set(40.0);
+        assert_eq!(width(), Some(Value::Number(25.0)), "a disposed binding no longer follows");
+    }
+
+    #[test]
+    fn a_wrong_value_is_refused_with_what_was_wanted() {
+        let lua = Lua::new();
+        let e = mounted(&lua, r##"return { __kind = "capsule", fill = "#335" }"##).err().expect("refused").to_string();
+        assert!(e.contains("fill wants a colour"), "{e}");
+        let e = mounted(&lua, r#"return { __kind = "box", direction = "diagonal" }"#).err().expect("refused").to_string();
+        assert!(e.contains("diagonal") || e.contains("direction"), "{e}");
+        let e = mounted(&lua, r#"return { __kind = "box", { 42 } }"#).err().expect("refused").to_string();
+        assert!(e.contains("not a node"), "{e}");
+    }
+
     #[test]
     fn a_popup_reads_its_anchor_as_a_node() {
         let s = spec(r#"return { __surface = true, __popup = true, anchor = "clock", side = "left", align = "end", gap = 6.4 }"#).unwrap();

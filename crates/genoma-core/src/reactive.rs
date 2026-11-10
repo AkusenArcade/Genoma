@@ -626,4 +626,96 @@ mod tests {
         assert_eq!(node_count(), count, "each run replaces its inner memo");
         scope.dispose();
     }
+
+    #[test]
+    fn a_diamond_is_seen_whole_and_once() {
+        // a feeds two memos, an effect reads both: one change of a is one
+        // run, and the run never sees one side new and the other old.
+        let a = Signal::new(1);
+        let double = Memo::new(move || a.get() * 2);
+        let square = Memo::new(move || a.get() * a.get());
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        Effect::new(move || s.borrow_mut().push((double.get(), square.get())));
+        a.set(3);
+        assert_eq!(*seen.borrow(), vec![(2, 1), (6, 9)]);
+    }
+
+    #[test]
+    fn untracked_reads_wake_nobody() {
+        let a = Signal::new(1);
+        let b = Signal::new(1);
+        let runs = Rc::new(Cell::new(0));
+        let r = runs.clone();
+        Effect::new(move || {
+            a.get();
+            untracked(|| b.get());
+            r.set(r.get() + 1);
+        });
+        b.set(2);
+        assert_eq!(runs.get(), 1);
+        assert_eq!(b.subscriber_count(), 0);
+        a.set(2);
+        assert_eq!(runs.get(), 2);
+    }
+
+    #[test]
+    fn an_effect_cleans_up_before_each_run() {
+        let a = Signal::new(0);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let l = log.clone();
+        let (scope, ()) = Scope::new(move || {
+            Effect::new(move || {
+                let v = a.get();
+                l.borrow_mut().push(format!("run {v}"));
+                let l = l.clone();
+                on_cleanup(move || l.borrow_mut().push(format!("clean {v}")));
+            });
+        });
+        a.set(1);
+        scope.dispose();
+        assert_eq!(*log.borrow(), vec!["run 0", "clean 0", "run 1", "clean 1"]);
+    }
+
+    #[test]
+    fn an_effect_may_set_what_another_reads() {
+        let a = Signal::new(1);
+        let b = Signal::new(0);
+        let seen = Rc::new(Cell::new(0));
+        let s = seen.clone();
+        Effect::new(move || b.set(a.get() * 10));
+        Effect::new(move || s.set(b.get()));
+        a.set(4);
+        assert_eq!(seen.get(), 40);
+        // Batches nest: the wave comes when the outer one ends.
+        batch(|| {
+            batch(|| a.set(5));
+            assert_eq!(seen.get(), 40, "not yet");
+        });
+        assert_eq!(seen.get(), 50);
+    }
+
+    #[test]
+    fn what_outlives_a_scope_is_made_detached_or_owned_elsewhere() {
+        let (outer, ()) = Scope::new(|| {});
+        let keep = Rc::new(Cell::new(None));
+        let k = keep.clone();
+        let (inner, ()) = Scope::new(move || {
+            // State that survives the reload that made it.
+            let kept = detached(|| Signal::new(7));
+            k.set(Some(kept));
+            // A module loaded from inside goes with the load, not here.
+            assert_eq!(owned_by(None, current_owner), None);
+        });
+        inner.dispose();
+        outer.dispose();
+        let kept = keep.get().unwrap();
+        assert_eq!(kept.get_untracked(), Some(7));
+        // A signal disposed with its scope reads as gone and ignores sets.
+        let (scope, gone) = Scope::new(|| Signal::new(1));
+        scope.dispose();
+        assert_eq!(gone.try_get(), None);
+        gone.set(2);
+        assert_eq!(gone.get_untracked(), None);
+    }
 }
