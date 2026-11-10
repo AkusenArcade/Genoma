@@ -65,8 +65,8 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`blur`](examples/blur/shell.luau)
-and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
+[`effects`](examples/effects/shell.luau), [`blur`](examples/blur/shell.luau),
+[`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
 surfaces:
@@ -120,9 +120,9 @@ return g.surface {
   antialiased edge) and colour (`g_rgba`, `g_premul`, `g_over`); see
   `crates/genoma-render/src/shaders/library.wgsl`. A shader with
   `backdrop = true` reads what its surface drew under it with
-  `g_backdrop(p)`, a little beyond its edges too. Six effects come built
+  `g_backdrop(p)`, a little beyond its edges too. Seven effects come built
   in, `src = "genoma:noise"` (`ripple`, `dissolve`, `vignette`, `grain`,
-  and `glass`, a pane that bends what is under it at its rim), and `require("@genoma/kit/effects")` gives them as nodes with
+  `glass`, a pane that bends what is under it at its rim, and `chart`), and `require("@genoma/kit/effects")` gives them as nodes with
   named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
 - **Blur:** `blur_radius = 6` draws a node and everything in it blurred,
@@ -165,7 +165,8 @@ return g.surface {
 - **The kit:** `require("@genoma/kit")` gives `button`, `toggle`,
   `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`, `tabs`,
   `field` and `dialog`, built on the nodes above and drawn in a neutral look of their
-  own. A dialog is a surface, returned beside the others.
+  own, and `chart` (`chart.line`, `chart.area`, `chart.bars`: up to 1008
+  numbers drawn by one shader node, no node per point). A dialog is a surface, returned beside the others.
   `kit.theme.set { accent = "#e6b062", radius = 10 }` changes it for every
   component on screen, the colours moving there. Each is also
   `require("@genoma/kit/button")` and so on, and the sources are in

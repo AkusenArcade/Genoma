@@ -2845,6 +2845,7 @@ const KIT: &[(&str, &str)] = &[
     ("field", include_str!("../../../kit/field.luau")),
     ("titlebar", include_str!("../../../kit/titlebar.luau")),
     ("async", include_str!("../../../kit/async.luau")),
+    ("chart", include_str!("../../../kit/chart.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {

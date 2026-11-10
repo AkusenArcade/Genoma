@@ -70,6 +70,7 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("vignette", include_str!("shaders/vignette.wgsl")),
     ("grain", include_str!("shaders/grain.wgsl")),
     ("glass", include_str!("shaders/glass.wgsl")),
+    ("chart", include_str!("shaders/chart.wgsl")),
 ];
 
 /// A built-in effect's WGSL, by its name without `genoma:`.

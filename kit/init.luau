@@ -21,4 +21,5 @@ return {
     effects = require("@genoma/kit/effects"),
     field = require("@genoma/kit/field"),
     titlebar = require("@genoma/kit/titlebar"),
+    chart = require("@genoma/kit/chart"),
 }

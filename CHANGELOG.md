@@ -49,6 +49,13 @@ changes what a shell sees.
   the display and the compositor puts its own ramp back; brightness stops
   at a tenth, so the screen never goes black.
 
+- Charts: `require("@genoma/kit/chart")` gives `chart.line`,
+  `chart.area` and `chart.bars`, from a list of numbers (a binding, the
+  last 1008 drawn) with `min`, `max`, `color`, `line`, `fill`, `fade`,
+  `gap`, `radius` and `inset`. Each is one `g.shader` on the new built-in
+  `genoma:chart`, so a history of a thousand points costs one node and is
+  drawn on the GPU. `examples/charts`.
+
 ### Changed
 
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it
