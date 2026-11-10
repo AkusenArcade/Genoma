@@ -15,6 +15,10 @@ changes what a shell sees.
   tree written as JSON (`tree.json`), on one screen of the size and name
   asked for, after `--wait` seconds and the `--ipc` calls given. A shell
   seen and compared in a script or in CI, nothing shown on the desktop.
+  After the load, in the order written: `--ipc` calls, `--click <id>`
+  presses (a press, a release and a click on that node) and `--sleep`.
+  `--mock @genoma/vitals=busy.luau` gives a module of the test's own in
+  place of a service. `genoma new` gives its clock an id to press.
   The compositor's blur is not drawn. Bioma's ten surfaces, with a cell
   opened by `--ipc`, in about four seconds.
 

@@ -1485,6 +1485,9 @@ pub struct Script {
     wishes: Rc<RefCell<Vec<Wish>>>,
     wishes_changed: Rc<std::cell::Cell<bool>>,
     focus: FocusQueue,
+    /// Modules to give in place of `@genoma/…` ones (`genoma snapshot
+    /// --mock`): a test's fake service, by name, read from this path.
+    mocks: Rc<RefCell<HashMap<String, PathBuf>>>,
     /// Activation tokens asked for and not yet given, and who waits for each.
     activation: ActivationQueue,
     activation_waiting: Rc<RefCell<HashMap<u64, Function>>>,
@@ -1562,6 +1565,7 @@ impl Script {
             wishes: Rc::default(),
             wishes_changed: Rc::default(),
             focus: (Rc::default(), Rc::default()),
+            mocks: Rc::default(),
             activation: Rc::default(),
             activation_waiting: Rc::default(),
             activation_next: Rc::default(),
@@ -1617,6 +1621,13 @@ impl Script {
     /// The keyboard focus's requests and state, shared with the host.
     pub fn focus_queue(&self) -> FocusQueue {
         (self.focus.0.clone(), self.focus.1.clone())
+    }
+
+    /// `require(name)` gives the module at `path` instead, from the next
+    /// load: a fake service for a test (`@genoma/vitals` with the numbers
+    /// a cell is to be seen with).
+    pub fn mock(&mut self, name: &str, path: PathBuf) {
+        self.mocks.borrow_mut().insert(name.to_owned(), path);
     }
 
     /// Where `g.activation_token` leaves its requests for the host.
@@ -2470,12 +2481,19 @@ impl Script {
         let services = self.services.clone();
         let wanted = self.wanted.clone();
         let module_owner = self.module_owner.clone();
+        let mocks = self.mocks.clone();
         let cache: Table = lua.create_table()?;
         let require = lua.create_function(move |lua, name: String| -> mlua::Result<LuaValue> {
             if let Some(v) = cache.get::<Option<LuaValue>>(name.as_str())? {
                 return Ok(v);
             }
+            let mocked = mocks.borrow().get(&name).cloned();
             let value = match name.as_str() {
+                _ if mocked.is_some() => {
+                    let path = mocked.expect("checked");
+                    let source = std::fs::read_to_string(&path).map_err(|e| err(format!("mock {name}: {}: {e}", path.display())))?;
+                    owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
+                }
                 "@genoma" => LuaValue::Table(g.clone()),
                 "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
                     let service = &name["@genoma/".len()..];

@@ -3,15 +3,20 @@
 //! seen and checked by a script or in CI, on a machine with a GPU but no
 //! desktop, and a change compared with the picture before it.
 //!
-//!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME]
-//!                         [--wait SECONDS] [--entry FILE] [--ipc "TARGET FUNCTION ARGS…"]…
+//!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME] [--wait SECONDS]
+//!                         [--entry FILE] [--mock @genoma/NAME=FILE]…
+//!                         [--ipc "TARGET FUNCTION ARGS…" | --click ID | --sleep SECONDS]…
 //!
 //! The interface gets one screen of that size and name (1920×1080, "SNAP"
 //! unless told), its services as they are on this machine, and `--wait`
-//! seconds (1 by default) for its timers and animations; each `--ipc` is a
-//! call made after the load, as `genoma ipc` would (`--ipc "cell toggle
-//! clock"`). Into `--out` (`snapshot/` by default) go `<n>-<namespace>.png`
-//! for each surface present and `tree.json`.
+//! seconds (1 by default) for its timers and animations. After the load, in
+//! the order written, each `--ipc` is a call as `genoma ipc` makes it
+//! (`--ipc "cell toggle clock"`), each `--click` a press and release on the
+//! node of that id, each `--sleep` time going by. A `--mock` gives a module
+//! of the test's own for a service (`--mock @genoma/vitals=busy.luau`, a
+//! table with the readings a cell is to be seen with). Into `--out`
+//! (`snapshot/` by default) go `<n>-<namespace>.png` for each surface
+//! present and `tree.json`.
 
 use std::{
     cell::RefCell,
@@ -34,7 +39,16 @@ struct Options {
     output: String,
     wait: f64,
     entry: Option<String>,
-    calls: Vec<Vec<String>>,
+    mocks: Vec<(String, PathBuf)>,
+    steps: Vec<Step>,
+}
+
+/// What is done after the load, in the order written.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Ipc(Vec<String>),
+    Click(String),
+    Sleep(f64),
 }
 
 fn options(args: Vec<String>) -> Result<Options, String> {
@@ -46,7 +60,8 @@ fn options(args: Vec<String>) -> Result<Options, String> {
         output: "SNAP".into(),
         wait: 1.0,
         entry: None,
-        calls: Vec::new(),
+        mocks: Vec::new(),
+        steps: Vec::new(),
     };
     let mut dir = None;
     while let Some(a) = it.next() {
@@ -61,7 +76,14 @@ fn options(args: Vec<String>) -> Result<Options, String> {
             "--output" => o.output = value("--output")?,
             "--wait" => o.wait = value("--wait")?.parse().map_err(|_| "--wait: seconds")?,
             "--entry" => o.entry = Some(value("--entry")?),
-            "--ipc" => o.calls.push(value("--ipc")?.split_whitespace().map(str::to_owned).collect()),
+            "--ipc" => o.steps.push(Step::Ipc(value("--ipc")?.split_whitespace().map(str::to_owned).collect())),
+            "--click" => o.steps.push(Step::Click(value("--click")?)),
+            "--sleep" => o.steps.push(Step::Sleep(value("--sleep")?.parse().map_err(|_| "--sleep: seconds")?)),
+            "--mock" => {
+                let v = value("--mock")?;
+                let (name, path) = v.split_once('=').ok_or("--mock is @genoma/NAME=FILE")?;
+                o.mocks.push((name.to_owned(), PathBuf::from(path)));
+            }
             other if dir.is_none() && !other.starts_with("--") => dir = Some(PathBuf::from(other)),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -126,6 +148,10 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
     if let Some(entry) = &o.entry {
         script.borrow_mut().set_entry(entry);
     }
+    for (name, path) in &o.mocks {
+        let path = path.canonicalize().map_err(|e| format!("--mock {name}: {}: {e}", path.display()))?;
+        script.borrow_mut().mock(name, path);
+    }
     script.borrow_mut().set_outputs(vec![OutputInfo {
         name: o.output.clone(),
         description: "genoma snapshot".into(),
@@ -145,25 +171,48 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
     script.borrow_mut().mount(&targets)?;
     let mut sources = crate::Sources { services, streams, bus: None, started: Vec::new() };
     sources.start(|s| script.borrow().wants(s), &handle);
-    for call in &o.calls {
-        let [target, function, rest @ ..] = call.as_slice() else { return Err(format!("--ipc {call:?}: a target and a function")) };
-        let said = script.borrow().ipc(target, function, rest)?;
-        log::info!("ipc {target} {function}: {said}");
-    }
-
     // The interface's own time: timers, services and animations, with every
     // scene advanced as frames would advance it.
-    let started = Instant::now();
-    while started.elapsed().as_secs_f64() < o.wait {
-        event_loop.dispatch(Some(Duration::from_millis(16)), &mut ()).map_err(|e| e.to_string())?;
-        for (spec, _, scene, _) in &targets {
-            let (w, h) = bounds(&specs[*spec], o.size);
-            let mut s = scene.borrow_mut();
-            let _ = s.advance(Instant::now(), 1.0);
-            s.layout(w, h);
-            let _ = s.draw_list(1.0);
+    let mut pass = |seconds: f64| -> Result<(), String> {
+        let started = Instant::now();
+        loop {
+            event_loop.dispatch(Some(Duration::from_millis(16)), &mut ()).map_err(|e| e.to_string())?;
+            for (spec, _, scene, _) in &targets {
+                let (w, h) = bounds(&specs[*spec], o.size);
+                let mut s = scene.borrow_mut();
+                let _ = s.advance(Instant::now(), 1.0);
+                s.layout(w, h);
+                let _ = s.draw_list(1.0);
+            }
+            if started.elapsed().as_secs_f64() >= seconds {
+                return Ok(());
+            }
         }
+    };
+    // Laid out once before anything is pressed: a node is found where it
+    // was drawn.
+    pass(0.05)?;
+    for step in &o.steps {
+        match step {
+            Step::Ipc(call) => {
+                let [target, function, rest @ ..] = call.as_slice() else { return Err(format!("--ipc {call:?}: a target and a function")) };
+                let said = script.borrow().ipc(target, function, rest)?;
+                log::info!("ipc {target} {function}: {said}");
+            }
+            Step::Click(id) => {
+                let found = targets.iter().enumerate().find_map(|(t, (_, _, scene, _))| scene.borrow().find(id).map(|n| (t, n)));
+                let (t, node) = found.ok_or_else(|| format!("--click {id}: no node with that id is shown"))?;
+                let [_, _, w, h] = targets[t].2.borrow().extent(node).unwrap_or([0.0; 4]);
+                let (x, y) = (w / 2.0, h / 2.0);
+                for input in [genoma_script::Input::Press(0x110, x, y), genoma_script::Input::Release(0x110, x, y), genoma_script::Input::Click(0x110, x, y)] {
+                    script.borrow().dispatch(t, node, input);
+                }
+            }
+            Step::Sleep(seconds) => pass(*seconds)?,
+        }
+        pass(0.05)?;
     }
+    pass(o.wait)?;
 
     let wishes = script.borrow().take_wishes().unwrap_or_default();
     let mut tree = Vec::new();
@@ -251,7 +300,10 @@ mod tests {
     fn options_read_as_written() {
         let o = options(["shell", "--size", "800x600", "--ipc", "cell toggle clock", "--wait", "0.5"].map(String::from).to_vec()).unwrap();
         assert_eq!((o.dir, o.size, o.wait), (PathBuf::from("shell"), (800, 600), 0.5));
-        assert_eq!(o.calls, vec![vec!["cell".to_owned(), "toggle".into(), "clock".into()]]);
+        assert_eq!(o.steps, vec![Step::Ipc(vec!["cell".to_owned(), "toggle".into(), "clock".into()])]);
+        let o = options(["s", "--click", "ok", "--sleep", "1", "--mock", "@genoma/vitals=v.luau"].map(String::from).to_vec()).unwrap();
+        assert_eq!(o.steps, vec![Step::Click("ok".into()), Step::Sleep(1.0)]);
+        assert_eq!(o.mocks, vec![("@genoma/vitals".to_owned(), PathBuf::from("v.luau"))]);
         assert!(options(vec!["--size".into()]).is_err());
         assert!(options(vec![]).unwrap_err().contains("the interface"));
         assert!(!on_screen(&SurfaceSpec { output: Some("DP-1".into()), ..spec(&[], false) }, "SNAP"));

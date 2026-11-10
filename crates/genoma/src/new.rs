@@ -53,6 +53,8 @@ return g.surface {
         text("{name}"),
         g.box { grow = 1 },
         kit.button {
+            -- An id: what a test presses (genoma snapshot --click clock).
+            id = "clock",
             kind = "flat",
             name = "Clock",
             text = function() return two(clock.hour) .. ":" .. two(clock.minute) end,
