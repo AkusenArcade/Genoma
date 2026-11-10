@@ -180,6 +180,9 @@ pub struct Node {
     /// was then, unclipped: what the keyboard's focus may reach, and where
     /// a well scrolls to bring it into view.
     drawn_frame: u64,
+    /// The frame that last laid it out (its `bounds` are that frame's): a
+    /// node inside something absent keeps an old one.
+    laid_frame: u64,
     extent: [f32; 4],
     opacity: f32,
     attach: u8,
@@ -342,6 +345,7 @@ impl Node {
             // A field takes the pointer, to place its caret.
             interactive: kind == Kind::Field,
             drawn_frame: 0,
+            laid_frame: 0,
             extent: [0.0; 4],
             opacity: 1.0,
             attach: 0,
@@ -1871,7 +1875,18 @@ impl Scene {
 
         let animations = std::mem::take(&mut self.animations);
         let mut running = Vec::new();
+        // What is not seen keeps no surface drawing: a transition on a node
+        // in nothing visible (a closed cell's panel, inside something of no
+        // size) waits, its clock running, and goes on where it should be
+        // once it is seen again. One on a node growing from nothing counts,
+        // as its parent is seen.
+        let mut waiting_unseen = 0;
         for mut a in animations {
+            if !self.seen(a.node) && !self.parent(a.node).is_some_and(|p| self.seen(p)) {
+                waiting_unseen += 1;
+                running.push(a);
+                continue;
+            }
             // A spring integrates; it is done when it is within a quarter
             // physical pixel of its target and nearly still.
             if let (Some(spring), Some((x, v))) = (a.timing.spring, a.spring.as_mut()) {
@@ -1933,7 +1948,7 @@ impl Scene {
             let props: Vec<String> = self.animations.iter().take(6).map(|a| format!("{:?}:{:?}->{:?}", a.prop, a.from, a.to)).collect();
             log::trace!("moving: {} animations {}", self.animations.len(), props.join(" "));
         }
-        let mut motion = Motion { moving: !self.animations.is_empty(), wake: None };
+        let mut motion = Motion { moving: self.animations.len() > waiting_unseen, wake: None };
         // An image that finished decoding is news; one still decoding is
         // looked for again on a short beat.
         if self.images.collect() {
@@ -1944,9 +1959,12 @@ impl Scene {
             motion.wake = Some(images::BEAT);
         }
 
-        for &node in &self.movers {
+        let seen: Vec<bool> = self.movers.iter().map(|&m| self.seen(m)).collect();
+        for (k, &node) in self.movers.iter().enumerate() {
             let Some(n) = self.tree.get_node_context_mut(node) else { continue };
-            if !n.present {
+            // Unseen, it neither moves nor asks for frames: its phase picks
+            // up where it was.
+            if !n.present || !seen[k] {
                 continue;
             }
             if n.kind == Kind::Shader {
@@ -2050,6 +2068,53 @@ impl Scene {
             motion.wake = None;
         }
         motion
+    }
+
+    /// Whether `node` was laid out in the last frame and showed some of
+    /// itself: present, inside its clips, of some size.
+    fn seen(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.present && n.laid_frame == self.frame && n.bounds[2] > 0.0 && n.bounds[3] > 0.0)
+    }
+
+    /// What is moving now and why, for the inspector: each transition on
+    /// its way (node, property) and each node that moves of itself (a
+    /// shader's clock, an orbit, a filling arc, a wave, a sway, particles,
+    /// a pulse). A surface that keeps drawing at rest says why here.
+    pub fn moving_report(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.animations.iter().map(|a| format!("{} transition {:?}", u64::from(a.node), a.prop)).collect();
+        for &node in &self.movers {
+            let Some(n) = self.tree.get_node_context(node) else { continue };
+            if !n.present {
+                continue;
+            }
+            let id = u64::from(node);
+            let mut why = Vec::new();
+            if n.kind == Kind::Shader && n.clock {
+                why.push("shader clock".to_owned());
+            }
+            if n.orbit != 0.0 {
+                why.push(format!("orbit {}", n.orbit));
+            }
+            if n.arc_rate > 0.0 && n.arc < 1.0 {
+                why.push("arc filling".to_owned());
+            }
+            if n.wave_time > 0.0 {
+                why.push("wave".to_owned());
+            }
+            if n.sway > 0.0 {
+                why.push("sway".to_owned());
+            }
+            if n.kind == Kind::Emitter {
+                why.push("particles".to_owned());
+            }
+            if n.pulse > 0.0 {
+                why.push(format!("pulse {}", n.pulse));
+            }
+            if !why.is_empty() {
+                out.push(format!("{id} {:?} {}", n.kind, why.join(", ")));
+            }
+        }
+        out
     }
 
     /// Whether anything changed since the last call.
@@ -2939,6 +3004,7 @@ fn collect_node(
         n.arc_radius = layout.size.width / 2.0;
         n.bounds = [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)];
         n.extent = own;
+        n.laid_frame = out.frame;
     }
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {
@@ -4099,6 +4165,12 @@ mod tests {
         let n = scene.create(Kind::Capsule, Role::None);
         scene.append(root, n);
         scene.set(n, Prop::OffsetX, Value::Number(0.0), None).unwrap();
+        for prop in [Prop::Width, Prop::Height] {
+            scene.set(n, prop, Value::Number(20.0), None).unwrap();
+        }
+        // Drawn once, as a node on screen is: what is never seen waits.
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
         let timing = Timing {
             duration: 0.0,
             curve: genoma_core::timing::Curve::LINEAR,
@@ -4127,6 +4199,41 @@ mod tests {
         // Inside something absent, it is not there to open beside.
         scene.set(row, Prop::Present, Value::Bool(false), None).unwrap();
         assert_eq!(scene.find("tray"), None);
+    }
+
+    #[test]
+    fn what_is_not_seen_asks_for_no_frames_and_catches_up() {
+        let (mut scene, n, _) = spring_scene();
+        let root = scene.root();
+        // The node inside a box that goes absent: a closed cell's panel.
+        let panel = scene.create(Kind::Box, Role::None);
+        scene.append(root, panel);
+        let dot = scene.create(Kind::Capsule, Role::None);
+        scene.append(panel, dot);
+        for prop in [Prop::Width, Prop::Height] {
+            scene.set(dot, prop, Value::Number(10.0), None).unwrap();
+        }
+        scene.set(panel, Prop::Present, Value::Bool(false), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
+        let t0 = Instant::now();
+        scene.advance(t0, 1.0);
+        let fade = Timing { duration: 0.2, curve: genoma_core::timing::Curve::LINEAR, delay: 0.0, spring: None };
+        scene.set(dot, Prop::Opacity, Value::Number(0.0), Some(fade)).unwrap();
+        // A pulse on it too: a mover that would beat for ever.
+        scene.set(dot, Prop::Pulse, Value::Number(60.0), None).unwrap();
+        let motion = scene.advance(t0 + Duration::from_millis(16), 1.0);
+        assert!(!motion.moving && motion.wake.is_none(), "nothing seen moves: {motion:?}");
+        // Seen again, after its time: it is where it should be by now.
+        scene.set(panel, Prop::Present, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
+        scene.advance(t0 + Duration::from_millis(500), 1.0);
+        assert_eq!(scene.value(dot, Prop::Opacity), Some(Value::Number(0.0)));
+        // A seen node still moves.
+        let motion = scene.advance(t0 + Duration::from_millis(520), 1.0);
+        assert!(motion.moving || motion.wake.is_some(), "the pulse beats once seen");
+        let _ = n;
     }
 
     #[test]

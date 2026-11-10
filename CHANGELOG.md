@@ -6,6 +6,27 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Changed
+
+- What is not seen keeps no surface drawing. A transition on a node in
+  nothing visible (inside something absent, of no size, or clipped away)
+  waits, its clock running, and lands where it should be once seen; a
+  node that moves of itself (a pulse, an orbit, a wave, particles, a
+  shader's clock) stops while unseen and goes on from where it was. A
+  transition on a node growing from nothing still runs, its parent being
+  seen. Seen in Bioma: a closed vitals cell's ripples kept its membrane at
+  141 frames a second at rest; now 3, and the shell's CPU during a run of
+  cells opening and closing went from 4.6 % to 3.1 % of a core, the
+  animations drawn the same.
+
+### Added
+
+- `genoma ipc genoma tree` says, for each surface, what is moving and why
+  (`moving`: transitions by node and property, nodes that move of
+  themselves and how).
+
 ## 0.1.5 — 2026-11-10
 
 ### Added

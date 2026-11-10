@@ -1948,6 +1948,7 @@ impl App {
                             "namespace": spec.map(|p| p.namespace.clone()),
                             "output": s.output,
                             "size": [s.logical.0, s.logical.1],
+                            "moving": s.scene.borrow().moving_report(),
                             "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", Role::Window(_) => "window", _ => "layer" },
                             "asleep": s.asleep,
                             "nodes": nodes,
