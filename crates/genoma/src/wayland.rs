@@ -409,6 +409,8 @@ pub struct App {
     /// `@genoma/compositor` through ext-workspace and wlr-foreign-toplevel,
     /// where no compositor IPC is known.
     wm: Option<wm::Wm>,
+    /// `@genoma/displays` through wlr-output-management.
+    dm: Option<displays::Dm>,
     /// `ext-idle-notify`, bound once an interface requires `@genoma/idle`;
     /// the service it sets, and the notification asked for with its seconds.
     idle_notifier: Option<ExtIdleNotifierV1>,
@@ -508,6 +510,7 @@ impl App {
             toplevel_list: None,
             toplevels: None,
             wm: None,
+            dm: None,
             idle_notifier: None,
             idle: None,
             idle_notifications: std::collections::HashMap::new(),
@@ -3428,6 +3431,7 @@ impl ProvidesRegistryState for App {
 
 delegate_registry!(App);
 
+mod displays;
 mod wm;
 smithay_client_toolkit::delegate_dispatch2!(App);
 

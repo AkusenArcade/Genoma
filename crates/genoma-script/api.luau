@@ -589,6 +589,61 @@ export type Toplevels = {
     read list: { { identifier: string, title: string?, app_id: string? } },
 }
 
+export type DisplayMode = { width: number, height: number, refresh: number, preferred: boolean }
+
+export type Display = {
+    -- The connector, as g.outputs() names it: "DP-1".
+    name: string,
+    description: string,
+    make: string,
+    model: string,
+    serial: string,
+    -- 0 when unknown.
+    width_mm: number,
+    height_mm: number,
+    enabled: boolean,
+    modes: { DisplayMode },
+    -- The mode in use; nil when off.
+    mode: DisplayMode?,
+    x: number,
+    y: number,
+    scale: number,
+    -- "normal", "90", "180", "270", "flipped", "flipped-90", "flipped-180"
+    -- or "flipped-270".
+    transform: string,
+    -- nil when the compositor does not say.
+    adaptive_sync: boolean?,
+}
+
+-- What one display changes; what is left out stays. `mode` takes a
+-- DisplayMode or { width, height, refresh? } (a size not listed, or a
+-- refresh not near a listed one, is asked for as a custom mode);
+-- `position` takes { x = , y = } or { x, y }.
+export type DisplayChange = {
+    enabled: boolean?,
+    mode: { [any]: number }?,
+    position: { [any]: number }?,
+    scale: number?,
+    transform: string?,
+    adaptive_sync: boolean?,
+}
+
+-- @genoma/displays: wlr-output-management, the displays and their setup.
+export type Displays = {
+    read available: boolean,
+    read heads: { Display },
+    -- The compositor's answer to the latest configuration: status
+    -- "applied", "works" (a test), "failed", or "cancelled" (the displays
+    -- changed meanwhile).
+    read result: { id: number, test: boolean, status: string }?,
+    -- displays:apply({ ["DP-1"] = { scale = 1.25 } }) → its id. Displays not
+    -- named keep their setup; a mistake (no such display, every display
+    -- off, a transform with no name) is an error before anything is sent.
+    apply: (self: Displays, changes: { [string]: DisplayChange }) -> number,
+    -- The same, only asking whether it would work.
+    test: (self: Displays, changes: { [string]: DisplayChange }) -> number,
+}
+
 -- @genoma/tray: StatusNotifierItem with DBusMenu.
 export type Tray = {
     read items: { { [string]: any } },

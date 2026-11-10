@@ -44,6 +44,7 @@ use genoma_services::{
     polkit::Polkit,
     power::Power,
     toplevels::Toplevels,
+    displays::{Change, Displays, Head},
     tray::{MenuEntry, Tray},
     vitals::Vitals,
 };
@@ -372,6 +373,8 @@ pub struct Services {
     pub audio: Rc<Audio>,
     pub bluetooth: Rc<Bluetooth>,
     pub toplevels: Rc<Toplevels>,
+    /// wlr-output-management: the displays and their setup.
+    pub displays: Rc<Displays>,
     pub idle: Rc<Idle>,
     pub lock: Rc<Lock>,
     pub tray: Rc<Tray>,
@@ -1255,6 +1258,111 @@ impl UserData for ToplevelsRef {
             }
             Ok(list)
         });
+    }
+}
+
+struct DisplaysRef(Rc<Displays>);
+
+fn mode_table(lua: &Lua, m: &genoma_services::displays::Mode) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("width", m.width)?;
+    t.set("height", m.height)?;
+    t.set("refresh", m.refresh)?;
+    t.set("preferred", m.preferred)?;
+    Ok(t)
+}
+
+fn head_table(lua: &Lua, h: Head) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("name", h.name)?;
+    t.set("description", h.description)?;
+    t.set("make", h.make)?;
+    t.set("model", h.model)?;
+    t.set("serial", h.serial)?;
+    t.set("width_mm", h.width_mm)?;
+    t.set("height_mm", h.height_mm)?;
+    t.set("enabled", h.enabled)?;
+    let modes = lua.create_table()?;
+    for (i, m) in h.modes.iter().enumerate() {
+        modes.set(i + 1, mode_table(lua, m)?)?;
+    }
+    t.set("modes", modes)?;
+    if let Some(m) = &h.mode {
+        t.set("mode", mode_table(lua, m)?)?;
+    }
+    t.set("x", h.x)?;
+    t.set("y", h.y)?;
+    t.set("scale", h.scale)?;
+    t.set("transform", h.transform)?;
+    t.set("adaptive_sync", h.adaptive_sync)?;
+    Ok(t)
+}
+
+/// `{ ["DP-1"] = { enabled, mode = { width, height, refresh }, position =
+/// { x, y }, scale, transform, adaptive_sync } }` as changes.
+fn changes_arg(t: Table) -> mlua::Result<Vec<Change>> {
+    let mut out = Vec::new();
+    for pair in t.pairs::<String, Table>() {
+        let (name, c) = pair?;
+        let mode = match c.get::<Option<Table>>("mode")? {
+            Some(m) => Some((
+                m.get::<Option<i32>>("width")?.map_or_else(|| m.get(1), Ok)?,
+                m.get::<Option<i32>>("height")?.map_or_else(|| m.get(2), Ok)?,
+                m.get::<Option<f64>>("refresh")?.or(m.get::<Option<f64>>(3)?),
+            )),
+            None => None,
+        };
+        let position = match c.get::<Option<Table>>("position")? {
+            Some(p) => Some((p.get::<Option<i32>>("x")?.map_or_else(|| p.get(1), Ok)?, p.get::<Option<i32>>("y")?.map_or_else(|| p.get(2), Ok)?)),
+            None => None,
+        };
+        out.push(Change {
+            name,
+            enabled: c.get("enabled")?,
+            mode,
+            position,
+            scale: c.get("scale")?,
+            transform: c.get("transform")?,
+            adaptive_sync: c.get("adaptive_sync")?,
+        });
+    }
+    Ok(out)
+}
+
+impl UserData for DisplaysRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers wlr-output-management.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // displays.heads → { { name, description, make, model, serial,
+        // width_mm, height_mm, enabled, modes, mode, x, y, scale, transform,
+        // adaptive_sync }, … }
+        fields.add_field_method_get("heads", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, h) in this.0.heads.get().into_iter().enumerate() {
+                list.set(i + 1, head_table(lua, h)?)?;
+            }
+            Ok(list)
+        });
+        // displays.result → { id, test, status } for the latest
+        // configuration, or nil.
+        fields.add_field_method_get("result", |lua, this| match this.0.result.get() {
+            Some(o) => {
+                let t = lua.create_table()?;
+                t.set("id", o.id)?;
+                t.set("test", o.test)?;
+                t.set("status", o.status)?;
+                Ok(LuaValue::Table(t))
+            }
+            None => Ok(LuaValue::Nil),
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // displays:apply(changes) → id: the heads not named keep their setup;
+        // the answer comes as displays.result with this id.
+        methods.add_method("apply", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, false).map_err(err));
+        // displays:test(changes) → id: only asks whether it would work.
+        methods.add_method("test", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, true).map_err(err));
     }
 }
 
@@ -2508,7 +2616,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2520,6 +2628,7 @@ impl Script {
                         "audio" => "audio",
                         "bluetooth" => "bluetooth",
                         "toplevels" => "toplevels",
+                        "displays" => "displays",
                         "idle" => "idle",
                         "lock" => "lock",
                         "tray" => "tray",
@@ -2550,6 +2659,7 @@ impl Script {
                         "audio" => lua.create_userdata(AudioRef(services.audio.clone()))?,
                         "bluetooth" => lua.create_userdata(BluetoothRef(services.bluetooth.clone()))?,
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
+                        "displays" => lua.create_userdata(DisplaysRef(services.displays.clone()))?,
                         "idle" => lua.create_userdata(IdleRef(services.idle.clone()))?,
                         "lock" => lua.create_userdata(LockRef(services.lock.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
@@ -2617,6 +2727,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("audio", "Audio"),
     ("bluetooth", "Bluetooth"),
     ("toplevels", "Toplevels"),
+    ("displays", "Displays"),
     ("idle", "Idle"),
     ("lock", "Lock"),
     ("tray", "Tray"),

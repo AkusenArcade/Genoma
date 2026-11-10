@@ -23,6 +23,17 @@ changes what a shell sees.
   `compositor:focus_window` brings a minimized window back.
 - A window table has `output` (its own, or its workspace's) and
   `minimized`.
+- `@genoma/displays`, over `wlr-output-management`: `displays.heads`
+  (name, make, model, serial, size in mm, modes, the mode in use, position,
+  scale, transform, adaptive sync, on or off), and `displays:apply(changes)`
+  / `displays:test(changes)` with changes by display name. Displays not
+  named keep their setup (the protocol wants every one in each
+  configuration); a size not listed, or a refresh far from a listed one,
+  is asked for as a custom mode; mistakes (no such display, every display
+  off, a transform with no name, a mode of no size) are errors before
+  anything is sent. The compositor's answer comes back as
+  `displays.result` (`applied`, `works`, `failed`, `cancelled`). Tried on
+  niri 26.04 (nested) and Umbriel's headless outputs.
 
 ### Changed
 

@@ -14,6 +14,7 @@ pub mod bus;
 pub mod clipboard;
 pub mod clock;
 pub mod compositor;
+pub mod displays;
 pub mod icons;
 pub mod idle;
 pub mod lock;

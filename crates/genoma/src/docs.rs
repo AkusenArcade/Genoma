@@ -362,6 +362,7 @@ mod tests {
             ("AudioRef", "Audio"),
             ("BluetoothRef", "Bluetooth"),
             ("ToplevelsRef", "Toplevels"),
+            ("DisplaysRef", "Displays"),
             ("IdleRef", "Idle"),
             ("LockRef", "Lock"),
             ("TrayRef", "Tray"),
