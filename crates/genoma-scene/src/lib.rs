@@ -191,6 +191,9 @@ pub struct Node {
     inhibit_shortcuts: bool,
     /// The session stays awake while this node is seen.
     inhibit_idle: bool,
+    /// An image's colours: saturation, contrast, brightness, then a tint
+    /// (`genoma_render::Image::filter`).
+    filter: [f32; 8],
     growth: f32,
     reach: f32,
     clip: bool,
@@ -354,6 +357,7 @@ impl Node {
             catch: false,
             inhibit_shortcuts: false,
             inhibit_idle: false,
+            filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
             reach: 1.0,
             clip: false,
@@ -1476,6 +1480,10 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::Bud => Value::Number(n.bud),
             Prop::CombineSoft => Value::Number(n.combine_soft),
             Prop::BlurRadius => Value::Number(n.blur_radius),
+            Prop::Saturation => Value::Number(n.filter[0]),
+            Prop::Contrast => Value::Number(n.filter[1]),
+            Prop::Brightness => Value::Number(n.filter[2]),
+            Prop::Tint => Value::Color([n.filter[4], n.filter[5], n.filter[6], n.filter[7]]),
             Prop::BackdropBlur => Value::Number(n.backdrop_blur),
             Prop::Halo => Value::Number(n.halo),
             Prop::RotateX => Value::Number(n.turn[0]),
@@ -1596,6 +1604,13 @@ impl Scene {
             Prop::Catch => n.catch = take!(flag),
             Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
+            Prop::Saturation => n.filter[0] = take!(number).max(0.0),
+            Prop::Contrast => n.filter[1] = take!(number).max(0.0),
+            Prop::Brightness => n.filter[2] = take!(number).max(0.0),
+            Prop::Tint => {
+                let c = take!(colour);
+                n.filter[4..8].copy_from_slice(&c);
+            }
             Prop::Growth => n.growth = take!(number).clamp(0.0, 1.0),
             Prop::Reach => n.reach = take!(number).clamp(0.0, 1.0),
             Prop::Clip => n.clip = take!(flag),
@@ -2991,6 +3006,7 @@ fn backdrop(rect: [f32; 4], radius: f32, sigma: f32, out: &mut Out) {
         clip: out.clip,
         fade: out.fade_of(),
         transform: Rect::IDENTITY,
+        filter: genoma_render::Image::NO_FILTER,
     });
 }
 
@@ -3033,6 +3049,7 @@ fn blurred(mut own: DrawList, sigma: f32, out: &mut Out) {
         clip: out.clip,
         fade: out.fade_of(),
         transform: Rect::IDENTITY,
+        filter: genoma_render::Image::NO_FILTER,
     });
 }
 
@@ -3520,6 +3537,7 @@ fn collect_node(
                         clip: out.clip,
                         fade: out.fade_of(),
                         transform: out.transform,
+                        filter: genoma_render::Image::NO_FILTER,
                     });
                 }
             }
@@ -3559,6 +3577,7 @@ fn collect_node(
                             clip: out.clip,
                             fade: out.fade_of(),
                             transform: out.transform,
+                            filter: n.filter,
                         });
                     } else {
                     let part = |shown: u32, decoded: u32| {
@@ -3584,6 +3603,7 @@ fn collect_node(
                         clip: out.clip,
                         fade: out.fade_of(),
                         transform: out.transform,
+                        filter: n.filter,
                     });
                     }
                 }
@@ -3635,6 +3655,7 @@ fn collect_node(
                     clip: out.clip,
                     fade: out.fade_of(),
                     transform: out.transform,
+                    filter: genoma_render::Image::NO_FILTER,
                 });
             }
             // Reaching into a clip's fade: glyphon cannot fade it, an image can.
@@ -3704,6 +3725,7 @@ fn collect_node(
                     clip: out.clip,
                     fade: out.fade_of(),
                     transform: out.transform,
+                    filter: genoma_render::Image::NO_FILTER,
                 });
             }
         }
@@ -3734,6 +3756,7 @@ fn collect_node(
                     clip: out.clip,
                     fade: out.fade_of(),
                     transform: out.transform,
+                    filter: genoma_render::Image::NO_FILTER,
                 });
             }
         }

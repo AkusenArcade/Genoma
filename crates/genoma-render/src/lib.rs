@@ -104,6 +104,14 @@ pub struct Image {
     pub fade: [f32; 4],
     /// Depth, as a rect's (see [`Rect::transform`]).
     pub transform: [[f32; 4]; 4],
+    /// Saturation, contrast, brightness (1 each changes nothing), then a
+    /// tint's red, green, blue and strength (0 none): see [`Image::NO_FILTER`].
+    pub filter: [f32; 8],
+}
+
+impl Image {
+    /// The picture as it is.
+    pub const NO_FILTER: [f32; 8] = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 }
 
 /// What one surface shows, in layers drawn one after the other. Inside a
@@ -225,6 +233,7 @@ fn same_image(a: &Image, b: &Image) -> bool {
         && a.clip == b.clip
         && a.fade == b.fade
         && a.transform == b.transform
+        && a.filter == b.filter
 }
 
 fn same_shader(a: &Shader, b: &Shader) -> bool {
@@ -535,6 +544,7 @@ impl DrawList {
                 v.to_bits().hash(&mut h);
             }
             (i.width, i.height, i.radius.to_bits(), i.alpha.to_bits()).hash(&mut h);
+            i.filter.map(f32::to_bits).hash(&mut h);
         }
         for sh in &self.shaders {
             sh.key.hash(&mut h);
@@ -895,6 +905,7 @@ mod tests {
             clip: Rect::NO_CLIP,
             fade: [0.0; 4],
             transform: Rect::IDENTITY,
+            filter: Image::NO_FILTER,
         }
     }
 

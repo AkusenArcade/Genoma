@@ -18,6 +18,9 @@ struct Quad {
     clip: [f32; 4],
     uv: [f32; 4],
     m: [[f32; 4]; 4],
+    /// Saturation, contrast, brightness; then the tint and its strength.
+    filter: [f32; 4],
+    tint: [f32; 4],
 }
 
 pub(crate) const SHADER: &str = r#"
@@ -37,12 +40,14 @@ struct Varyings {
     // The pixel before the matrix, where the clip and the fade are measured
     // (as the rects': a tilted subtree is cut by its turned parent).
     @location(6) unturned: vec2<f32>,
+    @location(7) grade: vec4<f32>,
+    @location(8) tint: vec4<f32>,
 };
 
 @vertex
 fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @location(1) size: vec2<f32>, @location(2) alpha: vec4<f32>, @location(3) clip: vec4<f32>,
       @location(4) m0: vec4<f32>, @location(5) m1: vec4<f32>, @location(6) m2: vec4<f32>, @location(7) m3: vec4<f32>,
-      @location(8) uv: vec4<f32>) -> Varyings {
+      @location(8) uv: vec4<f32>, @location(9) grade: vec4<f32>, @location(10) tint: vec4<f32>) -> Varyings {
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u));
     let pixel = origin + corner * size;
     // Depth, as the rects have it: w carries the perspective.
@@ -57,7 +62,29 @@ fn vs(@builtin(vertex_index) vertex: u32, @location(0) origin: vec2<f32>, @locat
     out.shape = vec3<f32>(size, alpha.y);
     out.fade = alpha.zw;
     out.unturned = pixel;
+    out.grade = grade;
+    out.tint = tint;
     return out;
+}
+
+// The picture's colours changed as the node asks, on the straight (not
+// premultiplied) sRGB values: saturation and contrast around grey,
+// brightness a multiplier, a tint the luminance in its hue.
+fn filtered(c: vec4<f32>, grade: vec4<f32>, tint: vec4<f32>) -> vec4<f32> {
+    if (all(grade.xyz == vec3<f32>(1.0)) && tint.w == 0.0) || c.a <= 0.0 {
+        return c;
+    }
+    let weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    var rgb = c.rgb / c.a;
+    let luma = dot(rgb, weights);
+    rgb = mix(vec3<f32>(luma), rgb, grade.x);
+    rgb = (rgb - vec3<f32>(0.5)) * grade.y + vec3<f32>(0.5);
+    rgb = rgb * grade.z;
+    if tint.w > 0.0 {
+        let hue = tint.rgb / max(dot(tint.rgb, weights), 1e-3);
+        rgb = mix(rgb, dot(rgb, weights) * hue, tint.w);
+    }
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * c.a, c.a);
 }
 
 @fragment
@@ -79,7 +106,7 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (in.fade.y > 0.0) {
         cover *= clamp((in.fade.x - p.y) / in.fade.y, 0.0, 1.0);
     }
-    return textureSample(image, smp, in.uv) * in.alpha * cover;
+    return filtered(textureSample(image, smp, in.uv), in.grade, in.tint) * in.alpha * cover;
 }
 "#;
 
@@ -175,7 +202,7 @@ impl Pipeline {
                     array_stride: std::mem::size_of::<Quad>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4,
-                        8 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4],
+                        8 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 9 => Float32x4, 10 => Float32x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -354,6 +381,8 @@ impl Pipeline {
                 clip: image.clip,
                 uv: image.uv,
                 m: image.transform,
+                filter: [image.filter[0], image.filter[1], image.filter[2], 0.0],
+                tint: [image.filter[4], image.filter[5], image.filter[6], image.filter[7]],
             });
             self.draws.push(image.key);
         }

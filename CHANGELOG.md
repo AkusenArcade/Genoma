@@ -56,6 +56,13 @@ changes what a shell sees.
   `genoma:chart`, so a history of a thousand points costs one node and is
   drawn on the GPU. `examples/charts`.
 
+- Image filters: `g.image` takes `saturation` (0 grey, 1 as it is),
+  `contrast`, `brightness` (a multiplier) and `tint` (the picture in a
+  colour's hue, its alpha how much), each animatable and applied on the
+  GPU as the picture is drawn, so changing them decodes nothing again.
+  With `soften` (a blur at decode) they cover a wallpaper dimmed and
+  blurred behind a lock.
+
 ### Changed
 
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it
