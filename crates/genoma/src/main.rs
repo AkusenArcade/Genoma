@@ -16,6 +16,7 @@
 mod access;
 mod check;
 mod new;
+mod snapshot;
 mod docs;
 mod ipc;
 mod wayland;
@@ -67,6 +68,7 @@ fn main() {
             }
             None => fail("genoma new <directory>: where the new shell goes"),
         },
+        Some("snapshot") => std::process::exit(snapshot::run(std::env::args().skip(2).collect())),
         Some("check") => std::process::exit(check::run(std::env::args().nth(2).map(PathBuf::from).as_deref())),
         Some("spectrum") => spectrum_command(std::env::args().skip(2).collect()),
         Some("probe") => probe(),
@@ -101,7 +103,7 @@ fn fail(message: &str) -> ! {
 }
 
 /// The services, before anything depends on them.
-fn services() -> (Services, Streams) {
+pub(crate) fn services() -> (Services, Streams) {
     // niri's own service only under niri; the compositor's under any.
     let (niri, stream) = match std::env::var_os("NIRI_SOCKET").map(|_| Niri::connect()) {
         Some(Ok((niri, stream))) => (Some(Rc::new(niri)), Some(stream)),
@@ -226,7 +228,7 @@ fn spectrum_command(args: Vec<String>) {
 
 /// Starts the source of each service an interface asked for and that is not
 /// running yet: a reload that requires a new service gets it.
-struct Sources {
+pub(crate) struct Sources {
     services: Services,
     streams: Streams,
     /// The D-Bus thread, started with the first service that needs it.
@@ -235,7 +237,7 @@ struct Sources {
 }
 
 impl Sources {
-    fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
+    pub(crate) fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
         for service in
             ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session", "spectrum"]
         {
@@ -439,9 +441,9 @@ impl Sources {
 }
 
 /// The loop, as the script's building blocks see it (PRD §9.2).
-struct LoopHost(LoopHandle<'static, wayland::App>, Arc<Mutex<FontSystem>>);
+pub(crate) struct LoopHost<D: 'static>(LoopHandle<'static, D>, Arc<Mutex<FontSystem>>);
 
-impl genoma_script::io::Host for LoopHost {
+impl<D: 'static> genoma_script::io::Host for LoopHost<D> {
     fn timer(&self, after: Duration, mut tick: Box<dyn FnMut() -> Option<Duration>>) -> Option<RegistrationToken> {
         self.0
             .insert_source(Timer::from_duration(after), move |_, _, _| match tick() {

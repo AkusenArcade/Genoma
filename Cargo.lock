@@ -999,6 +999,7 @@ dependencies = [
  "genoma-services",
  "log",
  "notify",
+ "png",
  "rustix",
  "serde_json",
  "smithay-client-toolkit",

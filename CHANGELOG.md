@@ -6,6 +6,18 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `genoma snapshot <dir>`: the interface run with no compositor, each
+  surface drawn on the GPU into a picture (`<n>-<namespace>.png`) and every
+  tree written as JSON (`tree.json`), on one screen of the size and name
+  asked for, after `--wait` seconds and the `--ipc` calls given. A shell
+  seen and compared in a script or in CI, nothing shown on the desktop.
+  The compositor's blur is not drawn. Bioma's ten surfaces, with a cell
+  opened by `--ipc`, in about four seconds.
+
 ## 0.1.7 — 2026-11-10
 
 ### Added

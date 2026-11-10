@@ -707,6 +707,8 @@ enum Message {
     Draw { id: SurfaceId, width: u32, height: u32, list: Box<DrawList> },
     /// With a sender, answered once the swapchain is gone.
     Destroy { id: SurfaceId, done: Option<std::sync::mpsc::Sender<()>> },
+    /// Drawn into a texture of its own and read back: straight RGBA.
+    Snapshot { width: u32, height: u32, list: Box<DrawList>, reply: mpsc::Sender<Result<Vec<u8>, String>> },
 }
 
 /// One surface's last frames as the render thread measured them, for the
@@ -776,6 +778,9 @@ impl Renderer {
                         Message::Draw { id, width, height, list } => {
                             gpu.draw(id, width, height, *list)
                         }
+                        Message::Snapshot { width, height, list, reply } => {
+                            let _ = reply.send(gpu.snapshot(width, height, &list));
+                        }
                         Message::Destroy { id, done } => {
                             gpu.destroy_target(id);
                             if let Some(done) = done {
@@ -813,6 +818,15 @@ impl Renderer {
     /// callback, a viewport) has to be requested before this call.
     pub fn draw(&self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
         let _ = self.tx.send(Message::Draw { id, width, height, list: Box::new(list) });
+    }
+
+    /// `list` drawn at this size into a texture rather than a surface, and
+    /// read back: RGBA, straight alpha, a row after another. What
+    /// `genoma snapshot` writes as a picture; it waits for the GPU.
+    pub fn snapshot(&self, width: u32, height: u32, list: DrawList) -> Result<Vec<u8>, String> {
+        let (reply, answer) = mpsc::channel();
+        self.tx.send(Message::Snapshot { width, height, list: Box::new(list), reply }).map_err(|_| "the render thread is gone".to_owned())?;
+        answer.recv().map_err(|_| "the render thread is gone".to_owned())?
     }
 
     pub fn destroy_target(&self, id: SurfaceId) {

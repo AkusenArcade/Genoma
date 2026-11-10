@@ -13,6 +13,7 @@ genoma-render = { path = "../genoma-render" }
 genoma-scene = { path = "../genoma-scene" }
 genoma-script = { path = "../genoma-script" }
 genoma-services = { path = "../genoma-services" }
+png = "0.18"
 log.workspace = true
 accesskit = "0.25"
 accesskit_unix = "0.24"
