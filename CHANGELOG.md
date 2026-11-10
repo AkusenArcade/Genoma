@@ -24,6 +24,10 @@ changes what a shell sees.
 - A `g.popup` opens from a window as it does from a layer surface (a
   `kit.dropdown` in a window), and closes before its window does.
 
+- `combine_with` names several capsules, separated by spaces: up to five
+  shapes drawn as one, each met as `combine` says (three drops and their
+  necks). See `examples/shapes`.
+
 ### Changed
 
 - Inside a `navigate` node, the keyboard's focus walks a whole `g.list`:

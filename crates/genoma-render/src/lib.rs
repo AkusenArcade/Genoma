@@ -295,6 +295,15 @@ impl DrawList {
             let centre = [r.origin[0] + r.size[0] * 0.5 + r.bud[0], r.origin[1] + r.size[1] * 0.5 + r.bud[1]];
             lo = [lo[0].min(centre[0] - r.bud[2]), lo[1].min(centre[1] - r.bud[3])];
             hi = [hi[0].max(centre[0] + r.bud[2]), hi[1].max(centre[1] + r.bud[3])];
+            // And the more shapes it is combined with.
+            for i in 0..4 {
+                let (b, present) = (r.shapes[i * 2], r.shapes[i * 2 + 1][1] > 0.5);
+                if present {
+                    let c = [r.origin[0] + r.size[0] * 0.5 + b[0], r.origin[1] + r.size[1] * 0.5 + b[1]];
+                    lo = [lo[0].min(c[0] - b[2]), lo[1].min(c[1] - b[3])];
+                    hi = [hi[0].max(c[0] + b[2]), hi[1].max(c[1] + b[3])];
+                }
+            }
         }
         let quad = [lo[0] - 1.0, lo[1] - 1.0];
         let size = [hi[0] - lo[0] + 2.0, hi[1] - lo[1] + 2.0];
@@ -751,6 +760,24 @@ pub(crate) fn raw_handles(
 
 #[cfg(test)]
 mod tests {
+    /// The built-in pipelines' WGSL, checked as wgpu would at start: a
+    /// mistake here otherwise shows first as a panic on the render thread.
+    #[test]
+    fn every_built_in_pipeline_compiles() {
+        use wgpu::naga;
+        for (name, source) in [
+            ("rect", crate::rect::SHADER),
+            ("image", crate::image::SHADER),
+            ("particles", crate::particles::SHADER),
+            ("blur", crate::blur::SOURCE),
+        ] {
+            let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
+
     use super::*;
 
     fn rect(x: f32) -> Rect {

@@ -3,7 +3,7 @@
 //! halved first, as many times as it takes, which the eye cannot tell from
 //! the whole and costs a fraction.
 
-const SOURCE: &str = r#"
+pub(crate) const SOURCE: &str = r#"
 struct Params {
     // One texel of the source, 0…1 units.
     texel: vec2<f32>,

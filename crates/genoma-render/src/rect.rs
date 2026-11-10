@@ -66,6 +66,13 @@ pub struct Rect {
     /// count of 0 is no stops. Not an attribute: the stops go to the GPU
     /// once each, as the matrices do.
     pub stops: [[f32; 4]; 8],
+    /// More shapes joined to this one as the first one combined is (a
+    /// `combine_with` naming several): up to four, each its box as `bud`
+    /// gives one (centre relative to this one's, half size, physical
+    /// pixels) then its radius and 1 when it is there. Not an attribute:
+    /// each distinct set goes to the GPU once, and the instance carries its
+    /// index with the operation, in `bud_shape.w`.
+    pub shapes: [[f32; 4]; 8],
     /// Depth (PRD §5.5): a 4×4 matrix, by rows, from the surface's physical
     /// pixels to projected ones with w for the perspective. The identity is
     /// a flat shape.
@@ -81,19 +88,22 @@ pub struct Rect {
 struct GpuRect([f32; GpuRect::LEN]);
 
 impl GpuRect {
-    const LEN: usize = std::mem::size_of::<Rect>() / 4 - 16 - 32;
+    const LEN: usize = std::mem::size_of::<Rect>() / 4 - 16 - 32 - 32;
     /// `bud_shape.z`, the last vector before the matrix.
     const TRANSFORM: usize = Self::LEN - 2;
 
     /// `fade.z`.
     const STOPS: usize = std::mem::offset_of!(Rect, fade) / 4 + 2;
+    /// `bud_shape.w`: the operation, and above it the set of more shapes.
+    const OPERATION: usize = std::mem::offset_of!(Rect, bud_shape) / 4 + 3;
 
-    fn new(rect: &Rect, transform: u32, stops: u32) -> GpuRect {
+    fn new(rect: &Rect, transform: u32, stops: u32, shapes: u32) -> GpuRect {
         let all: &[f32] = bytemuck::cast_slice(std::slice::from_ref(rect));
         let mut body = [0.0; Self::LEN];
         body.copy_from_slice(&all[..Self::LEN]);
         body[Self::TRANSFORM] = transform as f32;
         body[Self::STOPS] = stops as f32;
+        body[Self::OPERATION] += 4.0 * shapes as f32;
         GpuRect(body)
     }
 }
@@ -104,6 +114,7 @@ impl Rect {
         [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     pub const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
     pub const NO_STOPS: [[f32; 4]; 8] = [[0.0; 4]; 8];
+    pub const NO_SHAPES: [[f32; 4]; 8] = [[0.0; 4]; 8];
 
     /// Up to six stops, (position, colour), positions in order.
     pub fn stops(list: &[(f32, [f32; 4])]) -> [[f32; 4]; 8] {
@@ -137,6 +148,10 @@ pub(crate) struct Pipeline {
     gradient_capacity: usize,
     last_gradients: Vec<[[f32; 4]; 8]>,
     stop_sets: Vec<[[f32; 4]; 8]>,
+    shape_buffer: wgpu::Buffer,
+    shape_capacity: usize,
+    last_shapes: Vec<[[f32; 4]; 8]>,
+    shape_sets: Vec<[[f32; 4]; 8]>,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -151,7 +166,7 @@ pub(crate) struct Pipeline {
     gpu_rects: Vec<GpuRect>,
 }
 
-const SHADER: &str = r#"
+pub(crate) const SHADER: &str = r#"
 struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 // By rows on the CPU, so as WGSL's columns each is the transpose: `p * m`
@@ -160,6 +175,10 @@ struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 // Each distinct set of fill stops once, the first none (Rect::stops).
 struct Stops { at: array<vec4<f32>, 2>, colour: array<vec4<f32>, 6> };
 @group(0) @binding(2) var<storage, read> gradients: array<Stops>;
+// More shapes combined: four boxes, each centre and half size, then radius
+// and whether it is there.
+struct Shapes { boxes: array<vec4<f32>, 8> };
+@group(0) @binding(3) var<storage, read> shapes: array<Shapes>;
 
 fn along_stops(s: Stops, t: f32) -> vec4<f32> {
     let n = i32(s.at[1].w + 0.5);
@@ -228,6 +247,17 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
         let centre = instance.origin + instance.size * 0.5 + instance.bud.xy;
         lo = min(lo, centre - instance.bud.zw);
         hi = max(hi, centre + instance.bud.zw);
+        let more = u32(instance.bud_shape.w + 0.5) >> 2u;
+        if (more > 0u) {
+            for (var i = 0u; i < 4u; i = i + 1u) {
+                let b = shapes[more].boxes[i * 2u];
+                if (shapes[more].boxes[i * 2u + 1u].y > 0.5) {
+                    let c = instance.origin + instance.size * 0.5 + b.xy;
+                    lo = min(lo, c - b.zw);
+                    hi = max(hi, c + b.zw);
+                }
+            }
+        }
     }
     let pixel = lo - vec2<f32>(1.0) + corner * (hi - lo + vec2<f32>(2.0));
     // Depth: the corner through the node's matrix. Its w carries the
@@ -311,6 +341,15 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
 // Its counterpart: the two fields met where both are, rounded as wide as k.
 fn smax(a: f32, b: f32, k: f32) -> f32 {
     return -smin(-a, -b, k);
+}
+
+// A shape met by another: joined whole (3), kept only where both are (2),
+// cut out (1), or budded (0, a smooth union whose parent draws its own
+// inside).
+fn combined(d: f32, other: f32, op: u32, k: f32) -> f32 {
+    if (op == 2u) { return smax(d, other, k); }
+    if (op == 1u) { return smax(d, -other, k); }
+    return smin(d, other, k);
 }
 
 // Signed distance to a rounded box: negative inside, in pixels.
@@ -398,16 +437,23 @@ fn body(in: Varyings) -> vec4<f32> {
     // Combined with another shape: joined whole (3), kept only where both
     // are (2), or cut out of this one (1), rather than budded.
     if (in.bud_shape.y > 0.0) {
+        let code = u32(in.bud_shape.w + 0.5);
+        let op = code & 3u;
         let parent = rounded_box(in.local - in.bud.xy, in.bud.zw, in.bud_shape.x);
-        if (in.bud_shape.w > 2.5) {
-            d = smin(d, parent, in.bud_shape.y);
-        } else if (in.bud_shape.w > 1.5) {
-            d = smax(d, parent, in.bud_shape.y);
-        } else if (in.bud_shape.w > 0.5) {
-            d = smax(d, -parent, in.bud_shape.y);
-        } else {
-            d = smin(d, parent, in.bud_shape.y);
+        d = combined(d, parent, op, in.bud_shape.y);
+        if (op == 0u) {
             outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+        }
+        // The more shapes it names, each met the same way.
+        let more = code >> 2u;
+        if (more > 0u) {
+            for (var i = 0u; i < 4u; i = i + 1u) {
+                let b = shapes[more].boxes[i * 2u];
+                let r = shapes[more].boxes[i * 2u + 1u];
+                if (r.y > 0.5) {
+                    d = combined(d, rounded_box(in.local - b.xy, b.zw, r.x), op, in.bud_shape.y);
+                }
+            }
         }
     }
     let rim = in.shape.y;
@@ -560,6 +606,16 @@ impl Pipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -572,7 +628,9 @@ impl Pipeline {
         let transforms = Self::transform_buffer(device, transform_capacity);
         let gradient_capacity = 2;
         let gradients = Self::gradient_buffer(device, gradient_capacity);
-        let bind_group = Self::bind_group(device, &layout, &globals, &transforms, &gradients);
+        let shape_capacity = 2;
+        let shape_buffer = Self::shape_buffer(device, shape_capacity);
+        let bind_group = Self::bind_group(device, &layout, &globals, &transforms, &gradients, &shape_buffer);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rect"),
             bind_group_layouts: &[Some(&layout)],
@@ -636,6 +694,10 @@ impl Pipeline {
             gradients,
             gradient_capacity,
             last_gradients: Vec::new(),
+            shape_buffer,
+            shape_capacity,
+            last_shapes: Vec::new(),
+            shape_sets: Vec::new(),
             stop_sets: Vec::new(),
             bind_group,
             instances,
@@ -667,12 +729,22 @@ impl Pipeline {
         })
     }
 
+    fn shape_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rect shapes"),
+            size: (capacity * std::mem::size_of::<[[f32; 4]; 8]>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     fn bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         globals: &wgpu::Buffer,
         transforms: &wgpu::Buffer,
         gradients: &wgpu::Buffer,
+        shapes: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rect globals"),
@@ -681,6 +753,7 @@ impl Pipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: transforms.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gradients.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: shapes.as_entire_binding() },
             ],
         })
     }
@@ -717,6 +790,9 @@ impl Pipeline {
         // And each distinct set of stops, none first.
         self.stop_sets.clear();
         self.stop_sets.push(Rect::NO_STOPS);
+        // And each distinct set of more shapes, none first.
+        self.shape_sets.clear();
+        self.shape_sets.push(Rect::NO_SHAPES);
         self.gpu_rects.clear();
         for r in rects {
             let index = match self.matrices.iter().position(|m| *m == r.transform) {
@@ -737,7 +813,18 @@ impl Pipeline {
                     }
                 }
             };
-            self.gpu_rects.push(GpuRect::new(r, index as u32, stops as u32));
+            let shapes = if r.shapes[1][1] < 0.5 {
+                0
+            } else {
+                match self.shape_sets.iter().position(|s| *s == r.shapes) {
+                    Some(i) => i,
+                    None => {
+                        self.shape_sets.push(r.shapes);
+                        self.shape_sets.len() - 1
+                    }
+                }
+            };
+            self.gpu_rects.push(GpuRect::new(r, index as u32, stops as u32, shapes as u32));
         }
         let mut rebind = false;
         if self.matrices.len() > self.transform_capacity {
@@ -752,8 +839,19 @@ impl Pipeline {
             self.last_gradients.clear();
             rebind = true;
         }
+        if self.shape_sets.len() > self.shape_capacity {
+            self.shape_capacity = self.shape_sets.len().next_power_of_two();
+            self.shape_buffer = Self::shape_buffer(device, self.shape_capacity);
+            self.last_shapes.clear();
+            rebind = true;
+        }
         if rebind {
-            self.bind_group = Self::bind_group(device, &self.layout, &self.globals, &self.transforms, &self.gradients);
+            self.bind_group =
+                Self::bind_group(device, &self.layout, &self.globals, &self.transforms, &self.gradients, &self.shape_buffer);
+        }
+        if self.shape_sets != self.last_shapes {
+            queue.write_buffer(&self.shape_buffer, 0, bytemuck::cast_slice(&self.shape_sets));
+            self.last_shapes.clone_from(&self.shape_sets);
         }
         if self.stop_sets != self.last_gradients {
             queue.write_buffer(&self.gradients, 0, bytemuck::cast_slice(&self.stop_sets));

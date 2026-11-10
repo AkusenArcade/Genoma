@@ -20,7 +20,7 @@ struct Quad {
     m: [[f32; 4]; 4],
 }
 
-const SHADER: &str = r#"
+pub(crate) const SHADER: &str = r#"
 struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var image: texture_2d<f32>;

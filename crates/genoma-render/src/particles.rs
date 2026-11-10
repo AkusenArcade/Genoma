@@ -40,7 +40,7 @@ pub struct EmitterParams {
     pub transform: [[f32; 4]; 4],
 }
 
-const SHADER: &str = r#"
+pub(crate) const SHADER: &str = r#"
 struct Params {
     points: vec4<f32>,
     motion: vec4<f32>,

@@ -1268,10 +1268,10 @@ impl Scene {
     fn combined_shapes(&self) -> std::collections::HashMap<String, [f32; 5]> {
         let mut wanted: Vec<String> = Vec::new();
         self.walk(self.root, &mut |_, n| {
-            if let Some(id) = &n.combine_with
-                && !wanted.contains(id)
-            {
-                wanted.push(id.clone());
+            for id in n.combine_with.as_deref().unwrap_or("").split_whitespace() {
+                if !wanted.iter().any(|w| w == id) {
+                    wanted.push(id.to_owned());
+                }
             }
         });
         let mut shapes = std::collections::HashMap::new();
@@ -2328,6 +2328,7 @@ fn flat(origin: [f32; 2], size: [f32; 2], radius: f32, fill: [f32; 4], out: &Out
         arc: Rect::WHOLE,
         fill_to: [0.0; 4],
         stops: Rect::NO_STOPS,
+        shapes: Rect::NO_SHAPES,
         clip: out.clip,
         path: [0.0; 4],
         path_end: [0.0; 4],
@@ -2931,7 +2932,24 @@ fn collect_node(
             // A bud is drawn as one shape with its parent capsule, without
             // the parent's interior: the parent's centre relative to this
             // one, its half size and radius, and the union's softness.
-            let other: Option<[f32; 5]> = n.combine_with.as_ref().and_then(|id| out.others.get(id).copied());
+            // The shapes it names, in order: the first in the bud's place,
+            // up to four more beside it, met the same way.
+            let named: Vec<[f32; 5]> = n
+                .combine_with
+                .as_deref()
+                .map(|ids| ids.split_whitespace().filter_map(|id| out.others.get(id).copied()).collect())
+                .unwrap_or_default();
+            let other = named.first().copied();
+            let mut shapes = Rect::NO_SHAPES;
+            for (i, [px, py, pw, ph, pr]) in named.iter().skip(1).take(4).enumerate() {
+                shapes[i * 2] = [
+                    ((px + pw / 2.0) - (x + w / 2.0)) * scale,
+                    ((py + ph / 2.0) - (y + h / 2.0)) * scale,
+                    pw / 2.0 * scale,
+                    ph / 2.0 * scale,
+                ];
+                shapes[i * 2 + 1] = [pr * scale, 1.0, 0.0, 0.0];
+            }
             let (bud, bud_shape) = match (other, n.bud > 0.0, out.parent_shape) {
                 // Combined with a named shape: its box as a bud's parent's,
                 // and what to do with it. A sharp edge is half a pixel soft.
@@ -2979,6 +2997,7 @@ fn collect_node(
                     arc: Rect::WHOLE,
                     fill_to: [0.0; 4],
                     stops: Rect::NO_STOPS,
+                    shapes: Rect::NO_SHAPES,
                     clip: out.clip,
                     path: [0.0; 4],
                     path_end: [0.0; 4],
@@ -3008,6 +3027,7 @@ fn collect_node(
                     arc: Rect::WHOLE,
                     fill_to: [0.0; 4],
                     stops: Rect::NO_STOPS,
+                    shapes: Rect::NO_SHAPES,
                     clip: out.clip,
                     path: [0.0; 4],
                     path_end: [0.0; 4],
@@ -3036,6 +3056,7 @@ fn collect_node(
                     arc: [0.0, n.arc, n.dash[0] * scale, n.dash[1] * scale],
                     fill_to: if n.fill_bottom[3] > 0.0 { fade(n.fill_bottom) } else { [0.0; 4] },
                     stops: Rect::stops(&n.fill_stops.iter().map(|(at, c)| (*at, fade(*c))).collect::<Vec<_>>()),
+                    shapes,
                     clip: out.clip,
                     path: [0.0; 4],
                     path_end: [0.0; 4],
@@ -3070,6 +3091,7 @@ fn collect_node(
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
                         stops: Rect::NO_STOPS,
+                        shapes: Rect::NO_SHAPES,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],
@@ -3110,6 +3132,7 @@ fn collect_node(
                 arc: Rect::WHOLE,
                 fill_to: [0.0; 4],
                 stops: Rect::NO_STOPS,
+                shapes: Rect::NO_SHAPES,
                 clip: out.clip,
                 path: [a[0], a[1], b[0], b[1]],
                 path_end: [c[0], c[1], width, g],
@@ -3140,6 +3163,7 @@ fn collect_node(
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
                         stops: Rect::NO_STOPS,
+                        shapes: Rect::NO_SHAPES,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],
@@ -3373,6 +3397,7 @@ fn collect_node(
                         arc: Rect::WHOLE,
                         fill_to: [0.0; 4],
                         stops: Rect::NO_STOPS,
+                        shapes: Rect::NO_SHAPES,
                         clip: out.clip,
                         path: [0.0; 4],
                         path_end: [0.0; 4],
@@ -3721,6 +3746,19 @@ mod tests {
         scene.set(b, Prop::Combine, Value::Text("union".into()), None).unwrap();
         let list = scene.draw_list(2.0);
         assert_eq!(list.rects.iter().find(|r| r.bud_shape[1] > 0.0).unwrap().bud_shape[3], 3.0);
+        // Several ids: the first in the bud's place, the next beside it; one
+        // that names nothing drawn is passed over.
+        let c = disc(&mut scene, 60.0);
+        scene.set_id(c, Some("c".into()));
+        scene.set(b, Prop::CombineWith, Value::Text("a  missing c".into()), None).unwrap();
+        scene.layout(Some(100.0), Some(50.0));
+        scene.draw_list(2.0);
+        let list = scene.draw_list(2.0);
+        let joined = list.rects.iter().find(|r| r.bud_shape[1] > 0.0).expect("combined");
+        assert_eq!(joined.bud[0], -60.0, "a first");
+        assert_eq!(joined.shapes[0], [60.0, 0.0, 40.0, 40.0], "c, 30 units right");
+        assert_eq!(joined.shapes[1][1], 1.0, "c is there");
+        assert_eq!(joined.shapes[3][1], 0.0, "nothing after it");
     }
 
     #[test]

@@ -115,6 +115,26 @@ return g.surface {
                     rim_bottom = "#00000000",
                 },
             }),
+            cell("three, soft", g.box {
+                width = 120,
+                height = 80,
+                g.capsule { id = "left", overlay = true, attach = "corner", offset_x = 8, offset_y = 22, width = 36, height = 36, fill = "#00000000", rim_top = "#00000000", rim_bottom = "#00000000" },
+                g.capsule { id = "right", overlay = true, attach = "corner", offset_x = 76, offset_y = 22, width = 36, height = 36, fill = "#00000000", rim_top = "#00000000", rim_bottom = "#00000000" },
+                -- One shape with both: three drops, two necks.
+                g.capsule {
+                    overlay = true,
+                    attach = "corner",
+                    combine_with = "left right",
+                    combine_soft = 20,
+                    offset_x = 47,
+                    offset_y = function() return 10 + apart.value * 30 end,
+                    width = 26,
+                    height = 26,
+                    fill = "#a3be8c",
+                    rim_top = "#00000000",
+                    rim_bottom = "#00000000",
+                },
+            }),
             cell("subtract", g.box {
                 width = 80,
                 height = 80,
