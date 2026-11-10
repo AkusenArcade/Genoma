@@ -979,6 +979,11 @@ impl Pipeline {
         }
     }
 
+    /// The distance fields' atlas, in bytes.
+    pub(crate) fn atlas_bytes(&self) -> u64 {
+        u64::from(self.atlas.size) * u64::from(self.atlas.size)
+    }
+
     /// The rects in `only` (indices into the list uploaded): one layer.
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<u32>) {
         if self.count == 0 || only.is_empty() {

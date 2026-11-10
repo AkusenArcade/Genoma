@@ -6,6 +6,18 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- A profiling overlay, `genoma ipc genoma profile on|off` or
+  `GENOMA_OVERLAY=1`: over every surface a line with its size, frames a
+  second, the last frame's time on the main thread and on the GPU, the
+  wait for a buffer when it counts, and how much was drawn again; the
+  textures kept and their memory; and an outline round what the last
+  frame drew again. A surface at rest draws nothing, and its line says
+  what its last frame cost.
+
 ## 0.1.4 — 2026-11-10
 
 ### Added

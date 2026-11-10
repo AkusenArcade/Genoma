@@ -10,6 +10,7 @@
 //! draws it and presents. Nothing flows back but the adapter's description.
 
 use std::{
+    collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
     sync::{Arc, Mutex, mpsc},
@@ -708,10 +709,39 @@ enum Message {
     Destroy { id: SurfaceId, done: Option<std::sync::mpsc::Sender<()>> },
 }
 
+/// One surface's last frames as the render thread measured them, for the
+/// profiling overlay.
+#[derive(Clone, Debug, Default)]
+pub struct SurfaceStats {
+    pub frames: u64,
+    /// Frames drawn in the last second.
+    pub fps: f32,
+    /// The last frame's drawing, and its wait for a buffer, milliseconds.
+    pub render_ms: f32,
+    pub wait_ms: f32,
+    /// What the last frame drew again, physical pixels (x, y, width,
+    /// height); the whole surface for a whole frame, none for nothing.
+    pub damage: Option<[u32; 4]>,
+    /// Drawn into a canvas of its own, only what changes.
+    pub canvas: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub surfaces: HashMap<SurfaceId, SurfaceStats>,
+    /// Textures kept (pictures, blurred subtrees) and the bytes of those,
+    /// the distance fields' atlas and the canvases together.
+    pub textures: usize,
+    pub texture_bytes: u64,
+}
+
+pub(crate) type SharedStats = Arc<Mutex<Stats>>;
+
 /// The main thread's handle on the render thread.
 pub struct Renderer {
     tx: mpsc::Sender<Message>,
     info: wgpu::AdapterInfo,
+    stats: SharedStats,
 }
 
 impl Renderer {
@@ -720,10 +750,12 @@ impl Renderer {
     pub fn spawn(pci_bus_id: Option<String>, fonts: Fonts) -> Result<Renderer, Error> {
         let (tx, rx) = mpsc::channel::<Message>();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let stats: SharedStats = Arc::default();
+        let shared = stats.clone();
         thread::Builder::new()
             .name("genoma-render".into())
             .spawn(move || {
-                let mut gpu = match gpu::Gpu::new(pci_bus_id.as_deref(), fonts) {
+                let mut gpu = match gpu::Gpu::new(pci_bus_id.as_deref(), fonts, shared) {
                     Ok(gpu) => {
                         let _ = ready_tx.send(Ok(gpu.adapter_info()));
                         gpu
@@ -755,7 +787,12 @@ impl Renderer {
             })
             .map_err(|_| Error::Thread)?;
         let info = ready_rx.recv().map_err(|_| Error::Thread)??;
-        Ok(Renderer { tx, info })
+        Ok(Renderer { tx, info, stats })
+    }
+
+    /// What the render thread last measured, for the profiling overlay.
+    pub fn stats(&self) -> Stats {
+        self.stats.lock().unwrap().clone()
     }
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {

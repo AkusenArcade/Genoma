@@ -91,6 +91,8 @@ pub(crate) struct Pipeline {
     sampler: wgpu::Sampler,
     /// Each key's texture, and the upload that last drew it.
     textures: HashMap<u64, (wgpu::BindGroup, u64)>,
+    /// Each key's texture's size in bytes, for the overlay's count.
+    sizes: HashMap<u64, u64>,
     uploads: u64,
     /// What each surface's last frame drew. The compositor keeps showing
     /// that frame, and the surface may draw it again at any time with the
@@ -212,6 +214,7 @@ impl Pipeline {
             texture_layout,
             sampler,
             textures: HashMap::new(),
+            sizes: HashMap::new(),
             uploads: 0,
             shown: HashMap::new(),
             quads,
@@ -238,6 +241,11 @@ impl Pipeline {
     }
 
     /// A surface gone: what it showed may go too.
+    /// The textures it keeps: how many, and their bytes.
+    pub(crate) fn memory(&self) -> (usize, u64) {
+        (self.textures.len(), self.sizes.values().sum())
+    }
+
     pub(crate) fn forget(&mut self, id: SurfaceId) {
         self.shown.remove(&id);
     }
@@ -249,7 +257,8 @@ impl Pipeline {
 
     /// A texture drawn on the GPU (a blurred subtree), kept by `key` as an
     /// uploaded one is, and let go the same way.
-    pub(crate) fn adopt(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
+    pub(crate) fn adopt(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView, bytes: u64) {
+        self.sizes.insert(key, bytes);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image"),
             layout: &self.texture_layout,
@@ -278,6 +287,8 @@ impl Pipeline {
             let now = self.uploads;
             let shown: std::collections::HashSet<u64> = self.shown.values().flatten().copied().collect();
             self.textures.retain(|key, (_, used)| now - *used < 1024 || shown.contains(key));
+            let textures = &self.textures;
+            self.sizes.retain(|key, _| textures.contains_key(key));
             let mut resident = RESIDENT.lock().unwrap();
             resident.retain(|key| self.textures.contains_key(key));
         }
@@ -330,6 +341,7 @@ impl Pipeline {
                     ],
                 });
                 self.textures.insert(image.key, (group, 0));
+                self.sizes.insert(image.key, u64::from(image.width) * u64::from(image.height) * 4);
                 RESIDENT.lock().unwrap().insert(image.key);
             }
             if let Some((_, used)) = self.textures.get_mut(&image.key) {

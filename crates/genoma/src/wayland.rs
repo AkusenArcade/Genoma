@@ -193,6 +193,8 @@ struct Surface {
     frames: u64,
     /// Frames and build time since the last minute's account (debug log).
     tally: (u64, Duration, Instant),
+    /// The last frame's time on the main thread, for the overlay.
+    built_ms: f32,
     /// The blur and input regions last sent, as rectangles, so each is set
     /// only when it changes; the inputs `None` until the first is sent,
     /// because Wayland's default is the whole surface.
@@ -288,6 +290,7 @@ impl Surface {
             frame_pending: false,
             frames: 0,
             tally: (0, Duration::ZERO, Instant::now()),
+            built_ms: 0.0,
             blurred: Vec::new(),
             inputs: None,
             holes: Vec::new(),
@@ -334,6 +337,10 @@ pub struct App {
 
     renderer: Option<Renderer>,
     fonts: Option<Fonts>,
+    /// The profiling overlay (`genoma ipc genoma profile on`, or
+    /// GENOMA_OVERLAY=1): each surface's frame times, what it drew again,
+    /// and the textures kept, over every surface.
+    overlay: bool,
     /// The interface's surfaces, as it last described them.
     specs: Vec<SurfaceSpec>,
     surfaces: Vec<Surface>,
@@ -457,6 +464,7 @@ impl App {
             feedback_done: false,
             renderer: None,
             fonts: None,
+            overlay: std::env::var_os("GENOMA_OVERLAY").is_some(),
             specs: Vec::new(),
             surfaces: Vec::new(),
             next_id: 1,
@@ -1829,7 +1837,14 @@ impl App {
                 }
                 Ok(String::new())
             }
-            _ => Err("genoma: tree, highlight <surface> <node>, highlight none".into()),
+            [what, on] if what == "profile" && (on == "on" || on == "off") => {
+                self.overlay = on == "on";
+                for s in &self.surfaces {
+                    s.scene.borrow_mut().touch();
+                }
+                Ok(on.clone())
+            }
+            _ => Err("genoma: tree, highlight <surface> <node>, highlight none, profile on|off".into()),
         }
     }
 
@@ -1985,7 +2000,42 @@ impl App {
         }
         let motion = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
         s.scene.borrow_mut().layout(if window { Some(s.logical.0 as f32) } else { spans.then_some(s.logical.0 as f32) }, window.then_some(s.logical.1 as f32));
-        let list = s.scene.borrow_mut().draw_list(s.scale as f32);
+        let mut list = s.scene.borrow_mut().draw_list(s.scale as f32);
+        if self.overlay
+            && let Some(fonts) = &self.fonts
+        {
+            let stats = renderer.stats();
+            let mine = stats.surfaces.get(&s.id).cloned().unwrap_or_default();
+            let name = self.specs.get(s.spec).map_or("?", |spec| spec.namespace.as_str());
+            let kind = match &s.role {
+                Role::Popup(_) => "popup",
+                Role::Window(_) => "window",
+                Role::Lock(_) => "lock",
+                Role::Layer(_) => "layer",
+            };
+            let damage = match mine.damage {
+                None => "nothing".to_owned(),
+                Some([_, _, w, h]) if w == width && h == height => "all".to_owned(),
+                Some([_, _, w, h]) => format!("{:.0}%", 100.0 * (w * h) as f32 / (width * height).max(1) as f32),
+            };
+            let header = format!(
+                "genoma: {} textures, {:.1} MB",
+                stats.textures,
+                stats.texture_bytes as f64 / 1048576.0
+            );
+            // Short enough for a narrow surface: the wait only when it
+            // counts.
+            let wait = if mine.wait_ms >= 1.0 { format!(" wait {:.0}", mine.wait_ms) } else { String::new() };
+            let line = format!(
+                "{} {kind} {name} {width}×{height} {:.0}fps main {:.1} gpu {:.1}{wait} ms {damage}{}",
+                s.id,
+                mine.fps,
+                s.built_ms,
+                mine.render_ms,
+                if mine.canvas { " canvas" } else { "" }
+            );
+            draw_overlay(&mut list, fonts, s.scale as f32, i + 1, &header, &line, mine.damage);
+        }
         let animating = motion.moving;
         // An image asked for by this very frame is decoding now, and the
         // beat that looks for it again has to be set here: `advance` ran
@@ -2079,6 +2129,7 @@ impl App {
         s.frame_pending = true;
         renderer.draw(s.id, width, height, list);
         let built = started.elapsed();
+        s.built_ms = built.as_secs_f32() * 1000.0;
         log::trace!("build {} us", built.as_micros());
         // A frame the eye can catch late: said, with what it held, so a
         // stall reported afterwards can be read back.
@@ -3040,3 +3091,56 @@ mod tests {
         assert!(b - a <= 4000);
     }
 }
+
+/// The profiling overlay over one surface's list: a line for it at `row`
+/// (each surface its own, so those that cover an output make a table), the
+/// header above them all, and an outline round what its last frame drew
+/// again, physical pixels.
+fn draw_overlay(list: &mut genoma_render::DrawList, fonts: &Fonts, scale: f32, row: usize, header: &str, line: &str, damage: Option<[u32; 4]>) {
+    use genoma_render::cosmic_text as ct;
+    use genoma_render::Rect;
+    let rect = |origin: [f32; 2], size: [f32; 2], fill: [f32; 4], rim: f32, edge: [f32; 4]| Rect {
+        origin,
+        size,
+        radius: 3.0 * scale,
+        rim,
+        level: 1.0,
+        cut: 0.0,
+        fill,
+        rim_top: edge,
+        rim_bottom: edge,
+        wave: [0.0; 4],
+        arc: Rect::WHOLE,
+        fill_to: [0.0; 4],
+        clip: Rect::NO_CLIP,
+        path: [0.0; 4],
+        path_end: [0.0; 4],
+        fade: [0.0; 4],
+        bud: [0.0; 4],
+        bud_shape: [0.0; 4],
+        stops: Rect::NO_STOPS,
+        shapes: Rect::NO_SHAPES,
+        transform: Rect::IDENTITY,
+    };
+    if let Some([x, y, w, h]) = damage {
+        list.push_rect(rect([x as f32, y as f32], [w as f32, h as f32], [0.0; 4], 2.0 * scale, [1.0, 0.0, 0.8, 0.9]));
+    }
+    let mut fonts = fonts.lock().unwrap();
+    // The header once, by the first surface.
+    let lines: &[(usize, &str)] = if row == 1 { &[(0, header), (row, line)] } else { &[(row, line)] };
+    for &(at, text) in lines {
+        let mut buffer = ct::Buffer::new(&mut fonts, ct::Metrics::new(12.0, 16.0));
+        buffer.set_size(None, None);
+        buffer.set_text(text, &ct::Attrs::new().family(ct::Family::Monospace), ct::Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let width = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
+        let origin = [8.0 * scale, (8.0 + at as f32 * 18.0) * scale];
+        let size = [(width + 8.0) * scale, 17.0 * scale];
+        list.push_rect(rect([origin[0] - 4.0 * scale, origin[1] - 1.0 * scale], size, [0.05, 0.05, 0.08, 0.82], 0.0, [0.0; 4]));
+        list.push_text(
+            genoma_render::Text { buffer: std::sync::Arc::new(buffer), origin, scale, color: [0.9, 0.95, 1.0, 1.0], clip: Rect::NO_CLIP },
+            size,
+        );
+    }
+}
+

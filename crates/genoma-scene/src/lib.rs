@@ -1986,6 +1986,12 @@ impl Scene {
     }
 
     /// Whether anything changed since the last call.
+    /// To be drawn again, though nothing in it changed: something drawn
+    /// over it from outside (the profiling overlay) did.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
     }

@@ -22,6 +22,12 @@ pub(crate) struct Gpu {
     /// frames, render time and waiting, for the debug log.
     waited: std::time::Duration,
     tallies: HashMap<SurfaceId, (u64, std::time::Duration, std::time::Duration, std::time::Instant)>,
+    /// What the overlay reads (`Renderer::stats`), and each surface's
+    /// recent frames, for its rate.
+    stats: crate::SharedStats,
+    recent: HashMap<SurfaceId, std::collections::VecDeque<std::time::Instant>>,
+    /// The last frame's damage, as `draw_inner` worked it out.
+    damaged: crate::Damage,
 }
 
 /// Glyphon's pieces, made once the surface format is known.
@@ -56,7 +62,7 @@ impl Gpu {
     /// compositor's main device when the caller knows it. Without a match it
     /// takes Vulkan's first hardware adapter and says so: drawing on another
     /// GPU than the compositor's copies every frame between the two.
-    pub(crate) fn new(pci_bus_id: Option<&str>, fonts: Fonts) -> Result<Gpu, Error> {
+    pub(crate) fn new(pci_bus_id: Option<&str>, fonts: Fonts, stats: crate::SharedStats) -> Result<Gpu, Error> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle_from_env()
@@ -120,6 +126,9 @@ impl Gpu {
             targets: HashMap::new(),
             waited: std::time::Duration::ZERO,
             tallies: HashMap::new(),
+            stats,
+            recent: HashMap::new(),
+            damaged: crate::Damage::Whole,
         })
     }
 
@@ -173,6 +182,8 @@ impl Gpu {
 
     pub(crate) fn destroy_target(&mut self, id: SurfaceId) {
         self.targets.remove(&id);
+        self.recent.remove(&id);
+        self.stats.lock().unwrap().surfaces.remove(&id);
         if let Some(images) = &mut self.images {
             images.forget(id);
         }
@@ -197,6 +208,7 @@ impl Gpu {
             );
             *tally = (0, Default::default(), Default::default(), std::time::Instant::now());
         }
+        self.record(id, took, width, height);
         if took > std::time::Duration::from_millis(20) {
             log::warn!(
                 "surface {id}: rendered in {} ms ({} rects, {} images, {} texts)",
@@ -206,6 +218,35 @@ impl Gpu {
                 counts.2
             );
         }
+    }
+
+    /// The frame just drawn, into what the overlay reads.
+    fn record(&mut self, id: SurfaceId, took: std::time::Duration, width: u32, height: u32) {
+        let now = std::time::Instant::now();
+        let recent = self.recent.entry(id).or_default();
+        recent.push_back(now);
+        while recent.front().is_some_and(|t| now.duration_since(*t) > std::time::Duration::from_secs(1)) {
+            recent.pop_front();
+        }
+        let fps = recent.len() as f32;
+        let canvas = self.targets.get(&id).is_some_and(|t| t.canvas.is_some());
+        let (textures, mut bytes) = self.images.as_ref().map_or((0, 0), |i| i.memory());
+        bytes += self.rects.as_ref().map_or(0, |r| r.atlas_bytes());
+        bytes += self.targets.values().filter_map(|t| t.canvas.as_ref().and(t.size)).map(|(w, h)| u64::from(w) * u64::from(h) * 4).sum::<u64>();
+        let mut stats = self.stats.lock().unwrap();
+        let s = stats.surfaces.entry(id).or_default();
+        s.frames += 1;
+        s.fps = fps;
+        s.render_ms = (took - self.waited.min(took)).as_secs_f32() * 1000.0;
+        s.wait_ms = self.waited.as_secs_f32() * 1000.0;
+        s.damage = match self.damaged {
+            crate::Damage::None => None,
+            crate::Damage::Within(r) => Some(r),
+            crate::Damage::Whole => Some([0, 0, width, height]),
+        };
+        s.canvas = canvas;
+        stats.textures = textures;
+        stats.texture_bytes = bytes;
     }
 
     fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
@@ -262,6 +303,7 @@ impl Gpu {
             Some(before) => list.damage(before, [width, height]),
             None => Damage::Whole,
         };
+        self.damaged = damage;
         let use_canvas = target.copyable && (target.canvas.is_some() || target.streak >= CANVAS_STREAK);
         if !use_canvas {
             target.canvas = None;
@@ -383,7 +425,7 @@ impl Gpu {
                 sheet
             };
             if let Some(images) = &mut self.images {
-                images.adopt(&self.device, group.key, &done.view);
+                images.adopt(&self.device, group.key, &done.view, u64::from(size[0]) * u64::from(size[1]) * 4);
             }
             if let Some(shaders) = &mut self.shaders {
                 shaders.adopt_backdrop(&self.device, group.key, &done.view);
