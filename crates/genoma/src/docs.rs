@@ -21,6 +21,17 @@ pub fn types(dir: Option<&Path>) -> std::io::Result<()> {
         print!("{}", definitions());
         return Ok(());
     };
+    write_types(dir)?;
+    println!(
+        "Written to {}. In the interface's .luaurc:\n  {{ \"aliases\": {{ \"genoma\": \"{}\" }} }}",
+        dir.display(),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// The types, the services' stubs and the kit's sources, written to `dir`.
+pub fn write_types(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir.join("kit"))?;
     // A module returns one value to be required for its types.
     std::fs::write(dir.join("types.luau"), format!("{}\nreturn {{}}\n", definitions()))?;
@@ -36,11 +47,6 @@ pub fn types(dir: Option<&Path>) -> std::io::Result<()> {
     for (name, source) in kit_modules() {
         std::fs::write(dir.join("kit").join(format!("{name}.luau")), source)?;
     }
-    println!(
-        "Written to {}. In the interface's .luaurc:\n  {{ \"aliases\": {{ \"genoma\": \"{}\" }} }}",
-        dir.display(),
-        dir.display()
-    );
     Ok(())
 }
 

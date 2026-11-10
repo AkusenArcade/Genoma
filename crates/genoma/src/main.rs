@@ -15,6 +15,7 @@
 
 mod access;
 mod check;
+mod new;
 mod docs;
 mod ipc;
 mod wayland;
@@ -58,6 +59,14 @@ fn main() {
             }
         }
         Some("reference") => print!("{}", docs::reference()),
+        Some("new") => match std::env::args().nth(2) {
+            Some(dir) => {
+                if let Err(e) = new::make(std::path::Path::new(&dir)) {
+                    fail(&format!("genoma new: {e}"));
+                }
+            }
+            None => fail("genoma new <directory>: where the new shell goes"),
+        },
         Some("check") => std::process::exit(check::run(std::env::args().nth(2).map(PathBuf::from).as_deref())),
         Some("spectrum") => spectrum_command(std::env::args().skip(2).collect()),
         Some("probe") => probe(),

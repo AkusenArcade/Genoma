@@ -250,6 +250,7 @@ Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 | `genoma probe` | print every service's signals as they change, without UI |
 | `genoma ipc <target> <function> [args…]` | call into a running interface (`g.ipc`) |
 | `genoma ipc genoma tree` | every surface and node of a running interface, as JSON; `genoma ipc genoma highlight <surface> <node>` outlines one, `… highlight none` |
+| `genoma new <dir>` | a shell to start from: a bar with its name and a clock that opens a popup, written with the kit; its types in `types/` with a `.luaurc` for the editor and luau-analyze; a README of these commands |
 | `genoma check [dir]` | every `.wgsl` checked as a `g.shader` compiles it and every `.luau` by the Luau compiler, each mistake with its file and line; exit status 1 when one is found. A shader that does not compile is also drawn as its mistake over the node while the interface runs |
 | `genoma ipc genoma profile on` | the profiling overlay over every surface: a line each (size, frames a second, time on the main thread and on the GPU, the wait for a buffer over 1 ms, how much the last frame drew again), the textures kept and their memory, and an outline round what was drawn again; `… profile off`. `GENOMA_OVERLAY=1` starts with it on, `GENOMA_PROFILE=1` logs where the time in Luau goes |
 | `genoma pam <service> [dir]` | one PAM authentication, from the terminal |

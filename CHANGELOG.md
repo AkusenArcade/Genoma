@@ -6,6 +6,16 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `genoma new <dir>`: a shell to start from, a bar with a clock that opens
+  a popup, written with the kit, with its types in `types/` and a
+  `.luaurc` that points `@genoma` at them (luau-analyze passes it in
+  strict mode), and a README of the commands. It writes nothing into a
+  directory that holds something.
+
 ## 0.1.6 — 2026-11-10
 
 ### Changed
