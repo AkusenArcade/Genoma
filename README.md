@@ -99,7 +99,8 @@ return g.surface {
 ### Concepts
 
 - **Nodes:** `g.box` lays out, `g.capsule` is a box that draws (fill, rim,
-  shadow, linear/radial/conic gradients, radius, blur), and there are also `g.text`, `g.icon`,
+  shadow or glow outside it, inner shadow, an outline apart from the rim,
+  linear/radial/conic gradients, radius, blur), and there are also `g.text`, `g.icon`,
   `g.image`, `g.shader` and particle emitters. `g.each` is a keyed list.
   An image takes `saturation`, `contrast`, `brightness` and `tint`, applied
   as it is drawn and animatable (a cover greyed while paused, a wallpaper

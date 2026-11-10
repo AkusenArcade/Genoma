@@ -77,9 +77,19 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `ellipsize` | "end" \| "middle" \| "start" |  | Where a text cut by its `max_width` loses its letters: at the end, the default, or in the middle, so a file name keeps its beginning and its extension. |
 | `text_align` | "start" \| "center" \| "end" |  | Where each line of a text sits within its `max_width`: a paragraph centred under a title. |
 | `color` | colour | yes | Text colour. |
-| `shadow` | colour | yes | A text's shadow: its glyphs blurred in this colour, under it, so a name reads over whatever moves behind it. |
-| `shadow_blur` | number |  | The shadow's radius. |
-| `shadow_y` | number |  | How far below the text the shadow lies. |
+| `shadow` | colour | yes | A shadow in this colour. A text's: its glyphs blurred under it, so a name reads over whatever moves behind it. A capsule's: as CSS's box-shadow, its shape moved, grown and blurred, outside it only (a glass fill does not darken over it); a coloured one with no offset is a glow. |
+| `shadow_blur` | number | yes | The shadow's radius. |
+| `shadow_y` | number | yes | How far below the text or the capsule the shadow lies. |
+| `shadow_x` | number | yes | A capsule's shadow moved right by this much. |
+| `shadow_spread` | number | yes | A capsule's shadow grown by this much before it is blurred (less than 0: shrunk). |
+| `inner_shadow` | colour | yes | A capsule's inner shadow in this colour: over its fill, darkest at its edge and fading inward, as CSS's inset box-shadow; with no offset, an inner glow. |
+| `inner_blur` | number | yes | How far the inner shadow fades in. |
+| `inner_x` | number | yes | The inner shadow's offset: positive values leave it along the left edge. |
+| `inner_y` | number | yes | The inner shadow's offset: positive values leave it along the top edge. |
+| `inner_spread` | number | yes | How far in the inner shadow reaches before it fades. |
+| `outline` | colour | yes | A line round a capsule in this colour, apart from its rim, `outline_offset` outside its edge: a focus ring, a selection. |
+| `outline_width` | number | yes | The outline's width; 1 by default. |
+| `outline_offset` | number | yes | The gap between the capsule's edge and its outline; 0 by default, less than 0 inside it. |
 | `color_bottom` | colour | yes | With it, the text is lit from `color` at the top of its box to this at the bottom: a gradient the glyphs reveal, the same for a short figure and a long one. |
 | `present` | boolean |  | Whether the node exists; false takes it out of the layout. |
 | `pulse` | number |  | Beats a minute: the node swells and settles, then waits. 0 is still. |

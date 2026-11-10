@@ -23,7 +23,10 @@ pub struct Rect {
     /// is under it (a tissue's band where its cells are, so glass never
     /// sits on glass); 2 a thread along `path`; 3 a halo, the rectangle
     /// 1.25 × `rim` in from the quad's edge, grown by a quarter of `rim` and
-    /// blurred over `rim` on both sides of that edge.
+    /// blurred over `rim` on both sides of that edge; 4 an inner shadow,
+    /// the quad the shape, `rim` the blur and `wave` the offset (x, y) and
+    /// spread; 5 a shadow outside the shape and never under it, the quad
+    /// the shadow grown by the blur and a pixel, `wave` as for 4.
     pub cut: f32,
     pub fill: [f32; 4],
     pub rim_top: [f32; 4],
@@ -434,6 +437,29 @@ fn body(in: Varyings) -> vec4<f32> {
     // The quad is the shape grown by spread and blur. Whole up to a quarter
     // of the reach and gone at it was twice as dark round every tissue
     // (Akusen, 2026-11-03).
+    // A shadow outside the shape (5), as CSS's box-shadow: the shape moved
+    // by the offset and grown by the spread, blurred, and taken away where
+    // the shape itself is, so a glass fill does not darken over it.
+    if (in.shape.w > 4.5) {
+        let blur = max(in.shape.y, 0.5);
+        let spread = in.wave.z;
+        let shadow_half = max(in.half - vec2<f32>(blur + 1.0), vec2<f32>(0.0));
+        let box_half = max(shadow_half - vec2<f32>(spread), vec2<f32>(0.0));
+        let ds = rounded_box(in.local, shadow_half, max(in.shape.x + spread, 0.0));
+        let db = rounded_box(in.local + in.wave.xy, box_half, in.shape.x);
+        let cover = (1.0 - smoothstep(-blur, blur, ds)) * clamp(db / aa + 0.5, 0.0, 1.0) * in.fill.a;
+        return vec4<f32>(in.fill.rgb * cover, cover);
+    }
+    // An inner shadow (4): inside the shape, where a copy of it moved by
+    // the offset and drawn in by the spread does not reach, blurred.
+    if (in.shape.w > 3.5) {
+        let blur = max(in.shape.y, 0.5);
+        let spread = in.wave.z;
+        let inside = clamp(0.5 - rounded_box(in.local, in.half, in.shape.x) / aa, 0.0, 1.0);
+        let hole = rounded_box(in.local - in.wave.xy, max(in.half - vec2<f32>(spread), vec2<f32>(0.0)), max(in.shape.x - spread, 0.0));
+        let cover = smoothstep(-blur, blur, hole) * inside * in.fill.a;
+        return vec4<f32>(in.fill.rgb * cover, cover);
+    }
     if (in.shape.w > 2.5) {
         let blur = max(in.shape.y, 1.0);
         let spread = blur * 0.25;

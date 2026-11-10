@@ -129,6 +129,16 @@ pub struct Node {
     shadow: [f32; 4],
     shadow_blur: f32,
     shadow_y: f32,
+    /// A capsule's shadow: x offset and spread (logical).
+    shadow_x: f32,
+    shadow_spread: f32,
+    /// A capsule's inner shadow: colour, then blur, x, y, spread.
+    inner_shadow: [f32; 4],
+    inner: [f32; 4],
+    /// A capsule's outline (`outline`, not the path's): colour, then width
+    /// and offset.
+    ring: [f32; 4],
+    ring_size: [f32; 2],
     text: String,
     font_size: f32,
     font: Option<String>,
@@ -311,6 +321,12 @@ impl Node {
             shadow: [0.0; 4],
             shadow_blur: 0.0,
             shadow_y: 0.0,
+            shadow_x: 0.0,
+            shadow_spread: 0.0,
+            inner_shadow: [0.0; 4],
+            inner: [0.0; 4],
+            ring: [0.0; 4],
+            ring_size: [1.0, 0.0],
             text: String::new(),
             font_size: 14.0,
             font: None,
@@ -1498,6 +1514,18 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::Color => Value::Color(n.color),
             Prop::ColorBottom => Value::Color(n.color_bottom),
             Prop::Shadow => Value::Color(n.shadow),
+            Prop::ShadowBlur => Value::Number(n.shadow_blur),
+            Prop::ShadowY => Value::Number(n.shadow_y),
+            Prop::ShadowX => Value::Number(n.shadow_x),
+            Prop::ShadowSpread => Value::Number(n.shadow_spread),
+            Prop::InnerShadow => Value::Color(n.inner_shadow),
+            Prop::InnerBlur => Value::Number(n.inner[0]),
+            Prop::InnerX => Value::Number(n.inner[1]),
+            Prop::InnerY => Value::Number(n.inner[2]),
+            Prop::InnerSpread => Value::Number(n.inner[3]),
+            Prop::Outline => Value::Color(n.ring),
+            Prop::OutlineWidth => Value::Number(n.ring_size[0]),
+            Prop::OutlineOffset => Value::Number(n.ring_size[1]),
             _ => return None,
         })
     }
@@ -1656,6 +1684,16 @@ impl Scene {
             Prop::Shadow => n.shadow = take!(colour),
             Prop::ShadowBlur => n.shadow_blur = take!(number),
             Prop::ShadowY => n.shadow_y = take!(number),
+            Prop::ShadowX => n.shadow_x = take!(number),
+            Prop::ShadowSpread => n.shadow_spread = take!(number),
+            Prop::InnerShadow => n.inner_shadow = take!(colour),
+            Prop::InnerBlur => n.inner[0] = take!(number).max(0.0),
+            Prop::InnerX => n.inner[1] = take!(number),
+            Prop::InnerY => n.inner[2] = take!(number),
+            Prop::InnerSpread => n.inner[3] = take!(number),
+            Prop::Outline => n.ring = take!(colour),
+            Prop::OutlineWidth => n.ring_size[0] = take!(number).max(0.0),
+            Prop::OutlineOffset => n.ring_size[1] = take!(number),
             Prop::Text => {
                 let t = take!(text);
                 // A field follows its binding when it says something other
@@ -3293,6 +3331,36 @@ fn collect_node(
                     transform: out.transform,
                 });
             }
+            // A shadow or a glow outside the shape, under it.
+            if !nothing && n.halo <= 0.0 && n.shadow[3] > 0.0 {
+                let blur = n.shadow_blur.max(0.0) * scale;
+                let spread = n.shadow_spread * scale;
+                let off = [n.shadow_x * scale, n.shadow_y * scale];
+                let grow = spread + blur + 1.0;
+                out.list.push_rect(Rect {
+                    origin: [x * scale + off[0] - grow, y * scale + off[1] - grow],
+                    size: [size[0] + grow * 2.0, size[1] + grow * 2.0],
+                    radius,
+                    rim: blur,
+                    level: 1.0,
+                    cut: 5.0,
+                    fill: fade(n.shadow),
+                    rim_top: [0.0; 4],
+                    rim_bottom: [0.0; 4],
+                    wave: [off[0], off[1], spread, 0.0],
+                    arc: Rect::WHOLE,
+                    fill_to: [0.0; 4],
+                    stops: Rect::NO_STOPS,
+                    shapes: Rect::NO_SHAPES,
+                    clip: out.clip,
+                    path: [0.0; 4],
+                    path_end: [0.0; 4],
+                    bud: [0.0; 4],
+                    bud_shape: [0.0; 4],
+                    fade: out.fade_of(),
+                    transform: out.transform,
+                });
+            }
             // A halo: the shape's own outline, blurred outward in its fill,
             // and nothing else of it.
             if !nothing && n.halo > 0.0 {
@@ -3351,6 +3419,61 @@ fn collect_node(
                     fade: with_fill_shape(out.fade_of(), n),
                     transform: out.transform,
                 });
+                // An inner shadow over the fill, under what the capsule holds.
+                if n.inner_shadow[3] > 0.0 {
+                    out.list.push_rect(Rect {
+                        origin: [x * scale, y * scale],
+                        size,
+                        radius,
+                        rim: n.inner[0] * scale,
+                        level: 1.0,
+                        cut: 4.0,
+                        fill: fade(n.inner_shadow),
+                        rim_top: [0.0; 4],
+                        rim_bottom: [0.0; 4],
+                        wave: [n.inner[1] * scale, n.inner[2] * scale, n.inner[3] * scale, 0.0],
+                        arc: Rect::WHOLE,
+                        fill_to: [0.0; 4],
+                        stops: Rect::NO_STOPS,
+                        shapes: Rect::NO_SHAPES,
+                        clip: out.clip,
+                        path: [0.0; 4],
+                        path_end: [0.0; 4],
+                        bud: [0.0; 4],
+                        bud_shape: [0.0; 4],
+                        fade: out.fade_of(),
+                        transform: out.transform,
+                    });
+                }
+                // An outline apart from the rim: a ring its width wide, its
+                // offset outside the edge.
+                if n.ring[3] > 0.0 && n.ring_size[0] > 0.0 {
+                    let width = n.ring_size[0] * scale;
+                    let grow = n.ring_size[1] * scale + width;
+                    out.list.push_rect(Rect {
+                        origin: [x * scale - grow, y * scale - grow],
+                        size: [size[0] + grow * 2.0, size[1] + grow * 2.0],
+                        radius: (radius + grow).max(0.0),
+                        rim: width,
+                        level: 1.0,
+                        cut: 0.0,
+                        fill: [0.0; 4],
+                        rim_top: fade(n.ring),
+                        rim_bottom: fade(n.ring),
+                        wave: [0.0; 4],
+                        arc: Rect::WHOLE,
+                        fill_to: [0.0; 4],
+                        stops: Rect::NO_STOPS,
+                        shapes: Rect::NO_SHAPES,
+                        clip: out.clip,
+                        path: [0.0; 4],
+                        path_end: [0.0; 4],
+                        bud: [0.0; 4],
+                        bud_shape: [0.0; 4],
+                        fade: out.fade_of(),
+                        transform: out.transform,
+                    });
+                }
             }
             // A band drawn only outside its cells: each child capsule's
             // shape is taken back out of it before the child is drawn.

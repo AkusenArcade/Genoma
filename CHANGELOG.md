@@ -63,8 +63,20 @@ changes what a shell sees.
   With `soften` (a blur at decode) they cover a wallpaper dimmed and
   blurred behind a lock.
 
+- Capsule shadows, glows and outlines: `shadow`, `shadow_blur`,
+  `shadow_x`, `shadow_y` and `shadow_spread` draw a shadow as CSS's
+  box-shadow does, outside the shape only, so a glass fill does not darken
+  over its own shadow (a coloured one with no offset is a glow);
+  `inner_shadow`, `inner_blur`, `inner_x`, `inner_y` and `inner_spread`
+  an inset one over the fill (an inner glow with no offset); `outline`,
+  `outline_width` and `outline_offset` a ring apart from the rim. All
+  animatable. Two new shapes in the rect pipeline, no new attribute.
+- The kit's slider knob, menu and dialog had asked for capsule shadows
+  that were not drawn; they are now.
+
 ### Changed
 
+- `shadow_blur` and `shadow_y` are animatable (texts as well).
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it
   falls back on the protocols, and is empty where those are missing too.
 
