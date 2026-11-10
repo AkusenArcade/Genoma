@@ -409,7 +409,7 @@ impl Gpu {
     ) {
         let [width, height] = size;
         let rects = self.rects.get_or_insert_with(|| rect::Pipeline::new(&self.device, format));
-        rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects);
+        rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects, &list.fields);
         let images = self.images.get_or_insert_with(|| image::Pipeline::new(&self.device, format));
         images.upload(id, &self.device, &self.queue, [width as f32, height as f32], &list.images);
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));

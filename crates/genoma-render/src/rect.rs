@@ -69,7 +69,10 @@ pub struct Rect {
     /// More shapes joined to this one as the first one combined is (a
     /// `combine_with` naming several): up to four, each its box as `bud`
     /// gives one (centre relative to this one's, half size, physical
-    /// pixels) then its radius and 1 when it is there. Not an attribute:
+    /// pixels) then its radius and 1 when it is there. A text's or a path's
+    /// outline is 2 instead, its box the field's, and its radius the
+    /// field's spread; the next number is the field's place in the list's
+    /// `fields` (where it lies in the atlas, once uploaded). Not an attribute:
     /// each distinct set goes to the GPU once, and the instance carries its
     /// index with the operation, in `bud_shape.w`.
     pub shapes: [[f32; 4]; 8],
@@ -152,6 +155,8 @@ pub(crate) struct Pipeline {
     shape_capacity: usize,
     last_shapes: Vec<[[f32; 4]; 8]>,
     shape_sets: Vec<[[f32; 4]; 8]>,
+    atlas: Atlas,
+    field_sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -179,6 +184,21 @@ struct Stops { at: array<vec4<f32>, 2>, colour: array<vec4<f32>, 6> };
 // and whether it is there.
 struct Shapes { boxes: array<vec4<f32>, 8> };
 @group(0) @binding(3) var<storage, read> shapes: array<Shapes>;
+// The distance fields of texts and paths combined with: one byte, 0.5 on
+// the edge, over the spread each shape gives.
+@group(0) @binding(4) var field_atlas: texture_2d<f32>;
+@group(0) @binding(5) var field_sampler: sampler;
+
+// The distance to a field's outline from p (local to the shape), its box
+// b (centre, half size) and r (spread, kind, its corner in the atlas):
+// read inside the field, and beyond it its last value plus the way out.
+fn field_distance(p_local: vec2<f32>, b: vec4<f32>, r: vec4<f32>) -> f32 {
+    let p = p_local - b.xy + b.zw;
+    let inside = clamp(p, vec2<f32>(0.5), b.zw * 2.0 - vec2<f32>(0.5));
+    let dims = vec2<f32>(textureDimensions(field_atlas));
+    let v = textureSampleLevel(field_atlas, field_sampler, (r.zw + inside) / dims, 0.0).r;
+    return (0.5 - v) * 2.0 * r.x + length(p - inside);
+}
 
 fn along_stops(s: Stops, t: f32) -> vec4<f32> {
     let n = i32(s.at[1].w + 0.5);
@@ -244,9 +264,12 @@ fn vs(@builtin(vertex_index) vertex: u32, instance: Instance) -> Varyings {
     var lo = instance.origin;
     var hi = instance.origin + instance.size;
     if (instance.bud_shape.y > 0.0) {
-        let centre = instance.origin + instance.size * 0.5 + instance.bud.xy;
-        lo = min(lo, centre - instance.bud.zw);
-        hi = max(hi, centre + instance.bud.zw);
+        // A negative radius: nothing in the bud's place, only more shapes.
+        if (instance.bud_shape.x >= 0.0) {
+            let centre = instance.origin + instance.size * 0.5 + instance.bud.xy;
+            lo = min(lo, centre - instance.bud.zw);
+            hi = max(hi, centre + instance.bud.zw);
+        }
         let more = u32(instance.bud_shape.w + 0.5) >> 2u;
         if (more > 0u) {
             for (var i = 0u; i < 4u; i = i + 1u) {
@@ -439,10 +462,12 @@ fn body(in: Varyings) -> vec4<f32> {
     if (in.bud_shape.y > 0.0) {
         let code = u32(in.bud_shape.w + 0.5);
         let op = code & 3u;
-        let parent = rounded_box(in.local - in.bud.xy, in.bud.zw, in.bud_shape.x);
-        d = combined(d, parent, op, in.bud_shape.y);
-        if (op == 0u) {
-            outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+        if (in.bud_shape.x >= 0.0) {
+            let parent = rounded_box(in.local - in.bud.xy, in.bud.zw, in.bud_shape.x);
+            d = combined(d, parent, op, in.bud_shape.y);
+            if (op == 0u) {
+                outside_parent = clamp(parent + 0.5, 0.0, 1.0);
+            }
         }
         // The more shapes it names, each met the same way.
         let more = code >> 2u;
@@ -450,7 +475,9 @@ fn body(in: Varyings) -> vec4<f32> {
             for (var i = 0u; i < 4u; i = i + 1u) {
                 let b = shapes[more].boxes[i * 2u];
                 let r = shapes[more].boxes[i * 2u + 1u];
-                if (r.y > 0.5) {
+                if (r.y > 1.5) {
+                    d = combined(d, field_distance(in.local, b, r), op, in.bud_shape.y);
+                } else if (r.y > 0.5) {
                     d = combined(d, rounded_box(in.local - b.xy, b.zw, r.x), op, in.bud_shape.y);
                 }
             }
@@ -616,6 +643,22 @@ impl Pipeline {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -630,7 +673,15 @@ impl Pipeline {
         let gradients = Self::gradient_buffer(device, gradient_capacity);
         let shape_capacity = 2;
         let shape_buffer = Self::shape_buffer(device, shape_capacity);
-        let bind_group = Self::bind_group(device, &layout, &globals, &transforms, &gradients, &shape_buffer);
+        // A texel until a field is asked for: nobody pays for what is not used.
+        let atlas = Atlas::new(device, 1);
+        let field_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("rect fields"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = Self::bind_group(device, &layout, &globals, &transforms, &gradients, &shape_buffer, &atlas.view, &field_sampler);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rect"),
             bind_group_layouts: &[Some(&layout)],
@@ -698,6 +749,8 @@ impl Pipeline {
             shape_capacity,
             last_shapes: Vec::new(),
             shape_sets: Vec::new(),
+            atlas,
+            field_sampler,
             stop_sets: Vec::new(),
             bind_group,
             instances,
@@ -738,6 +791,7 @@ impl Pipeline {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -745,6 +799,8 @@ impl Pipeline {
         transforms: &wgpu::Buffer,
         gradients: &wgpu::Buffer,
         shapes: &wgpu::Buffer,
+        atlas: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rect globals"),
@@ -754,6 +810,8 @@ impl Pipeline {
                 wgpu::BindGroupEntry { binding: 1, resource: transforms.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: gradients.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: shapes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(atlas) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(sampler) },
             ],
         })
     }
@@ -773,7 +831,18 @@ impl Pipeline {
         queue: &wgpu::Queue,
         viewport: [f32; 2],
         rects: &[Rect],
+        fields: &[crate::Field],
     ) {
+        // The fields this list reads, placed in the atlas; a list with none
+        // leaves it as it is.
+        let mut rebind = false;
+        let placed: Vec<[u32; 2]> = if fields.is_empty() {
+            Vec::new()
+        } else {
+            let (places, grown) = self.atlas.place(device, queue, fields);
+            rebind |= grown;
+            places
+        };
         if rects.len() > self.capacity {
             self.capacity = rects.len().next_power_of_two();
             self.instances = Self::instance_buffer(device, self.capacity);
@@ -813,20 +882,30 @@ impl Pipeline {
                     }
                 }
             };
-            let shapes = if r.shapes[1][1] < 0.5 {
+            // A field's entry names it by place in the list: where it lies in
+            // the atlas instead, for the GPU.
+            let mut set = r.shapes;
+            for i in 0..4 {
+                let entry = &mut set[i * 2 + 1];
+                if entry[1] > 1.5 {
+                    let at = placed.get(entry[2] as usize).copied().unwrap_or([0, 0]);
+                    entry[2] = at[0] as f32;
+                    entry[3] = at[1] as f32;
+                }
+            }
+            let shapes = if set[1][1] < 0.5 {
                 0
             } else {
-                match self.shape_sets.iter().position(|s| *s == r.shapes) {
+                match self.shape_sets.iter().position(|s| *s == set) {
                     Some(i) => i,
                     None => {
-                        self.shape_sets.push(r.shapes);
+                        self.shape_sets.push(set);
                         self.shape_sets.len() - 1
                     }
                 }
             };
             self.gpu_rects.push(GpuRect::new(r, index as u32, stops as u32, shapes as u32));
         }
-        let mut rebind = false;
         if self.matrices.len() > self.transform_capacity {
             self.transform_capacity = self.matrices.len().next_power_of_two();
             self.transforms = Self::transform_buffer(device, self.transform_capacity);
@@ -846,8 +925,16 @@ impl Pipeline {
             rebind = true;
         }
         if rebind {
-            self.bind_group =
-                Self::bind_group(device, &self.layout, &self.globals, &self.transforms, &self.gradients, &self.shape_buffer);
+            self.bind_group = Self::bind_group(
+                device,
+                &self.layout,
+                &self.globals,
+                &self.transforms,
+                &self.gradients,
+                &self.shape_buffer,
+                &self.atlas.view,
+                &self.field_sampler,
+            );
         }
         if self.shape_sets != self.last_shapes {
             queue.write_buffer(&self.shape_buffer, 0, bytemuck::cast_slice(&self.shape_sets));
@@ -909,3 +996,115 @@ impl Pipeline {
         }
     }
 }
+
+/// Where the distance fields lie: one texture of single bytes, filled in
+/// rows. A field keeps its place while it is asked for; when one no longer
+/// fits, the atlas starts again with only the fields of the list at hand,
+/// twice as large if they need it.
+struct Atlas {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: u32,
+    places: std::collections::HashMap<u64, [u32; 2]>,
+    /// The row being filled: where the next field goes, and the row's height.
+    cursor: [u32; 2],
+    row: u32,
+}
+
+impl Atlas {
+    /// Fields are padded by a texel on every side, so filtering never
+    /// reads a neighbour.
+    const PAD: u32 = 1;
+    const LARGEST: u32 = 4096;
+
+    fn new(device: &wgpu::Device, size: u32) -> Atlas {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rect fields"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Atlas { texture, view, size, places: Default::default(), cursor: [0, 0], row: 0 }
+    }
+
+    /// A place for a field of this size in the row, or the next one.
+    fn room(&mut self, width: u32, height: u32) -> Option<[u32; 2]> {
+        let (w, h) = (width + 2 * Self::PAD, height + 2 * Self::PAD);
+        if w > self.size || h > self.size {
+            return None;
+        }
+        if self.cursor[0] + w > self.size {
+            self.cursor = [0, self.cursor[1] + self.row];
+            self.row = 0;
+        }
+        if self.cursor[1] + h > self.size {
+            return None;
+        }
+        let at = [self.cursor[0] + Self::PAD, self.cursor[1] + Self::PAD];
+        self.cursor[0] += w;
+        self.row = self.row.max(h);
+        Some(at)
+    }
+
+    /// Each field's corner in the atlas, uploading those not there yet;
+    /// true when the texture was made again (the bind group must follow).
+    fn place(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, fields: &[crate::Field]) -> (Vec<[u32; 2]>, bool) {
+        let mut grown = false;
+        loop {
+            let mut out = Vec::with_capacity(fields.len());
+            let mut fits = true;
+            for f in fields {
+                if let Some(at) = self.places.get(&f.key) {
+                    out.push(*at);
+                    continue;
+                }
+                let Some(at) = self.room(f.width, f.height) else {
+                    fits = false;
+                    break;
+                };
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: at[0], y: at[1], z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &f.data,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(f.width), rows_per_image: Some(f.height) },
+                    wgpu::Extent3d { width: f.width, height: f.height, depth_or_array_layers: 1 },
+                );
+                self.places.insert(f.key, at);
+                out.push(at);
+            }
+            if fits {
+                return (out, grown);
+            }
+            // Start again with only these; larger if they alone need it.
+            let need: u64 = fields.iter().map(|f| u64::from(f.width + 2 * Self::PAD) * u64::from(f.height + 2 * Self::PAD)).sum();
+            let widest = fields.iter().map(|f| f.width.max(f.height) + 2 * Self::PAD).max().unwrap_or(1);
+            let mut size = self.size.max(256);
+            while (u64::from(size) * u64::from(size) < need * 2 || size < widest) && size < Self::LARGEST {
+                size *= 2;
+            }
+            if size == self.size && self.places.is_empty() {
+                // Too many even alone: what does not fit is drawn without.
+                log::warn!("combine_with: the distance fields do not fit in a {size}² atlas");
+                return (fields.iter().map(|f| self.places.get(&f.key).copied().unwrap_or([0, 0])).collect(), grown);
+            }
+            if size != self.size {
+                *self = Atlas::new(device, size);
+                grown = true;
+            } else {
+                self.places.clear();
+                self.cursor = [0, 0];
+                self.row = 0;
+            }
+        }
+    }
+}
+

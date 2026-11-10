@@ -11,6 +11,13 @@ local kit = require("@genoma/kit")
 
 local theme = kit.theme
 local apart = g.signal(0.55)
+-- `genoma ipc shapes apart 0.3`: the slider, from outside.
+g.ipc("shapes", {
+    apart = function(value: string): string
+        apart.value = math.clamp(tonumber(value) or 0, 0, 1)
+        return tostring(apart.value)
+    end,
+})
 
 -- A five-pointed star's corners around (r, r).
 local function star(r: number, inner: number): { number }
@@ -28,11 +35,11 @@ local function label(text: string): any
     return g.text { size = 12, color = function() return theme.get("faint") end, text = text }
 end
 
-local function cell(title: string, body: any): any
+local function cell(title: string, body: any, width: number?): any
     return g.box {
         direction = "column",
         gap = 10,
-        width = 130,
+        width = width or 130,
         body,
         label(title),
     }
@@ -194,6 +201,41 @@ return g.surface {
                     rim_bottom = "#00000000",
                 },
             }),
+        },
+
+        g.box {
+            gap = 10,
+            align = "end",
+            -- A label taken into a drop: the text has no colour of its own,
+            -- only its outline, which the drop meets as a distance field.
+            cell("absorb a label", g.box {
+                width = 260,
+                height = 80,
+                g.text {
+                    id = "label",
+                    overlay = true,
+                    attach = "corner",
+                    offset_x = 96,
+                    offset_y = 24,
+                    text = "Genoma",
+                    size = 26,
+                    weight = 700,
+                    color = "#00000000",
+                },
+                g.capsule {
+                    overlay = true,
+                    attach = "corner",
+                    combine_with = "label",
+                    combine_soft = 14,
+                    offset_x = function() return 4 + apart.value * 150 end,
+                    offset_y = 20,
+                    width = 40,
+                    height = 40,
+                    fill = "#ebcb8b",
+                    rim_top = "#00000000",
+                    rim_bottom = "#00000000",
+                },
+            }, 260),
         },
 
         g.box {

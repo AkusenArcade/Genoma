@@ -27,6 +27,10 @@ changes what a shell sees.
 - `combine_with` names several capsules, separated by spaces: up to five
   shapes drawn as one, each met as `combine` says (three drops and their
   necks). See `examples/shapes`.
+- `combine_with` names a text or a path too: the capsule meets its outline
+  as a distance field, made once from the outline and kept while it stays
+  (a drop taking a label into itself, in `examples/shapes`). A scene that
+  names none uses no texture for it.
 
 ### Changed
 

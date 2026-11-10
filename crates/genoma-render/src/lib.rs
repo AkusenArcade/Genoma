@@ -112,8 +112,24 @@ pub struct Image {
 /// new layer, so it lies over it (a scrim over a picture); shapes that do
 /// not overlap stay batched whatever their order. What is raised over all
 /// of it (a list a dropdown opened) is a layer of its own, last.
+/// The outline of a text or a path as a distance field, for a shape to be
+/// combined with (`combine_with` naming it): one byte a pixel, read as
+/// coverage is, 0.5 on the edge, 1 inside and 0 outside at the spread the
+/// shape's entry gives, physical pixels.
+#[derive(Clone)]
+pub struct Field {
+    /// What the pixels show: the same key is the same field.
+    pub key: u64,
+    pub width: u32,
+    pub height: u32,
+    pub data: Arc<Vec<u8>>,
+}
+
 #[derive(Clone, Default)]
 pub struct DrawList {
+    /// The distance fields its rects' shapes read, by place (a shape's entry
+    /// names its field by index here).
+    pub fields: Vec<Field>,
     /// Subtrees drawn blurred (see [`Group`]), inner ones first: each is
     /// drawn into a texture of its own and shows in this list as an image
     /// of its key.
@@ -285,6 +301,18 @@ impl DrawList {
         }
     }
 
+    /// A distance field for a shape to read: its place in the list, the
+    /// same field once however many shapes read it.
+    pub fn push_field(&mut self, field: Field) -> usize {
+        match self.fields.iter().position(|f| f.key == field.key) {
+            Some(i) => i,
+            None => {
+                self.fields.push(field);
+                self.fields.len() - 1
+            }
+        }
+    }
+
     pub fn push_rect(&mut self, r: Rect) {
         let tilted = r.transform != Rect::IDENTITY;
         self.order(0, bounds(r.origin, r.size, r.clip, tilted));
@@ -292,9 +320,12 @@ impl DrawList {
         // antialiased edge, and a bud's parent box (rect.rs, `vs`).
         let (mut lo, mut hi) = (r.origin, [r.origin[0] + r.size[0], r.origin[1] + r.size[1]]);
         if r.bud_shape[1] > 0.0 {
-            let centre = [r.origin[0] + r.size[0] * 0.5 + r.bud[0], r.origin[1] + r.size[1] * 0.5 + r.bud[1]];
-            lo = [lo[0].min(centre[0] - r.bud[2]), lo[1].min(centre[1] - r.bud[3])];
-            hi = [hi[0].max(centre[0] + r.bud[2]), hi[1].max(centre[1] + r.bud[3])];
+            // A negative radius: no shape in the bud's place, only more.
+            if r.bud_shape[0] >= 0.0 {
+                let centre = [r.origin[0] + r.size[0] * 0.5 + r.bud[0], r.origin[1] + r.size[1] * 0.5 + r.bud[1]];
+                lo = [lo[0].min(centre[0] - r.bud[2]), lo[1].min(centre[1] - r.bud[3])];
+                hi = [hi[0].max(centre[0] + r.bud[2]), hi[1].max(centre[1] + r.bud[3])];
+            }
             // And the more shapes it is combined with.
             for i in 0..4 {
                 let (b, present) = (r.shapes[i * 2], r.shapes[i * 2 + 1][1] > 0.5);
@@ -424,7 +455,8 @@ impl DrawList {
     /// same layers and order: what a frame drawn again within it needs.
     pub fn within(&self, area: [u32; 4]) -> DrawList {
         let r = [area[0] as f32, area[1] as f32, (area[0] + area[2]) as f32, (area[1] + area[3]) as f32];
-        let mut out = DrawList::default();
+        // The fields whole: the rects kept name them by place.
+        let mut out = DrawList { fields: self.fields.clone(), ..DrawList::default() };
         for (from, to) in self.layers() {
             for i in from.rects..to.rects {
                 if meets(&self.paint[0][i], &r) {
@@ -492,6 +524,9 @@ impl DrawList {
         }
         for r in &self.rects {
             bytemuck::bytes_of(r).hash(&mut h);
+        }
+        for f in &self.fields {
+            f.key.hash(&mut h);
         }
         for i in &self.images {
             i.key.hash(&mut h);
@@ -629,7 +664,18 @@ impl DrawList {
                 texts: base.texts + b.texts,
             });
         }
-        self.rects.extend(other.rects);
+        // Its fields join these: a shape that names one by place names it
+        // by its place here.
+        let places: Vec<usize> = other.fields.into_iter().map(|f| self.push_field(f)).collect();
+        self.rects.extend(other.rects.into_iter().map(|mut r| {
+            for i in 0..4 {
+                let entry = &mut r.shapes[i * 2 + 1];
+                if entry[1] > 1.5 {
+                    entry[2] = places.get(entry[2] as usize).copied().unwrap_or(0) as f32;
+                }
+            }
+            r
+        }));
         self.images.extend(other.images);
         self.shaders.extend(other.shaders);
         self.emitters.extend(other.emitters);

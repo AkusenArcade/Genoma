@@ -7,6 +7,7 @@
 //! when it next will (`Motion`); the surface asks the compositor for a frame
 //! only then.
 
+mod distance;
 pub mod field;
 mod glyphs;
 mod icons;
@@ -599,6 +600,8 @@ pub struct Scene {
     icons: icons::Icons,
     images: images::Images,
     glyphs: glyphs::Glyphs,
+    /// The outlines of texts and paths that capsules are combined with.
+    distance: distance::Fields,
     /// Particles' clock: their births and their age are seconds since this.
     epoch: Instant,
     now: f32,
@@ -658,6 +661,7 @@ impl Scene {
             icons: icons::Icons::default(),
             images: images::Images::default(),
             glyphs: glyphs::Glyphs::default(),
+            distance: distance::Fields::default(),
             epoch: Instant::now(),
             now: 0.0,
             blur: Vec::new(),
@@ -1263,8 +1267,22 @@ impl Scene {
         }
     }
 
-    /// The shapes named by a `combine_with`, by id: where each was last
-    /// drawn and its radius, logical units.
+    /// Every id some `combine_with` names.
+    fn combine_names(&self) -> Vec<String> {
+        let mut wanted: Vec<String> = Vec::new();
+        self.walk(self.root, &mut |_, n| {
+            for id in n.combine_with.as_deref().unwrap_or("").split_whitespace() {
+                if !wanted.iter().any(|w| w == id) {
+                    wanted.push(id.to_owned());
+                }
+            }
+        });
+        wanted
+    }
+
+    /// The capsules named by a `combine_with`, by id: where each was last
+    /// drawn and its radius, logical units. A text or a path named is its
+    /// outline's distance field instead (see `distance`).
     fn combined_shapes(&self) -> std::collections::HashMap<String, [f32; 5]> {
         let mut wanted: Vec<String> = Vec::new();
         self.walk(self.root, &mut |_, n| {
@@ -1282,6 +1300,7 @@ impl Scene {
             if let Some(id) = &n.id
                 && wanted.contains(id)
                 && !shapes.contains_key(id)
+                && !matches!(n.kind, Kind::Text | Kind::Path)
             {
                 let [x, y, w, h] = n.extent;
                 let radius = n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0);
@@ -2044,8 +2063,9 @@ impl Scene {
         let viewport = self.tree.layout(self.root).map_or([0.0; 2], |l| [l.size.width * scale, l.size.height * scale]);
         self.frame += 1;
         let others = self.combined_shapes();
+        self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2081,6 +2101,7 @@ impl Scene {
             }
         }
         let upper = out.upper;
+        self.distance.end();
         if !upper.is_empty() {
             list.append(upper);
         }
@@ -2472,6 +2493,7 @@ struct Out<'a> {
     blur: Vec<Blur>,
     /// What is raised, gathered apart and put after the rest at the end.
     upper: DrawList,
+    distance: &'a mut distance::Fields,
     raised: bool,
     /// The images drawn this frame.
     drawn_images: Vec<NodeId>,
@@ -2932,25 +2954,60 @@ fn collect_node(
             // A bud is drawn as one shape with its parent capsule, without
             // the parent's interior: the parent's centre relative to this
             // one, its half size and radius, and the union's softness.
-            // The shapes it names, in order: the first in the bud's place,
-            // up to four more beside it, met the same way.
-            let named: Vec<[f32; 5]> = n
+            // The shapes it names, in order: a capsule first in the bud's
+            // place, the rest (four at most) beside it, met the same way. A
+            // text or a path is its outline's distance field.
+            enum Named {
+                Capsule([f32; 5]),
+                Outline(distance::Placed),
+            }
+            let named: Vec<Named> = n
                 .combine_with
                 .as_deref()
-                .map(|ids| ids.split_whitespace().filter_map(|id| out.others.get(id).copied()).collect())
+                .map(|ids| {
+                    ids.split_whitespace()
+                        .filter_map(|id| match out.distance.named(id) {
+                            Some(p) => Some(Named::Outline(p)),
+                            None => out.others.get(id).copied().map(Named::Capsule),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
-            let other = named.first().copied();
+            let other = match named.first() {
+                Some(Named::Capsule(c)) => Some(*c),
+                _ => None,
+            };
             let mut shapes = Rect::NO_SHAPES;
-            for (i, [px, py, pw, ph, pr]) in named.iter().skip(1).take(4).enumerate() {
-                shapes[i * 2] = [
-                    ((px + pw / 2.0) - (x + w / 2.0)) * scale,
-                    ((py + ph / 2.0) - (y + h / 2.0)) * scale,
-                    pw / 2.0 * scale,
-                    ph / 2.0 * scale,
-                ];
-                shapes[i * 2 + 1] = [pr * scale, 1.0, 0.0, 0.0];
+            let rest = &named[usize::from(other.is_some())..];
+            for (i, shape) in rest.iter().take(4).enumerate() {
+                match shape {
+                    Named::Capsule([px, py, pw, ph, pr]) => {
+                        shapes[i * 2] = [
+                            ((px + pw / 2.0) - (x + w / 2.0)) * scale,
+                            ((py + ph / 2.0) - (y + h / 2.0)) * scale,
+                            pw / 2.0 * scale,
+                            ph / 2.0 * scale,
+                        ];
+                        shapes[i * 2 + 1] = [pr * scale, 1.0, 0.0, 0.0];
+                    }
+                    Named::Outline(p) => {
+                        let (fw, fh) = (p.field.width as f32, p.field.height as f32);
+                        shapes[i * 2] = [
+                            p.corner[0] + fw / 2.0 - (x + w / 2.0) * scale,
+                            p.corner[1] + fh / 2.0 - (y + h / 2.0) * scale,
+                            fw / 2.0,
+                            fh / 2.0,
+                        ];
+                        let place = out.list.push_field(p.field.clone());
+                        shapes[i * 2 + 1] = [p.spread, 2.0, place as f32, 0.0];
+                    }
+                }
             }
+            let operation = if n.combine == 0 { 3.0 } else { n.combine as f32 };
             let (bud, bud_shape) = match (other, n.bud > 0.0, out.parent_shape) {
+                // Only outlines: nothing in the bud's place (a negative
+                // radius), the operation and its softness all the same.
+                (None, _, _) if !named.is_empty() => ([0.0; 4], [-1.0, (n.combine_soft * scale).max(0.5), 0.0, operation]),
                 // Combined with a named shape: its box as a bud's parent's,
                 // and what to do with it. A sharp edge is half a pixel soft.
                 (Some([px, py, pw, ph, pr]), _, _) => (
@@ -3337,6 +3394,15 @@ fn collect_node(
                 (layout.size.width - layout.padding.left - layout.padding.right) * scale,
                 (layout.size.height - layout.padding.top - layout.padding.bottom) * scale,
             ];
+            // Named by a capsule's combine_with: its outline as a distance
+            // field, from the raster tilted text uses (kept while it stays).
+            if out.distance.wants(n.id.as_deref())
+                && let Some(r) = out.glyphs.raster(fonts, n.uid, &buffer, at, scale, n.color, lit.then_some((n.color_bottom, size[1])))
+            {
+                let id = n.id.clone().unwrap_or_default();
+                let corner = [at[0].floor() + r.offset[0] as f32, at[1].floor() + r.offset[1] as f32];
+                out.distance.place(&id, r.key, &r.pixels, r.width, r.height, corner, OUTLINE_SPREAD * scale);
+            }
             // The shadow first, under the glyphs.
             if n.shadow[3] > 0.0
                 && let Some(r) = out.glyphs.shadow(fonts, n.uid, &buffer, scale, n.shadow, n.shadow_blur * scale)
@@ -3435,6 +3501,11 @@ fn collect_node(
                 && let Some(svg) = path_svg(n, [layout.size.width, layout.size.height], [w, h])
                 && let Some((key, data)) = out.icons.vector(&svg, w, h)
             {
+                if out.distance.wants(n.id.as_deref()) {
+                    let id = n.id.clone().unwrap_or_default();
+                    let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
+                    out.distance.place(&id, key, &data, w, h, corner, OUTLINE_SPREAD * scale);
+                }
                 out.list.push_image(genoma_render::Image {
                     key,
                     pixels: data,
@@ -3506,6 +3577,10 @@ fn xml_escape(s: &str) -> String {
 
 /// A path node as an SVG document `pixels` wide and high showing `size`
 /// logical units: drawn by resvg at the exact physical size.
+/// How far past a text's or a path's outline its distance field reaches,
+/// logical units: the softest union it is met with blends within this.
+const OUTLINE_SPREAD: f32 = 24.0;
+
 fn path_svg(n: &Node, size: [f32; 2], pixels: [u32; 2]) -> Option<String> {
     let paint = |c: [f32; 4]| {
         let [r, g, b, _] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
