@@ -8,11 +8,20 @@
 //!   and the state asked again on `.socket.sock` when an event says it
 //!   changed.
 //! - Umbriel: `$UMBRIEL_SOCKET`, a subscription that sends whole snapshots.
+//! - Any other (or `GENOMA_COMPOSITOR=wayland`): the standard protocols,
+//!   `ext-workspace-v1` for workspaces and `wlr-foreign-toplevel-management`
+//!   for windows. They live on the main thread's Wayland connection, so the
+//!   runtime binds them, hands what they say to [`Compositor::take_wayland`]
+//!   and carries out the [`Request`]s the interface leaves here. Neither
+//!   protocol says which workspace a window is on, nor whether a workspace
+//!   holds any: there `workspace` is nil and `vacant` false.
 //!
-//! Ids are strings: niri numbers, Hyprland window addresses and Umbriel's
-//! stable ids all fit, and an interface only hands them back.
+//! Ids are strings: niri numbers, Hyprland window addresses, Umbriel's
+//! stable ids and the runtime's own numbers for protocol handles all fit,
+//! and an interface only hands them back.
 
 use std::{
+    cell::RefCell,
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -40,12 +49,17 @@ pub struct Workspace {
     pub urgent: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Window {
     pub id: String,
     pub title: Option<String>,
     pub app_id: Option<String>,
     pub workspace: Option<String>,
+    /// Where the compositor says it is, when it says so without a
+    /// workspace (the protocols); otherwise its workspace's output.
+    pub output: Option<String>,
+    /// Minimized: only the protocols report it, and only they minimize.
+    pub minimized: bool,
 }
 
 /// Which compositor, and what talking to it needs.
@@ -53,6 +67,48 @@ pub enum Backend {
     Niri { socket: PathBuf, model: Niri },
     Hyprland { dir: PathBuf },
     Umbriel { socket: PathBuf },
+    /// The standard protocols, on the runtime's connection: what the
+    /// interface asks waits here for the runtime's next turn.
+    Wayland { requests: RefCell<Vec<Request>> },
+}
+
+/// What the interface asks of a compositor reached through the protocols.
+/// The ids are the ones [`Compositor::take_wayland`] was given.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    FocusWorkspace(String),
+    FocusWindow(String),
+    CloseWindow(String),
+    Minimize { window: String, minimized: bool },
+}
+
+/// A workspace as `ext-workspace-v1` describes it, its output's name found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProtocolWorkspace {
+    pub id: String,
+    pub name: Option<String>,
+    /// Its coordinates in its group, when the compositor gives them, in as
+    /// many dimensions as it has (niri gives two).
+    pub coordinates: Vec<u32>,
+    /// `ext_workspace_handle_v1.state`: 1 active, 2 urgent, 4 hidden.
+    pub state: u32,
+    /// Its group's first output.
+    pub output: Option<String>,
+    /// Its place among its group's workspaces, in the order they entered.
+    pub place: usize,
+}
+
+/// A window as `wlr-foreign-toplevel-management` describes it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProtocolToplevel {
+    pub id: String,
+    pub title: Option<String>,
+    pub app_id: Option<String>,
+    /// The outputs it is on, by name.
+    pub outputs: Vec<String>,
+    pub minimized: bool,
+    /// Holds the keyboard.
+    pub activated: bool,
 }
 
 pub struct Compositor {
@@ -140,13 +196,28 @@ impl Compositor {
         Err(unknown())
     }
 
-    /// "niri", "hyprland" or "umbriel".
+    /// The compositor through the standard protocols: what [`connect`]
+    /// falls back on, or what `GENOMA_COMPOSITOR=wayland` asks for. The
+    /// runtime binds the protocols once an interface requires it.
+    ///
+    /// [`connect`]: Compositor::connect
+    pub fn wayland() -> Compositor {
+        Compositor::new(Backend::Wayland { requests: RefCell::new(Vec::new()) })
+    }
+
+    /// "niri", "hyprland", "umbriel" or "wayland".
     pub fn name(&self) -> &'static str {
         match self.backend {
             Backend::Niri { .. } => "niri",
             Backend::Hyprland { .. } => "hyprland",
             Backend::Umbriel { .. } => "umbriel",
+            Backend::Wayland { .. } => "wayland",
         }
+    }
+
+    /// Whether windows can be minimized here: only through the protocols.
+    pub fn can_minimize(&self) -> bool {
+        matches!(self.backend, Backend::Wayland { .. })
     }
 
     /// One line of the event stream.
@@ -158,6 +229,8 @@ impl Compositor {
             }
             Backend::Hyprland { .. } => self.hyprland_event(line),
             Backend::Umbriel { .. } => self.umbriel_event(line),
+            // No stream: the runtime calls take_wayland.
+            Backend::Wayland { .. } => {}
         }
     }
 
@@ -185,7 +258,13 @@ impl Compositor {
             .get_untracked()
             .unwrap_or_default()
             .into_iter()
-            .map(|w| Window { id: w.id.to_string(), title: w.title, app_id: w.app_id, workspace: w.workspace_id.map(|i| i.to_string()) })
+            .map(|w| Window {
+                id: w.id.to_string(),
+                title: w.title,
+                app_id: w.app_id,
+                workspace: w.workspace_id.map(|i| i.to_string()),
+                ..Window::default()
+            })
             .collect();
         let focused = model.focused.get_untracked().flatten().map(|i| i.to_string());
         batch(|| {
@@ -269,6 +348,7 @@ impl Compositor {
                     title: text(c, "title"),
                     app_id: text(c, "class"),
                     workspace: c.get("workspace")?.get("id")?.as_i64().map(|i| i.to_string()),
+                    ..Window::default()
                 })
             })
             .collect();
@@ -344,6 +424,7 @@ impl Compositor {
                             title: text(w, "title"),
                             app_id: text(w, "app_id"),
                             workspace: w.get("workspace").and_then(id_of),
+                            ..Window::default()
                         })
                     })
                     .collect();
@@ -371,6 +452,98 @@ impl Compositor {
             Some(other) => Err(other.to_string()),
             None => Ok(()),
         }
+    }
+
+    // ---- The standard protocols ---------------------------------------------
+
+    /// What the protocols say now, as the common model. The focused output
+    /// is the activated window's; with none activated, the one focused
+    /// before, or the only one there is.
+    pub fn take_wayland(&self, spaces: &[ProtocolWorkspace], toplevels: &[ProtocolToplevel]) {
+        let windows: Vec<Window> = toplevels
+            .iter()
+            .map(|t| Window {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                app_id: t.app_id.clone(),
+                workspace: None,
+                output: t.outputs.first().cloned(),
+                minimized: t.minimized,
+            })
+            .collect();
+        let focused = toplevels.iter().find(|t| t.activated).map(|t| t.id.clone());
+        let mut outputs: Vec<&str> = spaces.iter().filter_map(|w| w.output.as_deref()).collect();
+        outputs.dedup();
+        let focused_output = toplevels
+            .iter()
+            .find(|t| t.activated)
+            .and_then(|t| t.outputs.first().cloned())
+            .or_else(|| self.workspaces.get_untracked().unwrap_or_default().into_iter().find(|w| w.focused).and_then(|w| w.output))
+            .or_else(|| (outputs.len() == 1).then(|| outputs[0].to_owned()));
+        let shown: Vec<&ProtocolWorkspace> = spaces.iter().filter(|w| w.state & 4 == 0).collect();
+        // Its place on its output: by coordinates, whatever their
+        // dimensions, then by the order the workspaces entered.
+        let order = |w: &ProtocolWorkspace| (w.coordinates.clone(), w.place);
+        let workspaces: Vec<Workspace> = shown
+            .iter()
+            .map(|w| {
+                let active = w.state & 1 != 0;
+                let before = shown.iter().filter(|o| o.output == w.output && order(o) < order(w)).count();
+                Workspace {
+                    id: w.id.clone(),
+                    idx: before as u64 + 1,
+                    // A number is the place, not a name (niri names its
+                    // unnamed workspaces so).
+                    name: w.name.clone().filter(|n| !n.bytes().all(|b| b.is_ascii_digit())),
+                    output: w.output.clone(),
+                    active,
+                    focused: active && w.output.is_some() && w.output == focused_output,
+                    vacant: false,
+                    urgent: w.state & 2 != 0,
+                }
+            })
+            .collect();
+        batch(|| {
+            self.set_workspaces(workspaces);
+            self.set_windows(windows);
+            self.set_focused(focused);
+        });
+    }
+
+    /// What the interface asked since the runtime last looked.
+    pub fn take_requests(&self) -> Vec<Request> {
+        match &self.backend {
+            Backend::Wayland { requests } => std::mem::take(&mut *requests.borrow_mut()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Left for the runtime, once the id is known to be a window's or a
+    /// workspace's.
+    fn ask_runtime(&self, request: Request) -> Result<(), String> {
+        let Backend::Wayland { requests } = &self.backend else { return Err("not the protocols".into()) };
+        let known = match &request {
+            Request::FocusWorkspace(id) => self.workspaces.get_untracked().unwrap_or_default().iter().any(|w| &w.id == id),
+            Request::FocusWindow(id) | Request::CloseWindow(id) | Request::Minimize { window: id, .. } => {
+                self.windows.get_untracked().unwrap_or_default().iter().any(|w| &w.id == id)
+            }
+        };
+        if !known {
+            return Err(match &request {
+                Request::FocusWorkspace(id) => format!("no workspace {id}"),
+                Request::FocusWindow(id) | Request::CloseWindow(id) | Request::Minimize { window: id, .. } => format!("no window {id}"),
+            });
+        }
+        requests.borrow_mut().push(request);
+        Ok(())
+    }
+
+    /// Minimizes `id`, or brings it back with `minimized` false.
+    pub fn minimize_window(&self, id: &str, minimized: bool) -> Result<(), String> {
+        if !self.can_minimize() {
+            return Err(format!("{} does not minimize windows", self.name()));
+        }
+        self.ask_runtime(Request::Minimize { window: id.to_owned(), minimized })
     }
 
     // ---- The model ----------------------------------------------------------
@@ -420,8 +593,17 @@ impl Compositor {
     /// The focused window, only if it is on `output`.
     pub fn focused_on(&self, output: &str) -> Option<Window> {
         let window = self.focused_window()?;
-        let ws = self.workspaces.get().into_iter().find(|w| Some(&w.id) == window.workspace.as_ref())?;
-        (ws.output.as_deref() == Some(output)).then_some(window)
+        (self.output_of(&window).as_deref() == Some(output)).then_some(window)
+    }
+
+    /// Where `window` is: what the compositor said, or its workspace's
+    /// output.
+    pub fn output_of(&self, window: &Window) -> Option<String> {
+        if window.output.is_some() {
+            return window.output.clone();
+        }
+        let id = window.workspace.as_ref()?;
+        self.workspaces.get().into_iter().find(|w| &w.id == id)?.output
     }
 
     fn niri_action(socket: &PathBuf, action: &str) -> Result<(), String> {
@@ -467,6 +649,7 @@ impl Compositor {
                 }
                 self.umbriel_action(action)
             }
+            Backend::Wayland { .. } => self.ask_runtime(Request::FocusWorkspace(id.to_owned())),
         }
     }
 
@@ -481,6 +664,7 @@ impl Compositor {
                 self.hyprland_dispatch(&format!("hl.dsp.focus({{ window = \"address:{id}\" }})"), &format!("focuswindow address:{id}"))
             },
             Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "window-focus", "window": id })),
+            Backend::Wayland { .. } => self.ask_runtime(Request::FocusWindow(id.to_owned())),
         }
     }
 
@@ -495,6 +679,7 @@ impl Compositor {
                 self.hyprland_dispatch(&format!("hl.dsp.window.close({{ window = \"address:{id}\" }})"), &format!("closewindow address:{id}"))
             },
             Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "window-close", "window": id })),
+            Backend::Wayland { .. } => self.ask_runtime(Request::CloseWindow(id.to_owned())),
         }
     }
 }
@@ -543,13 +728,59 @@ mod tests {
     #[test]
     fn hyprland_titles_and_focus_change_in_place() {
         let c = Compositor::new(Backend::Hyprland { dir: PathBuf::from("/nonexistent") });
-        c.windows.set(vec![Window { id: "0x55aa".into(), title: Some("a".into()), app_id: None, workspace: Some("1".into()) }]);
+        c.windows.set(vec![Window { id: "0x55aa".into(), title: Some("a".into()), workspace: Some("1".into()), ..Window::default() }]);
         c.line("activewindowv2>>55aa\n");
         assert_eq!(c.focused.get_untracked().flatten().as_deref(), Some("0x55aa"));
         c.line("windowtitlev2>>55aa,b, with a comma\n");
         assert_eq!(c.title.get().as_deref(), Some("b, with a comma"));
         c.line("activewindowv2>>\n");
         assert_eq!(c.title.get(), None);
+    }
+
+    #[test]
+    fn the_protocols_reach_the_common_model() {
+        let c = Compositor::wayland();
+        let space = |id: &str, name: &str, state, output: &str, place| ProtocolWorkspace {
+            id: id.into(),
+            name: Some(name.into()),
+            state,
+            output: Some(output.into()),
+            place,
+            ..ProtocolWorkspace::default()
+        };
+        let spaces = [
+            ProtocolWorkspace { coordinates: vec![0, 1], ..space("2", "web", 0, "DP-1", 0) },
+            ProtocolWorkspace { coordinates: vec![0, 0], ..space("1", "1", 1, "DP-1", 1) },
+            space("3", "3", 1 | 2, "HDMI-A-1", 0),
+            space("4", "scratch", 4, "HDMI-A-1", 1),
+        ];
+        let window = |id: &str, output: &str, activated| ProtocolToplevel {
+            id: id.into(),
+            title: Some(format!("t{id}")),
+            outputs: vec![output.into()],
+            activated,
+            ..ProtocolToplevel::default()
+        };
+        c.take_wayland(&spaces, &[window("7", "DP-1", false), window("8", "HDMI-A-1", true)]);
+        assert_eq!(c.workspaces.get_untracked().unwrap().len(), 3, "a hidden workspace is left out");
+        assert_eq!(c.on_output(Some("DP-1")).iter().map(|w| w.name.clone()).collect::<Vec<_>>(), [None, Some("web".into())]);
+        assert_eq!(c.focused_output().as_deref(), Some("HDMI-A-1"));
+        assert!(c.active("HDMI-A-1").is_some_and(|w| w.idx == 1));
+        assert_eq!(c.on_output(Some("DP-1")).iter().map(|w| (w.id.as_str(), w.idx)).collect::<Vec<_>>(), [("1", 1), ("2", 2)], "coordinates before entry order");
+        assert!(c.on_output(Some("HDMI-A-1"))[0].urgent);
+        assert_eq!(c.focused_on("HDMI-A-1").map(|w| w.id), Some("8".into()));
+        assert_eq!(c.focused_on("DP-1"), None);
+        // Nothing activated: the output focused before stays so.
+        c.take_wayland(&spaces, &[window("7", "DP-1", false)]);
+        assert_eq!((c.focused_output().as_deref(), c.title.get()), (Some("HDMI-A-1"), None));
+        assert_eq!(c.focus_window("8"), Err("no window 8".into()));
+        assert_eq!(c.minimize_window("7", true), Ok(()));
+        assert_eq!(c.focus_workspace("2"), Ok(()));
+        assert_eq!(
+            c.take_requests(),
+            [Request::Minimize { window: "7".into(), minimized: true }, Request::FocusWorkspace("2".into())]
+        );
+        assert!(c.take_requests().is_empty());
     }
 
     #[test]

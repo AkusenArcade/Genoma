@@ -652,7 +652,9 @@ focus_workspace: (self: Niri, id: number) -> ()
 
 `local compositor = require("@genoma/compositor")`
 
-niri, Hyprland or Umbriel, whichever runs.
+niri, Hyprland or Umbriel, whichever runs; any other
+
+through ext-workspace-v1 and wlr-foreign-toplevel-management.
 
 ### `compositor.name`
 
@@ -660,7 +662,15 @@ niri, Hyprland or Umbriel, whichever runs.
 read name: string
 ```
 
-"niri", "hyprland" or "umbriel".
+"niri", "hyprland", "umbriel" or "wayland".
+
+### `compositor.can_minimize`
+
+```luau
+read can_minimize: boolean
+```
+
+Whether minimize_window does anything: only through the protocols.
 
 ### `compositor.title`
 
@@ -731,6 +741,14 @@ focus_window: (self: Compositor, id: string | number) -> ()
 ```luau
 close_window: (self: Compositor, id: string | number) -> ()
 ```
+
+### `compositor:minimize_window`
+
+```luau
+minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> ()
+```
+
+Minimizes (or, with false, brings back) a window.
 
 ## Vitals
 
@@ -1821,7 +1839,9 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `id` | `string` |  |
 | `title` | `string?` |  |
 | `app_id` | `string?` |  |
-| `workspace` | `string?` |  |
+| `workspace` | `string?` | nil through the standard protocols, which do not say. |
+| `output` | `string?` |  |
+| `minimized` | `boolean` | Only the standard protocols report it. |
 
 ### Workspace
 
@@ -1833,7 +1853,7 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `output` | `string?` |  |
 | `active` | `boolean` |  |
 | `focused` | `boolean` |  |
-| `vacant` | `boolean` |  |
+| `vacant` | `boolean` | Always false through the standard protocols, which do not say. |
 | `urgent` | `boolean` |  |
 
 ### AppAction

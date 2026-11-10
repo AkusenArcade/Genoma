@@ -453,33 +453,40 @@ fn id_arg(v: LuaValue) -> mlua::Result<String> {
     }
 }
 
-fn window_table(lua: &Lua, w: genoma_services::compositor::Window) -> mlua::Result<Table> {
+fn window_table(lua: &Lua, c: &Compositor, w: genoma_services::compositor::Window) -> mlua::Result<Table> {
     let t = lua.create_table()?;
+    t.set("output", c.output_of(&w))?;
     t.set("id", w.id)?;
     t.set("title", w.title)?;
     t.set("app_id", w.app_id)?;
     t.set("workspace", w.workspace)?;
+    t.set("minimized", w.minimized)?;
     Ok(t)
 }
 
 impl UserData for CompositorRef {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        // compositor.name → "niri", "hyprland" or "umbriel".
+        // compositor.name → "niri", "hyprland", "umbriel", or "wayland" (the
+        // standard protocols, where no IPC is known).
         fields.add_field_method_get("name", |_, this| Ok(this.0.name()));
+        // compositor.can_minimize → whether :minimize_window does anything.
+        fields.add_field_method_get("can_minimize", |_, this| Ok(this.0.can_minimize()));
         // compositor.title → the focused window's title, or nil.
         fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
         // compositor.focused_output → "DP-1": where a shortcut means.
         fields.add_field_method_get("focused_output", |_, this| Ok(this.0.focused_output()));
-        // compositor.focused → { id, title, app_id, workspace } or nil.
+        // compositor.focused → { id, title, app_id, workspace, output,
+        // minimized } or nil.
         fields.add_field_method_get("focused", |lua, this| match this.0.focused_window() {
-            Some(w) => Ok(LuaValue::Table(window_table(lua, w)?)),
+            Some(w) => Ok(LuaValue::Table(window_table(lua, &this.0, w)?)),
             None => Ok(LuaValue::Nil),
         });
-        // compositor.windows → { { id, title, app_id, workspace }, … }
+        // compositor.windows → { { id, title, app_id, workspace, output,
+        // minimized }, … }
         fields.add_field_method_get("windows", |lua, this| {
             let list = lua.create_table()?;
             for (i, w) in this.0.windows.get().into_iter().enumerate() {
-                list.set(i + 1, window_table(lua, w)?)?;
+                list.set(i + 1, window_table(lua, &this.0, w)?)?;
             }
             Ok(list)
         });
@@ -515,14 +522,20 @@ impl UserData for CompositorRef {
         });
         // compositor:focused_on("DP-1") → the focused window if it is there.
         methods.add_method("focused_on", |lua, this, output: String| match this.0.focused_on(&output) {
-            Some(w) => Ok(LuaValue::Table(window_table(lua, w)?)),
+            Some(w) => Ok(LuaValue::Table(window_table(lua, &this.0, w)?)),
             None => Ok(LuaValue::Nil),
         });
         // compositor:focus_workspace(id), :focus_window(id), :close_window(id):
-        // each on a connection of its own.
+        // each on a connection of its own (through the protocols, sent on the
+        // runtime's next turn).
         methods.add_method("focus_workspace", |_, this, id: LuaValue| this.0.focus_workspace(&id_arg(id)?).map_err(err));
         methods.add_method("focus_window", |_, this, id: LuaValue| this.0.focus_window(&id_arg(id)?).map_err(err));
         methods.add_method("close_window", |_, this, id: LuaValue| this.0.close_window(&id_arg(id)?).map_err(err));
+        // compositor:minimize_window(id, minimized = true): only where
+        // compositor.can_minimize; elsewhere an error.
+        methods.add_method("minimize_window", |_, this, (id, minimized): (LuaValue, Option<bool>)| {
+            this.0.minimize_window(&id_arg(id)?, minimized.unwrap_or(true)).map_err(err)
+        });
     }
 }
 
@@ -2529,7 +2542,7 @@ impl Script {
                         },
                         "compositor" => match &services.compositor {
                             Some(c) => lua.create_userdata(CompositorRef(c.clone()))?,
-                            None => return Err(err("no compositor IPC found (niri, Hyprland, Umbriel)")),
+                            None => return Err(err("no compositor service")),
                         },
                         "power" => lua.create_userdata(PowerRef(services.power.clone()))?,
                         "network" => lua.create_userdata(NetworkRef(services.network.clone()))?,

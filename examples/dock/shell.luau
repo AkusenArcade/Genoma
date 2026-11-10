@@ -2,7 +2,7 @@
 -- A dock at the bottom: the applications pinned, then the others that have
 -- windows open, each its icon from @genoma/apps. A dot under one that runs,
 -- the focused one lit. A click focuses its window (the next one, clicked
--- again) or starts it; a tooltip names it. On niri, Hyprland or Umbriel.
+-- again) or starts it; a tooltip names it. On any compositor.
 --
 --   genoma examples/dock
 local g = require("@genoma")

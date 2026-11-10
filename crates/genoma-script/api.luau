@@ -383,7 +383,16 @@ export type Vitals = {
     read cpu_clock: number,
 }
 
-export type Window = { id: string, title: string?, app_id: string?, workspace: string? }
+export type Window = {
+    id: string,
+    title: string?,
+    app_id: string?,
+    -- nil through the standard protocols, which do not say.
+    workspace: string?,
+    output: string?,
+    -- Only the standard protocols report it.
+    minimized: boolean,
+}
 export type Workspace = {
     id: string,
     idx: number,
@@ -391,14 +400,18 @@ export type Workspace = {
     output: string?,
     active: boolean,
     focused: boolean,
+    -- Always false through the standard protocols, which do not say.
     vacant: boolean,
     urgent: boolean,
 }
 
--- @genoma/compositor: niri, Hyprland or Umbriel, whichever runs.
+-- @genoma/compositor: niri, Hyprland or Umbriel, whichever runs; any other
+-- through ext-workspace-v1 and wlr-foreign-toplevel-management.
 export type Compositor = {
-    -- "niri", "hyprland" or "umbriel".
+    -- "niri", "hyprland", "umbriel" or "wayland".
     read name: string,
+    -- Whether minimize_window does anything: only through the protocols.
+    read can_minimize: boolean,
     -- The focused window's title, or nil.
     read title: string?,
     -- Where a shortcut means.
@@ -414,6 +427,8 @@ export type Compositor = {
     focus_workspace: (self: Compositor, id: string | number) -> (),
     focus_window: (self: Compositor, id: string | number) -> (),
     close_window: (self: Compositor, id: string | number) -> (),
+    -- Minimizes (or, with false, brings back) a window.
+    minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> (),
 }
 
 -- @genoma/niri: niri's own model, with niri's numeric ids.

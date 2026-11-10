@@ -6,6 +6,29 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/compositor` on any compositor: where no IPC Genoma knows is
+  found (niri, Hyprland, Umbriel), workspaces come from `ext-workspace-v1`
+  and windows from `wlr-foreign-toplevel-management`, and
+  `compositor.name` is `"wayland"`. `GENOMA_COMPOSITOR=wayland` asks for
+  the protocols anyway. Neither protocol places a window on a workspace:
+  there a window's `workspace` is nil and a workspace's `vacant` false.
+  Tried on niri 26.04, Hyprland 0.57 and Umbriel.
+- `compositor:minimize_window(id, minimized)` and `compositor.can_minimize`
+  (true only through the protocols; the compositor decides which windows
+  it minimizes: Umbriel only floating ones, niri and Hyprland none).
+  `compositor:focus_window` brings a minimized window back.
+- A window table has `output` (its own, or its workspace's) and
+  `minimized`.
+
+### Changed
+
+- Requiring `@genoma/compositor` no longer fails where no IPC is known: it
+  falls back on the protocols, and is empty where those are missing too.
+
 ## 0.1.8 — 2026-11-10
 
 ### Added

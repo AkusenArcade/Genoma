@@ -12,7 +12,7 @@
 -- when one of them changes.
 local g = require("@genoma")
 local clock = require("@genoma/clock")
--- niri, Hyprland or Umbriel, whichever runs: the same calls on each.
+-- niri, Hyprland, Umbriel or any other: the same calls on each.
 local compositor = require("@genoma/compositor")
 local vitals = require("@genoma/vitals")
 local power = require("@genoma/power")

@@ -33,10 +33,14 @@ Bioma's needs and will change between minor versions. Changes are listed in
 
 It runs on Wayland compositors with `wlr-layer-shell`. Blur behind surfaces
 needs `ext-background-effect-v1`, as niri 26.04 has it. Workspaces and
-windows come from the compositor's own IPC: `@genoma/compositor` reads niri,
-Hyprland (0.57, configured in Lua or hyprlang) and Umbriel, whichever it
-finds running. On other compositors the rest of the toolkit works, and
-requiring that service fails (`pcall` it to run anywhere).
+windows come from the compositor's own IPC where Genoma knows it:
+`@genoma/compositor` reads niri, Hyprland (0.57, configured in Lua or
+hyprlang) and Umbriel, whichever it finds running. Any other compositor is
+reached through the standard protocols, `ext-workspace-v1` and
+`wlr-foreign-toplevel-management` (`compositor.name` is then `"wayland"`):
+the same calls, plus minimizing, but no window is placed on a workspace.
+`GENOMA_COMPOSITOR=wayland` asks for the protocols even where an IPC is
+known.
 
 ## A first shell
 
@@ -53,8 +57,8 @@ error keeps the last good tree on screen and is logged.
 
 The other pieces of a desktop are examples too, each a page or two:
 [`launcher`](examples/launcher/shell.luau) (applications found and
-started), [`dock`](examples/dock/shell.luau) (pinned and running, on niri,
-Hyprland or Umbriel), [`notifications`](examples/notifications/shell.luau)
+started), [`dock`](examples/dock/shell.luau) (pinned and running, on any
+compositor), [`notifications`](examples/notifications/shell.luau)
 (a notification centre, Genoma serving the bus name),
 [`osd`](examples/osd/shell.luau) (volume, and `genoma ipc osd show`),
 [`lock`](examples/lock/shell.luau) (ext-session-lock and PAM, its own PAM
@@ -235,7 +239,7 @@ first use, and every field is a signal.
 | `tray` | StatusNotifierItem with DBusMenu |
 | `polkit` | a polkit authentication agent |
 | `idle`, `lock` | idle notification, session lock |
-| `compositor` | workspaces, windows, the focused one, and switching between them: niri, Hyprland or Umbriel |
+| `compositor` | workspaces, windows, the focused one, switching, closing and (through the protocols) minimizing: niri, Hyprland and Umbriel by their IPC, any other by `ext-workspace` and `wlr-foreign-toplevel-management` |
 | `niri` | the same from niri alone, with niri's numeric ids (niri IPC); kept for shells written against it |
 | `toplevels` | windows through `ext-foreign-toplevel-list` |
 | `clipboard` | every copy's types and text, a history of texts (secrets left out), set, save to a file, clear (`ext-data-control`) |

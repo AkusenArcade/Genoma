@@ -113,14 +113,19 @@ pub(crate) fn services() -> (Services, Streams) {
         }
         None => (None, None),
     };
-    let (compositor, compositor_stream) = match Compositor::connect() {
+    // The standard protocols where no IPC is known, or when asked for.
+    let wanted = std::env::var("GENOMA_COMPOSITOR").ok();
+    let (compositor, compositor_stream) = match wanted.as_deref().map_or_else(Compositor::connect, |w| match w {
+        "wayland" => Err(std::io::Error::other("the protocols asked for")),
+        _ => Compositor::connect(),
+    }) {
         Ok((c, stream)) => {
             log::info!("compositor: {}", c.name());
             (Some(Rc::new(c)), Some(stream))
         }
         Err(e) => {
-            log::warn!("compositor: {e}");
-            (None, None)
+            log::info!("compositor: {e}; the standard protocols instead");
+            (Some(Rc::new(Compositor::wayland())), None)
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
@@ -839,6 +844,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     WaylandSource::new(app.connection(), queue).insert(handle.clone()).expect("wayland source");
 
     let services_toplevels = services.toplevels.clone();
+    let services_compositor = services.compositor.clone();
     let services_idle = services.idle.clone();
     let services_lock = services.lock.clone();
     let services_clipboard = services.clipboard.clone();
@@ -848,6 +854,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
     // sources.
     if script.borrow().wants("toplevels") {
         app.start_toplevels(services_toplevels.clone());
+    }
+    if let Some(c) = services_compositor.filter(|c| c.name() == "wayland" && script.borrow().wants("compositor")) {
+        app.start_wm(c);
     }
     if script.borrow().wants("idle") {
         app.start_idle(services_idle.clone());
@@ -898,6 +907,10 @@ fn run(dir: PathBuf, entry: Option<String>) {
                             if script.borrow().wants("toplevels") {
                                 app.start_toplevels(sources.borrow().services.toplevels.clone());
                             }
+                            let compositor = sources.borrow().services.compositor.clone();
+                            if let Some(c) = compositor.filter(|c| c.name() == "wayland" && script.borrow().wants("compositor")) {
+                                app.start_wm(c);
+                            }
                             if script.borrow().wants("idle") {
                                 app.start_idle(sources.borrow().services.idle.clone());
                             }
@@ -925,6 +938,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
             // makes or takes down the lock surfaces.
             app.sync_lock();
             app.sync_clipboard();
+            app.sync_wm();
             if app.take_outputs_changed() {
                 match load(&script, app) {
                     Ok(()) => log::info!("outputs or areas changed: surfaces fitted"),
