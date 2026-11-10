@@ -201,6 +201,11 @@ pub struct Node {
     inhibit_shortcuts: bool,
     /// The session stays awake while this node is seen.
     inhibit_idle: bool,
+    /// An animated image: whether it plays, how far into it, and the
+    /// seconds its frame has left as last drawn.
+    playing: bool,
+    play_time: f32,
+    frame_left: f32,
     /// An image's colours: saturation, contrast, brightness, then a tint
     /// (`genoma_render::Image::filter`).
     filter: [f32; 8],
@@ -373,6 +378,9 @@ impl Node {
             catch: false,
             inhibit_shortcuts: false,
             inhibit_idle: false,
+            playing: true,
+            play_time: 0.0,
+            frame_left: f32::INFINITY,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
             reach: 1.0,
@@ -649,6 +657,8 @@ pub struct Scene {
     /// those that got there in the last frame, for `on_ready`.
     ready: std::collections::HashSet<NodeId>,
     newly_ready: Vec<NodeId>,
+    /// The animated images drawn last frame.
+    animated: Vec<NodeId>,
     /// Nodes whose laid-out size is reported, with the size last told
     /// (none before the first layout), and the changes since the last take,
     /// for `on_size`.
@@ -705,6 +715,7 @@ impl Scene {
             blur: Vec::new(),
             ready: Default::default(),
             newly_ready: Vec::new(),
+            animated: Vec::new(),
             sized: Default::default(),
             newly_sized: Vec::new(),
             highlight: None,
@@ -1632,6 +1643,7 @@ impl Scene {
             Prop::Catch => n.catch = take!(flag),
             Prop::InhibitShortcuts => n.inhibit_shortcuts = take!(flag),
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
+            Prop::Playing => n.playing = take!(flag),
             Prop::Saturation => n.filter[0] = take!(number).max(0.0),
             Prop::Contrast => n.filter[1] = take!(number).max(0.0),
             Prop::Brightness => n.filter[2] = take!(number).max(0.0),
@@ -1798,7 +1810,14 @@ impl Scene {
                     n.interactive = true;
                 }
             }
-            Prop::Src => n.src = Some(take!(text)),
+            Prop::Src => {
+                let src = take!(text);
+                // Another picture: an animation starts from its first frame.
+                if n.src.as_deref() != Some(src.as_str()) {
+                    n.play_time = 0.0;
+                }
+                n.src = Some(src);
+            }
             Prop::Values => {
                 n.values = take!(numbers);
                 n.values.truncate(1024);
@@ -2024,6 +2043,26 @@ impl Scene {
             motion.wake = Some(images::BEAT);
         }
 
+        // Animated images: each one's time runs while it plays and is seen,
+        // and the surface is drawn again when its frame changes, not before.
+        for node in self.animated.clone() {
+            if !self.seen(node) {
+                continue;
+            }
+            let Some(n) = self.tree.get_node_context_mut(node) else { continue };
+            if !n.playing || !n.frame_left.is_finite() {
+                continue;
+            }
+            n.play_time += dt;
+            n.frame_left -= dt;
+            let wait = if n.frame_left <= 0.0 {
+                self.dirty = true;
+                Duration::ZERO
+            } else {
+                Duration::from_secs_f32(n.frame_left)
+            };
+            motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
+        }
         let seen: Vec<bool> = self.movers.iter().map(|&m| self.seen(m)).collect();
         for (k, &node) in self.movers.iter().enumerate() {
             let Some(n) = self.tree.get_node_context_mut(node) else { continue };
@@ -2281,7 +2320,7 @@ impl Scene {
         let others = self.combined_shapes();
         self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2310,6 +2349,7 @@ impl Scene {
             out.list.push_rect(mark);
         }
         self.blur = out.blur;
+        self.animated = std::mem::take(&mut out.animated);
         for id in std::mem::take(&mut out.drawn_images) {
             if self.ready.insert(id) {
                 log::debug!("image {id:?} drawn for the first time");
@@ -2761,6 +2801,8 @@ struct Out<'a> {
     raised: bool,
     /// The images drawn this frame.
     drawn_images: Vec<NodeId>,
+    /// The animated ones among them.
+    animated: Vec<NodeId>,
     /// The surface, physical pixels: an image reaching past it is decoded
     /// only for what of it is on it.
     viewport: [f32; 2],
@@ -3683,8 +3725,12 @@ fn collect_node(
                 // decoded picture's own pixels. A spanned 3440 × 2520 was
                 // kept whole on both screens.
                 let crop = visible_part(at, [w, h], [dw, dh], out.viewport, out.transform == Rect::IDENTITY);
-                if let Some((key, data)) = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, crop) {
+                if let Some((key, data, left)) = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, crop, n.play_time) {
                     out.drawn_images.push(node);
+                    n.frame_left = left.unwrap_or(f32::INFINITY);
+                    if left.is_some() {
+                        out.animated.push(node);
+                    }
                     if let Some([cx, cy, cw, ch]) = crop {
                         let (sx, sy) = (w as f32 / dw as f32, h as f32 / dh as f32);
                         out.list.push_image(genoma_render::Image {

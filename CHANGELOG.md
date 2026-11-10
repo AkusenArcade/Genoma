@@ -74,6 +74,13 @@ changes what a shell sees.
 - The kit's slider knob, menu and dialog had asked for capsule shadows
   that were not drawn; they are now.
 
+- Animated images: `g.image` plays an animated GIF, WebP or PNG, every
+  frame decoded once (fitted, rounded and softened as a still is) and
+  looped in its own times; `playing = false` holds the frame it is on, an
+  unseen one waits, and the surface is drawn again only when a frame
+  changes. A new `src` starts from the first frame. At most 600 frames or
+  256 MB of them are kept.
+
 ### Changed
 
 - `shadow_blur` and `shadow_y` are animatable (texts as well).

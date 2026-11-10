@@ -102,6 +102,9 @@ return g.surface {
   shadow or glow outside it, inner shadow, an outline apart from the rim,
   linear/radial/conic gradients, radius, blur), and there are also `g.text`, `g.icon`,
   `g.image`, `g.shader` and particle emitters. `g.each` is a keyed list.
+  An image may be an animated GIF, WebP or PNG: it loops in its own frame
+  times while `playing` (true by default), and the surface is drawn again
+  only when the frame changes.
   An image takes `saturation`, `contrast`, `brightness` and `tint`, applied
   as it is drawn and animatable (a cover greyed while paused, a wallpaper
   dimmed and blurred behind a lock with `soften`).

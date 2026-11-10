@@ -167,6 +167,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `contrast` | number | yes | An image's contrast around mid grey: 1 as it is. |
 | `brightness` | number | yes | An image's brightness, a multiplier: 0.5 half as bright, 1 as it is. |
 | `tint` | colour | yes | An image shown in this colour's hue, its own light kept; the colour's alpha is how much ("#e0a35f80" half way). Transparent, the default, changes nothing. |
+| `playing` | boolean |  | An animated image (GIF, animated WebP, APNG) plays while true, the default, looping in its own frame times; false holds the frame it is on. Unseen, it waits. The surface is drawn again only when the frame changes. |
 | `soften` | number |  | An image blurred once, as it is decoded, by this radius in logical units: a backdrop behind niri's overview. Nothing is spent on it per frame; a decode smaller than the box blurs it further as it is drawn up. |
 | `raised` | boolean |  | Drawn after everything else on its surface, text included, with what lies under its shape erased first: a list a dropdown opened over the capsules beyond it. |
 | `cursor` | "default" \| "pointer" \| "crosshair" \| "text" \| "grab" \| "grabbing" \| "not-allowed" |  | The pointer's shape over this node and what it holds, unless a node inside names its own. |
