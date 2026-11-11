@@ -6,6 +6,17 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Fixed
+
+- `on_hover` is being within a node: over a child that takes the pointer,
+  its ancestors stay hovered and hear nothing; each is told when the
+  pointer leaves it. Before, entering a child told the parent the pointer
+  had left, so a container watching its own hover (Bioma's auto-hiding
+  membrane, holding out while a cell is hovered) let go as soon as the
+  pointer reached a button inside it.
+
 ## 0.1.9 — 2026-11-11
 
 ### Added

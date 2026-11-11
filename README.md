@@ -173,7 +173,9 @@ return g.surface {
 - **Input:** `on_click`, `on_wheel`, `on_drag`, `on_key`, `on_hover`,
   `on_fling` and others. The input region follows the nodes that take input.
   `on_wheel(dx, dy, steps)` is told whether the movement came in a wheel's
-  steps or a touchpad's distance.
+  steps or a touchpad's distance. `on_hover` means within: over a child,
+  the pointer is still over its parent, which hears nothing until the
+  pointer leaves it too.
 - **Popups inside a tree:** a `g.popup` written as a child of a node is
   taken out at load and becomes a surface of its own, anchored to that
   node (which is given an id if it has none): a menu is written inside the

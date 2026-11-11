@@ -1893,8 +1893,9 @@ impl Script {
                 }
                 return;
             }
-            // Hover stays with its own node: entering a child is not
-            // entering every ancestor again.
+            // Hover stays with its own node: the host tells each node the
+            // pointer enters or leaves, the ancestors of the one hit
+            // included, so it never climbs to a parent here.
             if matches!(
                 input,
                 Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_) | Input::Drop(_) | Input::DropHover(_)

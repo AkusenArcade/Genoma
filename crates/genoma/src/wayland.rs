@@ -212,7 +212,9 @@ struct Surface {
     idle_inhibitor: Option<ZwpIdleInhibitorV1>,
     /// Whether the surface last asked for the keyboard.
     keyboard: bool,
-    hovered: Option<NodeId>,
+    /// What the pointer is within: the node hit, then each ancestor, as
+    /// they were when it arrived (a node removed since keeps its place).
+    hovered: Vec<NodeId>,
     /// The button the keyboard's focus is on, if any.
     focused: Option<NodeId>,
     /// The node the press landed on, and where that node was then: a drag
@@ -305,7 +307,7 @@ impl Surface {
             inhibitor: None,
             idle_inhibitor: None,
             keyboard: false,
-            hovered: None,
+            hovered: Vec::new(),
             focused: None,
             pressed: None,
             pressed_at: (0.0, 0.0),
@@ -997,14 +999,14 @@ impl App {
         s.configured = false;
         s.frame_pending = false;
         s.pressed = None;
-        let hovered = s.hovered.take();
+        let hovered = std::mem::take(&mut s.hovered);
         let focused = s.focused.take();
         let id = s.id;
         if self.drag.is_some_and(|d| d.0 == i) {
             self.drag = None;
         }
         // What the pointer was over is left, as on a leave.
-        if let Some(node) = hovered {
+        for node in hovered {
             self.deliver(i, node, Input::Hover(false));
         }
         if let Some(node) = focused {
@@ -1153,13 +1155,13 @@ impl App {
         s.configured = false;
         s.frame_pending = false;
         s.pressed = None;
-        let hovered = s.hovered.take();
+        let hovered = std::mem::take(&mut s.hovered);
         let focused = s.focused.take();
         let id = s.id;
         if self.drag.is_some_and(|d| d.0 == i) {
             self.drag = None;
         }
-        if let Some(node) = hovered {
+        for node in hovered {
             self.deliver(i, node, Input::Hover(false));
         }
         if let Some(node) = focused {
@@ -2585,6 +2587,16 @@ fn rounded(region: &mut Vec<[i32; 4]>, x: i32, y: i32, w: i32, h: i32, r: i32) {
     }
 }
 
+/// A node and each of its ancestors, innermost first: what the pointer is
+/// within when it is over `node`.
+fn hover_chain(scene: &Scene, node: NodeId) -> Vec<NodeId> {
+    let mut chain = vec![node];
+    while let Some(up) = scene.parent(*chain.last().unwrap()) {
+        chain.push(up);
+    }
+    chain
+}
+
 /// Where a layer sits in the compositor's stacking, lowest first. An
 /// unknown name is Top, as the surface is made on it.
 fn layer_rank(layer: &str) -> u8 {
@@ -3221,14 +3233,20 @@ impl PointerHandler for App {
                 K::Leave { .. } => None,
                 _ => scene.borrow().hit_test(x, y),
             };
-            if hit != self.surfaces[i].hovered {
-                if let Some(old) = self.surfaces[i].hovered.take() {
-                    self.deliver(i, old, Input::Hover(false));
+            // Hover is being within a node: over a child, the pointer is
+            // still over each of its ancestors. Only the nodes it left are
+            // told so, innermost first, then those it entered, outermost
+            // first; a node it stays within hears nothing.
+            if hit != self.surfaces[i].hovered.first().copied() {
+                let now = hit.map_or_else(Vec::new, |n| hover_chain(&scene.borrow(), n));
+                let was = std::mem::take(&mut self.surfaces[i].hovered);
+                for old in was.iter().filter(|n| !now.contains(n)) {
+                    self.deliver(i, *old, Input::Hover(false));
                 }
-                if let Some(new) = hit {
-                    self.deliver(i, new, Input::Hover(true));
+                for new in now.iter().rev().filter(|n| !was.contains(n)) {
+                    self.deliver(i, *new, Input::Hover(true));
                 }
-                self.surfaces[i].hovered = hit;
+                self.surfaces[i].hovered = now;
             }
             if let K::Enter { serial } = event.kind {
                 self.cursor_serial = serial;
