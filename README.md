@@ -347,3 +347,11 @@ says what to change.
 ## Licence
 
 GPL-3.0-or-later. See `LICENSE`.
+
+That covers what is built on it too. A shell written for Genoma calls its
+API and requires its Luau library (`@genoma/kit`, which is part of
+Genoma), so it is a work based on Genoma: whoever distributes one does so
+under the GPL-3.0-or-later or a compatible licence, with its source.
+There is no exception for scripts. Bioma, the shell Genoma was made for,
+is GPL-3.0 as well. Running a shell of your own without distributing it
+asks nothing.
