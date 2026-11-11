@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`blur`](examples/blur/shell.luau),
+[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -136,6 +136,19 @@ return g.surface {
   `require("@genoma/kit/effects")` gives them as nodes with named
   parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
+- **Particles:** `g.emitter` throws particles at a `rate`, ballistic
+  (`speed`, `heading`, `spread`, `gravity`) or carried to a point
+  (`to_x`, `to_y`, along a curve with `bend_x`, `bend_y`). Each is worked
+  out on the GPU from its birth: `color_end` and `size_end` change it over
+  its life, `trail = 0.3` draws that many seconds of its path behind it,
+  and an emitter inside an emitter with `sub = true` bursts `burst`
+  particles where each of its parent's dies (fireworks). `attract = "id
+  pointer"` pulls them toward nodes' middles or the pointer
+  (`attraction`, negative pushes; `attraction_reach`), `collide = "id"`
+  bounces them off nodes' boxes (`bounce`): such an emitter's particles
+  are stepped by a compute pass instead, the others cost no buffer at
+  all. `icon` or `src` draws each as a picture tinted by its colour,
+  turning with `spin`. See `examples/particles`.
 - **Post-processing:** a `g.shader` child with `pass = true` is not drawn
   over its parent but run on it: the parent and its other children are
   drawn into a picture, and each pass, in the order written, draws it

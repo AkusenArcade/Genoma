@@ -22,9 +22,27 @@ changes what a shell sees.
 - Four built-in passes, `genoma:pixelate`, `genoma:chromatic`,
   `genoma:wave` and `genoma:glow` (a bloom), and `kit.effects.pixelate`,
   `chromatic`, `wave` and `glow`, which set `pass = true`.
+- Particles over their lives: `color_end` and `size_end`, toward which
+  each particle turns and grows or shrinks; `trail`, seconds of its path
+  drawn behind it, narrowing and fading.
+- Sub-emitters: a `g.emitter` inside an emitter with `sub = true` bursts
+  `burst` particles where each of its parent's dies, with its own motion,
+  colours, size and trail.
+- Forces and walls: `attract` names nodes (or `pointer`) whose middles
+  pull an emitter's particles, as hard as `attraction` (negative pushes)
+  and as far as `attraction_reach`; `collide` names nodes whose boxes they
+  bounce off, keeping `bounce` of their speed. Such an emitter's particles
+  are stepped by a compute pass on the GPU; the others stay worked out
+  from their age.
+- Sprites: an emitter with an `icon` or a `src` draws each particle as
+  that picture, tinted by its colour, turning at up to `spin` degrees a
+  second. `examples/particles` shows all of it.
 
 ### Fixed
 
+- An emitter whose first step was too short for a particle to be owed
+  asked for no frame and never started: it is alive while its `rate` is
+  above 0. Inside a node with `clip = true` it never did.
 - A picture drawn for a group (blurred, masked, blended, post-processed)
   is let go as soon as its surface no longer shows it. One that moves is a
   new picture every frame, and each was kept until about a thousand

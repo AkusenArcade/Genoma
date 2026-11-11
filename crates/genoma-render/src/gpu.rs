@@ -588,8 +588,17 @@ impl Gpu {
         images.upload(id, &self.device, &self.queue, [width as f32, height as f32], &list.images);
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
         shaders.upload(&self.device, &self.queue, [width as f32, height as f32], &list.shaders);
-        let particles = self.particles.get_or_insert_with(|| particles::Pipeline::new(&self.device, format));
+        // Sprites are kept as images are, and bound from there.
+        for e in &list.emitters {
+            if let Some(s) = &e.sprite {
+                images.ensure(&self.device, &self.queue, s.key, &s.pixels, s.width, s.height);
+            }
+        }
+        let particles = self.particles.get_or_insert_with(|| particles::Pipeline::new(&self.device, format, images.texture_layout()));
         particles.upload(&self.device, &self.queue, [width as f32, height as f32], &list.emitters);
+        // Simulated particles stepped to this frame's time before they are
+        // drawn.
+        particles.simulate(encoder);
         let clear = self.clear.get_or_insert_with(|| Clear::new(&self.device, format));
 
         let text = self.text.get_or_insert_with(|| Text::new(&self.device, &self.queue, format));
@@ -671,7 +680,7 @@ impl Gpu {
             rects.draw(&mut pass, from.rects as u32..to.rects as u32);
             images.draw(&mut pass, from.images..to.images);
             shaders.draw(&mut pass, from.shaders..to.shaders);
-            particles.draw(&mut pass, from.emitters..to.emitters);
+            particles.draw(&mut pass, from.emitters..to.emitters, images);
             if to.texts > from.texts {
                 let renderer = &text.renderers[used];
                 used += 1;

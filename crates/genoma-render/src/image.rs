@@ -377,6 +377,59 @@ impl Pipeline {
         }
     }
 
+    /// A texture for `key`, made from `pixels` (premultiplied RGBA, a row
+    /// after another) unless one is kept already, and marked as used now.
+    /// Whether there is one.
+    pub(crate) fn ensure(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, key: u64, pixels: &[u8], width: u32, height: u32) -> bool {
+        if !self.textures.contains_key(&key) {
+            if pixels.is_empty() {
+                return false;
+            }
+            let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("image"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                texture.as_image_copy(),
+                pixels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+                size,
+            );
+            let view = texture.create_view(&Default::default());
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("image"),
+                layout: &self.texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.textures.insert(key, (group, 0));
+            self.sizes.insert(key, u64::from(width) * u64::from(height) * 4);
+            RESIDENT.lock().unwrap().insert(key);
+        }
+        if let Some((_, used)) = self.textures.get_mut(&key) {
+            *used = self.uploads;
+        }
+        true
+    }
+
+    /// A kept texture's binding, or a white texel's.
+    pub(crate) fn bound(&self, key: Option<u64>) -> &wgpu::BindGroup {
+        key.and_then(|k| self.textures.get(&k)).map_or(&self.blank, |(g, _)| g)
+    }
+
+    pub(crate) fn texture_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.texture_layout
+    }
+
     pub(crate) fn upload(
         &mut self,
         id: SurfaceId,
@@ -410,46 +463,11 @@ impl Pipeline {
         }
         let mut quads = Vec::with_capacity(images.len());
         for image in images {
-            if !self.textures.contains_key(&image.key) {
-                // Sent by its key alone, its pixels let go on the CPU side,
-                // and no longer here: not drawn this once, and the scene
-                // decodes it again, as the key is no longer resident.
-                if image.pixels.is_empty() {
-                    continue;
-                }
-                let size = wgpu::Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 };
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("image"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                queue.write_texture(
-                    texture.as_image_copy(),
-                    &image.pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(image.width * 4),
-                        rows_per_image: Some(image.height),
-                    },
-                    size,
-                );
-                let view = texture.create_view(&Default::default());
-                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("image"),
-                    layout: &self.texture_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    ],
-                });
-                self.textures.insert(image.key, (group, 0));
-                self.sizes.insert(image.key, u64::from(image.width) * u64::from(image.height) * 4);
-                RESIDENT.lock().unwrap().insert(image.key);
+            // Sent by its key alone, its pixels let go on the CPU side, and
+            // no longer here: not drawn this once, and the scene decodes it
+            // again, as the key is no longer resident.
+            if !self.ensure(device, queue, image.key, &image.pixels, image.width, image.height) {
+                continue;
             }
             if let Some((_, used)) = self.textures.get_mut(&image.key) {
                 *used = self.uploads;

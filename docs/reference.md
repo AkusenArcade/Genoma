@@ -95,8 +95,8 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `pulse` | number |  | Beats a minute: the node swells and settles, then waits. 0 is still. |
 | `orbit` | number |  | Turns a second around its place. 0 is parked at twelve. |
 | `orbit_radius` | number |  | Radius of the orbit, logical units. |
-| `icon` | string |  | An icon's name in the icon directories, or a file's absolute path. |
-| `src` | string |  | An image's file: PNG, JPEG, WebP or SVG, an absolute path. Decoded off the frame; nothing is drawn until it is ready. A shader's WGSL file, read when set. |
+| `icon` | string |  | An icon's name in the icon directories, or a file's absolute path. On an emitter, what each particle is drawn as, in its colour. |
+| `src` | string |  | An image's file: PNG, JPEG, WebP or SVG, an absolute path. Decoded off the frame; nothing is drawn until it is ready. A shader's WGSL file, read when set. On an emitter, the picture each particle is drawn as, tinted by its colour. |
 | `values` | { number } |  | A shader's numbers, up to 1024: what its `value(i)` reads. |
 | `follow` | number |  | Seconds a shader's numbers take to ease most of the way to new values (an exponential's time constant); 0 is at once. |
 | `clock` | boolean |  | While true a shader's `shader.time` runs, a frame every refresh; it also runs while its numbers ease. Bind it to the value that moves it. |
@@ -148,6 +148,17 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `heading` | number |  | Degrees clockwise from up: where ballistic particles go. |
 | `gravity` | number |  | Logical units a second squared, downward. |
 | `particle_size` | number |  | A particle's diameter, logical units. |
+| `color_end` | colour |  | An emitter's particles turn from its `fill` to this colour over their lives. |
+| `size_end` | number |  | A particle's diameter at the end of its life, logical units: it grows or shrinks to it from `particle_size`. |
+| `trail` | number |  | Seconds of its path drawn behind each particle, narrowing and fading toward the tail: a spark's streak, a comet's tail. 0 (the default) draws dots. |
+| `sub` | boolean |  | An emitter inside an emitter that bursts where each of its parent's particles dies, `burst` particles from that point, ballistic, with its own speed, spread, heading, gravity, lifetime, colours, size and trail: fireworks, splashes. Its `rate` is not used. |
+| `burst` | number |  | A sub-emitter's particles at each death of its parent's (8 by default). |
+| `attract` | string |  | Ids of nodes, space-separated (at most 8), whose middles pull an emitter's particles as `attraction` says; `pointer` is the pointer. Its particles are then stepped on the GPU each frame rather than worked out from their age; ballistic ones only. |
+| `attraction` | number |  | How hard `attract`'s nodes pull, logical units a second squared (200 by default); negative pushes: a repulsor. |
+| `attraction_reach` | number |  | How far `attract`'s pull reaches, logical units (120 by default): whole near the node, nothing there. |
+| `collide` | string |  | Ids of nodes, space-separated (at most 8), whose boxes (rounded as drawn) an emitter's particles bounce off. Its particles are then stepped on the GPU; ballistic ones only. |
+| `bounce` | number |  | How much of their speed particles keep off a `collide` node, 0 (they slide along it) to 1 (0.5 by default). |
+| `spin` | number |  | An emitter whose particles are pictures (its `icon`, an icon drawn in each particle's colour, or its `src`, a picture tinted by it) turns each at up to this many degrees a second, either way, from an angle of its own: leaves, confetti. |
 | `rotate_x` | number | yes | Degrees about the horizontal axis through the pivot: a panel unfolding from its top edge. Applies to the subtree; text stays flat for now. |
 | `rotate_y` | number | yes | Degrees about the vertical axis through the pivot. |
 | `depth` | number | yes | Logical units toward the viewer (positive) or away (negative), through the perspective. |

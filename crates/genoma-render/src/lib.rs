@@ -25,7 +25,7 @@ use raw_window_handle::{
 mod blur;
 mod gpu;
 mod image;
-mod particles;
+pub mod particles;
 mod rect;
 pub mod shader;
 
@@ -632,6 +632,22 @@ impl DrawList {
             e.params.points[3] -= dy;
             e.params.bend[0] -= dx;
             e.params.bend[1] -= dy;
+            // A sub-emitter's parent's points and bend, the same way.
+            let [points, _, _, bend] = &mut e.params.parent;
+            points[0] -= dx;
+            points[1] -= dy;
+            points[2] -= dx;
+            points[3] -= dy;
+            bend[0] -= dx;
+            bend[1] -= dy;
+            // Its forces and walls, the same way.
+            for f in &mut e.params.forces {
+                f[0] -= dx;
+                f[1] -= dy;
+            }
+            for w in e.params.walls.iter_mut().step_by(2) {
+                clip(w);
+            }
             clip(&mut e.params.clip);
         }
         for t in &mut self.texts {
@@ -893,7 +909,8 @@ mod tests {
         for (name, source) in [
             ("rect", crate::rect::SHADER),
             ("image", crate::image::SHADER),
-            ("particles", crate::particles::SHADER),
+            ("particles", &crate::particles::draw_source()),
+            ("particles step", &crate::particles::step_source()),
             ("blur", crate::blur::SOURCE),
         ] {
             let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));

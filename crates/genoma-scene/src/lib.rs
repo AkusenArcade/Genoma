@@ -539,6 +539,32 @@ struct Emit {
     target: bool,
     /// A control point is set: carried particles follow the curve.
     bend: bool,
+    /// The colour and the diameter at the end of a life, when they change
+    /// along it.
+    color_end: Option<[f32; 4]>,
+    size_end: Option<f32>,
+    /// Seconds of its path drawn behind each particle; 0 none.
+    trail: f32,
+    /// Born where its parent emitter's particles die, `burst` at each,
+    /// rather than at its own rate.
+    sub: bool,
+    burst: f32,
+    /// How long a slot is kept after its particle's life: the longest life
+    /// of the bursts its sub-emitters make there.
+    linger: f32,
+    /// The ids of the nodes its particles are pulled toward (`pointer`, the
+    /// pointer), how hard (logical units a second squared; negative pushes)
+    /// and how far the pull reaches (logical units).
+    attract: Option<String>,
+    attraction: f32,
+    reach: f32,
+    /// The ids of the nodes its particles bounce off, and how much of their
+    /// speed they keep, 0…1.
+    collide: Option<String>,
+    bounce: f32,
+    /// How fast a particle drawn as a picture (`icon`, `src`) turns at
+    /// most, degrees a second.
+    spin: f32,
     /// When each slot's particle was born, seconds since the scene's epoch;
     /// negative is an empty slot.
     births: Vec<f32>,
@@ -560,6 +586,18 @@ impl Default for Emit {
             size: 3.0,
             target: false,
             bend: false,
+            color_end: None,
+            size_end: None,
+            trail: 0.0,
+            sub: false,
+            burst: 8.0,
+            linger: 0.0,
+            attract: None,
+            attraction: 200.0,
+            reach: 120.0,
+            collide: None,
+            bounce: 0.5,
+            spin: 0.0,
             births: Vec::new(),
             cursor: 0,
             owed: 0.0,
@@ -569,10 +607,16 @@ impl Default for Emit {
 }
 
 impl Emit {
-    /// Births owed since the last step, spread across it; whether any
-    /// particle is still alive at `now`.
+    /// Births owed since the last step, spread across it; whether it still
+    /// emits or any particle is alive at `now`.
     fn step(&mut self, now: f32, dt: f32) -> bool {
-        let wanted = ((self.rate * self.lifetime).ceil() as usize + 1).max(1);
+        // A sub-emitter's particles are its parent's to time.
+        if self.sub {
+            return false;
+        }
+        // A slot is not reused while what its sub-emitters burst there lives.
+        let kept = self.lifetime + self.linger;
+        let wanted = ((self.rate * kept).ceil() as usize + 1).max(1);
         if self.births.len() < wanted && self.rate > 0.0 {
             self.births.resize(wanted, -1.0);
         }
@@ -593,7 +637,10 @@ impl Emit {
         } else {
             self.owed = 0.0;
         }
-        self.births.iter().any(|&b| b >= 0.0 && now - b < self.lifetime)
+        // Alive while it emits, even before its first particle is owed: a
+        // first step too short for one asked for no frame and the emitter
+        // never started.
+        self.rate > 0.0 || self.births.iter().any(|&b| b >= 0.0 && now - b < kept)
     }
 }
 
@@ -1393,7 +1440,10 @@ impl Scene {
     fn combined_shapes(&self) -> std::collections::HashMap<String, [f32; 5]> {
         let mut wanted: Vec<String> = Vec::new();
         self.walk(self.root, &mut |_, n| {
-            for id in n.combine_with.as_deref().unwrap_or("").split_whitespace() {
+            // And the nodes an emitter's particles are pulled toward or
+            // bounce off.
+            let named = [n.combine_with.as_deref(), n.emit.attract.as_deref(), n.emit.collide.as_deref()];
+            for id in named.into_iter().flatten().flat_map(str::split_whitespace) {
                 if !wanted.iter().any(|w| w == id) {
                     wanted.push(id.to_owned());
                 }
@@ -1410,7 +1460,10 @@ impl Scene {
                 && !matches!(n.kind, Kind::Text | Kind::Path)
             {
                 let [x, y, w, h] = n.extent;
-                let radius = n.radius.unwrap_or(h / 2.0).min(w.min(h) / 2.0);
+                // A capsule is round at the ends unless told otherwise; any
+                // other node is square unless given a radius.
+                let round = if n.kind == Kind::Capsule { h / 2.0 } else { 0.0 };
+                let radius = n.radius.unwrap_or(round).min(w.min(h) / 2.0);
                 shapes.insert(id.clone(), [x, y, w, h, radius]);
             }
         });
@@ -1723,6 +1776,17 @@ impl Scene {
             Prop::Heading => n.emit.heading = take!(number),
             Prop::Gravity => n.emit.gravity = take!(number),
             Prop::ParticleSize => n.emit.size = take!(number).max(0.5),
+            Prop::ColorEnd => n.emit.color_end = Some(take!(colour)),
+            Prop::SizeEnd => n.emit.size_end = Some(take!(number).max(0.0)),
+            Prop::Trail => n.emit.trail = take!(number).max(0.0),
+            Prop::Sub => n.emit.sub = take!(flag),
+            Prop::Burst => n.emit.burst = take!(number).max(0.0).round(),
+            Prop::Attract => n.emit.attract = Some(take!(text)).filter(|t| !t.trim().is_empty()),
+            Prop::Attraction => n.emit.attraction = take!(number),
+            Prop::AttractionReach => n.emit.reach = take!(number).max(1.0),
+            Prop::Collide => n.emit.collide = Some(take!(text)).filter(|t| !t.trim().is_empty()),
+            Prop::Bounce => n.emit.bounce = take!(number).clamp(0.0, 1.0),
+            Prop::Spin => n.emit.spin = take!(number),
             Prop::RotateX => n.turn[0] = take!(number),
             Prop::RotateY => n.turn[1] = take!(number),
             Prop::Depth => n.turn[2] = take!(number),
@@ -2108,6 +2172,25 @@ impl Scene {
             motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
         }
         let seen: Vec<bool> = self.movers.iter().map(|&m| self.seen(m)).collect();
+        // An emitter keeps its slots, and its frames, while the bursts its
+        // sub-emitters make where its particles die still live; and keeps
+        // the pace of the fastest of them. The longest life, the top speed.
+        let lingers: Vec<(f32, f32)> = self
+            .movers
+            .iter()
+            .map(|&m| {
+                let mut linger = (0.0f32, 0.0f32);
+                if self.tree.get_node_context(m).is_some_and(|n| n.kind == Kind::Emitter) {
+                    for c in self.tree.children(m).unwrap_or_default() {
+                        if let Some(c) = self.tree.get_node_context(c).filter(|c| c.kind == Kind::Emitter && c.emit.sub && c.present) {
+                            linger.0 = linger.0.max(c.emit.lifetime);
+                            linger.1 = linger.1.max(c.emit.speed.abs() + c.emit.gravity.abs() * c.emit.lifetime);
+                        }
+                    }
+                }
+                linger
+            })
+            .collect();
         for (k, &node) in self.movers.iter().enumerate() {
             let Some(n) = self.tree.get_node_context_mut(node) else { continue };
             // Unseen, it neither moves nor asks for frames: its phase picks
@@ -2186,14 +2269,16 @@ impl Scene {
             if n.kind == Kind::Emitter {
                 // Alive while it emits, and after, until its last particle's
                 // life is over: then nothing runs.
+                n.emit.linger = lingers[k].0;
                 if n.emit.step(clock, dt.min(0.25)) {
                     let speed = if n.emit.target {
                         let (dx, dy) = (n.path[4] - n.path[0], n.path[5] - n.path[1]);
                         (dx * dx + dy * dy).sqrt() / n.emit.lifetime * 1.5
                     } else {
-                        n.emit.speed.abs() + n.emit.gravity.abs() * n.emit.lifetime
+                        let pull = if n.emit.attract.is_some() { n.emit.attraction.abs() } else { 0.0 };
+                        n.emit.speed.abs() + (n.emit.gravity.abs() + pull) * n.emit.lifetime
                     };
-                    pace(speed * scale);
+                    pace(speed.max(lingers[k].1) * scale);
                 }
             }
             if n.pulse > 0.0 {
@@ -2364,7 +2449,7 @@ impl Scene {
         let others = self.combined_shapes();
         self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, passes: None, viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, passes: None, emitted: std::collections::HashMap::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2852,10 +2937,17 @@ struct Out<'a> {
     /// While a node with pass children is gathered: the node, and its
     /// passes as they are met, in the picture's place.
     passes: Option<(NodeId, Vec<genoma_render::Shader>)>,
+    /// The emitters drawn so far, for their sub-emitters: their motion,
+    /// their births and the births' generation.
+    emitted: std::collections::HashMap<NodeId, Emitted>,
     /// The surface, physical pixels: an image reaching past it is decoded
     /// only for what of it is on it.
     viewport: [f32; 2],
 }
+
+/// An emitter as drawn, for its sub-emitters: its key, its motion, its
+/// births and their generation.
+type Emitted = (u64, genoma_render::EmitterParams, Arc<Vec<f32>>, u64);
 
 impl Out<'_> {
     fn fade_of(&self) -> [f32; 4] {
@@ -3529,6 +3621,8 @@ fn collect_node(
         n.extent = own;
         n.laid_frame = out.frame;
     }
+    // A sub-emitter reads its parent's particles.
+    let up = tree.parent(node);
     let Some(n) = tree.get_node_context_mut(node) else { return };
     if !n.present {
         return;
@@ -3981,32 +4075,95 @@ fn collect_node(
         }
         Kind::Emitter => {
             let e = &n.emit;
-            if !e.births.is_empty() {
-                let to = if e.target { [n.path[4], n.path[5]] } else { [0.0, 0.0] };
-                out.list.push_emitter(genoma_render::Emitter {
-                    key: n.uid,
-                    generation: e.generation,
-                    births: Arc::new(e.births.clone()),
-                    params: genoma_render::EmitterParams {
-                        points: [
-                            (origin[0] + n.path[0]) * scale,
-                            (origin[1] + n.path[1]) * scale,
-                            (origin[0] + to[0]) * scale,
-                            (origin[1] + to[1]) * scale,
-                        ],
-                        motion: [out.now, e.lifetime, e.speed * scale, e.spread.to_radians()],
-                        shape: [e.heading.to_radians(), e.gravity * scale, e.size * scale, if e.target { 1.0 } else { 0.0 }],
-                        color: fade(n.fill),
-                        clip: out.clip,
-                        viewport: [0.0; 4],
-                        bend: if e.bend {
-                            [(origin[0] + n.path[2]) * scale, (origin[1] + n.path[3]) * scale, 1.0, 0.0]
-                        } else {
-                            [0.0; 4]
-                        },
-                        transform: out.transform,
-                    },
-                });
+            let to = if e.target { [n.path[4], n.path[5]] } else { [0.0, 0.0] };
+            let mut params = genoma_render::EmitterParams {
+                points: [
+                    (origin[0] + n.path[0]) * scale,
+                    (origin[1] + n.path[1]) * scale,
+                    (origin[0] + to[0]) * scale,
+                    (origin[1] + to[1]) * scale,
+                ],
+                motion: [out.now, e.lifetime, e.speed * scale, e.spread.to_radians()],
+                shape: [e.heading.to_radians(), e.gravity * scale, e.size * scale, if e.target { 1.0 } else { 0.0 }],
+                color: fade(n.fill),
+                clip: out.clip,
+                viewport: [0.0; 4],
+                bend: if e.bend {
+                    [(origin[0] + n.path[2]) * scale, (origin[1] + n.path[3]) * scale, 1.0, 0.0]
+                } else {
+                    [0.0; 4]
+                },
+                color_end: e.color_end.map_or([0.0, 0.0, 0.0, -1.0], fade),
+                life: [e.size_end.unwrap_or(e.size) * scale, e.trail, 0.0, e.bounce],
+                parent: [[0.0; 4]; 4],
+                sim: [0.0; 4],
+                forces: [[0.0; 4]; genoma_render::particles::FORCES],
+                walls: [[0.0; 4]; genoma_render::particles::WALLS * 2],
+                look: [0.0, e.spin.to_radians(), 0.0, 0.0],
+                transform: out.transform,
+            };
+            // Each particle drawn as a picture, tinted by its colour: an
+            // icon drawn white, or a picture, at the largest it is drawn.
+            let pixels = (e.size.max(e.size_end.unwrap_or(0.0)) * 1.3 * scale).ceil().clamp(1.0, 256.0) as u32;
+            let sprite = if let Some(icon) = &n.icon {
+                out.icons.raster(icon, [1.0; 4], None, pixels).map(|(key, pixels_)| (key, pixels_, pixels, pixels))
+            } else if let Some(src) = &n.src {
+                out.images.get_part(src, pixels, pixels, images::Fit::Contain, 0.0, 0.0, None, 0.0).map(|(key, data, _)| (key, data, pixels, pixels))
+            } else {
+                None
+            };
+            let sprite = sprite.map(|(key, pixels, width, height)| genoma_render::particles::Sprite { key, pixels, width, height });
+            if sprite.is_some() {
+                params.look[0] = 1.0;
+            }
+            // Pulled or bounced, its particles are stepped rather than worked
+            // out from their age: ballistic ones only, a carried one keeps to
+            // its path.
+            if !e.target {
+                let mut forces = 0;
+                for id in e.attract.as_deref().unwrap_or("").split_whitespace().take(genoma_render::particles::FORCES) {
+                    let at = if id == "pointer" {
+                        out.pointer.map(|(x, y, _)| [x, y])
+                    } else {
+                        out.others.get(id).map(|[x, y, w, h, _]| [x + w / 2.0, y + h / 2.0])
+                    };
+                    if let Some([x, y]) = at {
+                        params.forces[forces] = [x * scale, y * scale, e.attraction * scale, e.reach * scale];
+                        forces += 1;
+                    }
+                }
+                let mut walls = 0;
+                for id in e.collide.as_deref().unwrap_or("").split_whitespace().take(genoma_render::particles::WALLS) {
+                    if let Some(&[x, y, w, h, r]) = out.others.get(id) {
+                        params.walls[walls * 2] = [x * scale, y * scale, (x + w) * scale, (y + h) * scale];
+                        params.walls[walls * 2 + 1] = [r * scale, 0.0, 0.0, 0.0];
+                        walls += 1;
+                    }
+                }
+                // Named, even when none is found yet: the same particles
+                // whether a node is there or not.
+                if e.attract.is_some() || e.collide.is_some() {
+                    params.sim = [1.0, 0.0, forces as f32, walls as f32];
+                }
+            }
+            if e.sub {
+                // Bursts where the parent's particles die: its births, and
+                // its motion to find where.
+                let parent = up.and_then(|u| out.emitted.get(&u));
+                if let Some((uid, p, births, generation)) = parent.filter(|_| e.burst > 0.0) {
+                    params.life[2] = e.burst;
+                    params.parent = [p.points, p.motion, p.shape, p.bend];
+                    // Ballistic from where each dies, whatever it was; read
+                    // from the parent's steps when it is stepped.
+                    params.shape[3] = 0.0;
+                    params.sim[1] = p.sim[0];
+                    let parent = Some(*uid);
+                    out.list.push_emitter(genoma_render::Emitter { key: n.uid, generation: *generation, births: births.clone(), params, parent, sprite });
+                }
+            } else if !e.births.is_empty() {
+                let births = Arc::new(e.births.clone());
+                out.emitted.insert(node, (n.uid, params, births.clone(), e.generation));
+                out.list.push_emitter(genoma_render::Emitter { key: n.uid, generation: e.generation, births, params, parent: None, sprite });
             }
         }
         Kind::Shader => {
@@ -4847,6 +5004,83 @@ mod tests {
         assert_eq!(scene.draw_list(1.0).groups[0].key, group.key);
         scene.set(passes[1], Prop::Values, Value::Numbers(vec![0.5]), None).unwrap();
         assert_ne!(scene.draw_list(1.0).groups[0].key, group.key);
+    }
+
+    #[test]
+    fn a_sub_emitter_bursts_where_its_parents_particles_die() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let rocket = scene.create(Kind::Emitter, Role::None);
+        let sparks = scene.create(Kind::Emitter, Role::None);
+        scene.append(root, rocket);
+        scene.append(rocket, sparks);
+        for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 40.0), (Prop::Rate, 10.0), (Prop::Lifetime, 1.0), (Prop::Trail, 0.2)] {
+            scene.set(rocket, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(rocket, Prop::ColorEnd, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        scene.set(sparks, Prop::Sub, Value::Bool(true), None).unwrap();
+        scene.set(sparks, Prop::Burst, Value::Number(6.0), None).unwrap();
+        scene.set(sparks, Prop::Lifetime, Value::Number(2.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let start = Instant::now();
+        scene.draw_list(1.0);
+        for i in 1..=10 {
+            scene.advance(start + Duration::from_millis(50 * i), 1.0);
+        }
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.emitters.len(), 2, "the rocket, then its sparks");
+        let (rocket, sparks) = (&list.emitters[0], &list.emitters[1]);
+        assert!(Arc::ptr_eq(&rocket.births, &sparks.births), "the sparks read the rocket's births");
+        assert_eq!(sparks.generation, rocket.generation);
+        assert_eq!(sparks.params.life[2], 6.0);
+        assert_eq!(sparks.params.parent[1], rocket.params.motion, "where a rocket dies is its motion's to say");
+        assert_eq!(rocket.params.color_end, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(rocket.params.life[1], 0.2, "its trail");
+        assert_eq!(sparks.params.color_end[3], -1.0, "no end colour: its fill throughout");
+        // Slots are kept while the sparks born there live: a second of the
+        // rocket's life and two of theirs, at ten a second.
+        assert!(rocket.births.len() >= 31, "{} slots", rocket.births.len());
+    }
+
+    #[test]
+    fn named_forces_and_walls_make_an_emitter_stepped() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let core = scene.create(Kind::Capsule, Role::None);
+        let shelf = scene.create(Kind::Box, Role::None);
+        let rain = scene.create(Kind::Emitter, Role::None);
+        for n in [core, shelf, rain] {
+            scene.append(root, n);
+        }
+        scene.set_id(core, Some("core".into()));
+        scene.set_id(shelf, Some("shelf".into()));
+        for (n, w, h) in [(core, 20.0, 10.0), (shelf, 60.0, 10.0), (rain, 40.0, 40.0)] {
+            scene.set(n, Prop::Width, Value::Number(w), None).unwrap();
+            scene.set(n, Prop::Height, Value::Number(h), None).unwrap();
+        }
+        scene.set(rain, Prop::Rate, Value::Number(10.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let start = Instant::now();
+        scene.draw_list(2.0);
+        scene.advance(start + Duration::from_millis(300), 2.0);
+        let plain = scene.draw_list(2.0);
+        assert_eq!(plain.emitters[0].params.sim[0], 0.0, "nothing named: worked out from its age");
+        scene.set(rain, Prop::Attract, Value::Text("core pointer nowhere".into()), None).unwrap();
+        scene.set(rain, Prop::Attraction, Value::Number(-50.0), None).unwrap();
+        scene.set(rain, Prop::Collide, Value::Text("shelf".into()), None).unwrap();
+        scene.draw_list(2.0);
+        let list = scene.draw_list(2.0);
+        let p = list.emitters[0].params;
+        assert_eq!(p.sim[0], 1.0, "stepped");
+        assert_eq!(p.sim[2], 1.0, "the core only: no pointer over it, no node called nowhere");
+        assert_eq!(p.sim[3], 1.0);
+        // The core's middle, at scale 2; its push, at scale 2 as well.
+        assert_eq!([p.forces[0][0], p.forces[0][1], p.forces[0][2]], [20.0, 10.0, -100.0]);
+        // The shelf's box, square: a box is not rounded unless told.
+        assert_eq!(p.walls[0], [40.0, 0.0, 160.0, 20.0]);
+        assert_eq!(p.walls[1][0], 0.0);
     }
 
     #[test]
