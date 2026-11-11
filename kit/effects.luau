@@ -24,7 +24,18 @@
 --   glass     radius (corners), bend (how far the rim pulls what is under),
 --             aberration (the colours parting at the rim), frost, tint,
 --             rim (its top edge's light, 0…1); reads what is under it
----- Passes: post-processing for the node they are put in (`pass = true`,
+---- Simulations: stepped on the GPU while they show, each on a grid or a
+-- flock of its own (`compute`), drawn by its own shade:
+--
+--   reaction_diffusion  feed, kill, from, to (colours), steps (a second),
+--                       grid ({ w, h } cells); press to drop more
+--   waves               speed (0…0.5), keep (0…1), rain (drops a
+--                       second), drop (width), color, light, grid; the
+--                       pointer stirs it
+--   boids               count, size, color, speed, sight, apart, align,
+--                       gather, pull (the pointer's; negative scatters)
+--
+-- Passes: post-processing for the node they are put in (`pass = true`,
 -- set for you). The node and its other children are drawn into a picture,
 -- and each pass in turn draws it again over the node's box:
 --
@@ -57,7 +68,7 @@ end
 -- What a node takes, apart from an effect's own parameters.
 local NODE = {
     "id", "width", "height", "grow", "overlay", "attach", "offset_x", "offset_y", "opacity", "present",
-    "follow", "pass", "min_width", "max_width", "rotate_x", "rotate_y", "depth", "perspective", "pivot_x", "pivot_y",
+    "follow", "pass", "grid", "min_width", "max_width", "rotate_x", "rotate_y", "depth", "perspective", "pivot_x", "pivot_y",
 }
 
 local function effect(name: string, t: { [any]: any }, moving: { string }, values: () -> { number }): any
@@ -156,6 +167,41 @@ function M.glow(t: { [any]: any }): any
     return pass("glow", t, {}, function()
         return { read(t.radius) or 12, read(t.strength) or 1, read(t.threshold) or 0.5 }
     end)
+end
+
+-- A simulation: the clock runs (and with it the steps) while it shows.
+local function simulation(name: string, t: { [any]: any }, values: () -> { number }): any
+    local node = effect(name, t, {}, values)
+    node.compute = "genoma:" .. name
+    node.src = nil
+    node.clock = true
+    node.steps = t.steps
+    return node
+end
+
+function M.reaction_diffusion(t: { [any]: any }): any
+    return simulation("reaction-diffusion", t, function()
+        local r1, g1, b1, a1 = rgba(read(t.from) or "#0d0f14")
+        local r2, g2, b2, a2 = rgba(read(t.to) or "#9ece6a")
+        return { read(t.feed) or 0.055, read(t.kill) or 0.062, 1, 0.5, r1, g1, b1, a1, r2, g2, b2, a2 }
+    end)
+end
+
+function M.waves(t: { [any]: any }): any
+    return simulation("waves", t, function()
+        local r, gr, b, a = rgba(read(t.color) or "#1f4f7a")
+        return { read(t.speed) or 0.3, read(t.keep) or 0.995, read(t.rain) or 2, read(t.drop) or 3, r, gr, b, a, read(t.light) or 0.6 }
+    end)
+end
+
+function M.boids(t: { [any]: any }): any
+    local node = simulation("boids", t, function()
+        return { read(t.speed) or 60, read(t.sight) or 24, read(t.apart) or 0.6, read(t.align) or 1, read(t.gather) or 0.6, read(t.pull) or 0 }
+    end)
+    node.agents = t.count or 200
+    node.agent_size = t.size or 4
+    node.fill = t.color or "#c0caf5"
+    return node
 end
 
 return M

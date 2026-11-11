@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`blur`](examples/blur/shell.luau),
+[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -149,6 +149,16 @@ return g.surface {
   are stepped by a compute pass instead, the others cost no buffer at
   all. `icon` or `src` draws each as a picture tinted by its colour,
   turning with `spin`. See `examples/particles`.
+- **Simulations:** a `g.shader` with `compute = "file.wgsl"` steps a
+  simulation of its own on the GPU while its `clock` runs, `steps` a
+  second: `fn step(cell, me) -> vec4<f32>` works out every cell of a
+  `grid` from its neighbours a step before (`g_cell`), `fn agent(i, me)
+  -> Agent` every one of its `agents` from all the others (`g_agent`),
+  `sim.frame` 0 to set things up. Its `shade` reads `g_state(p)`,
+  `g_cell` and `g_agent`, and without a `src` the same file's `shade`
+  draws it; `agent_size` has Genoma draw the agents too.
+  `genoma:reaction-diffusion`, `genoma:waves` and `genoma:boids` come
+  built in, and as `kit.effects` nodes. See `examples/simulations`.
 - **Post-processing:** a `g.shader` child with `pass = true` is not drawn
   over its parent but run on it: the parent and its other children are
   drawn into a picture, and each pass, in the order written, draws it

@@ -53,13 +53,15 @@ pub struct Shader {
     /// and where its texture lies from the node's corner, logical units:
     /// x, y, width, height.
     pub backdrop: Option<(u64, [f32; 4])>,
+    /// What it simulates between frames (`compute`), read by its `shade`.
+    pub sim: Option<crate::sim::Sim>,
 }
 
 pub const VALUES: usize = 1024;
 
 /// Noise, distance fields and colour, in every shader after the prelude
 /// (`shaders/library.wgsl`), each name prefixed `g_`.
-const LIBRARY: &str = include_str!("shaders/library.wgsl");
+pub(crate) const LIBRARY: &str = include_str!("shaders/library.wgsl");
 
 /// The effects Genoma ships, by the name a `src` gives them after
 /// `genoma:`: `src = "genoma:ripple"`.
@@ -92,19 +94,26 @@ fn module_source(source: &str) -> String {
 /// and library before it: what is wrong, and where, its line counted in
 /// `source` itself (`line 12: …`).
 pub fn check(source: &str) -> Result<(), String> {
+    check_module(&module_source(source), source)
+}
+
+/// A whole module (`text`, which ends with or holds `source`) checked as
+/// the device will compile it; a mistake told at its line in `source`.
+pub(crate) fn check_module(text: &str, source: &str) -> Result<(), String> {
     use std::error::Error as _;
     use wgpu::naga;
-    let text = module_source(source);
-    let start = text.len() - source.len();
+    let text = text.to_owned();
+    let start = text.rfind(source).unwrap_or(0);
+    let end = start + source.len();
     let lines_before = text[..start].matches('\n').count() as u32;
     let place = |at: Option<naga::SourceLocation>| match at {
-        Some(l) if l.offset as usize >= start => format!("line {}: ", l.line_number - lines_before),
-        Some(_) => "in what Genoma puts before it: ".to_owned(),
+        Some(l) if (start..end).contains(&(l.offset as usize)) => format!("line {}: ", l.line_number - lines_before),
+        Some(_) => "in what Genoma puts round it: ".to_owned(),
         None => String::new(),
     };
     // Of the places an error names, the first in the source itself.
     let mine = |spans: Vec<naga::Span>| {
-        spans.into_iter().find(|s| s.to_range().is_some_and(|r| r.start >= start)).map(|s| s.location(&text))
+        spans.into_iter().find(|s| s.to_range().is_some_and(|r| (start..end).contains(&r.start))).map(|s| s.location(&text))
     };
     let module = naga::front::wgsl::parse_str(&text).map_err(|e| {
         let at = mine(e.labels().map(|(span, _)| span).collect()).or_else(|| e.location(&text));
@@ -141,6 +150,10 @@ struct Uniforms {
     _pad: f32,
     pointer: [f32; 4],
     backdrop: [f32; 4],
+    /// Its simulation: cells across and down, agents, how large they are
+    /// drawn (physical pixels); and their colour, straight.
+    sim: [f32; 4],
+    agent_color: [f32; 4],
     transform: [[f32; 4]; 4],
     values: [[f32; 4]; VALUES / 4],
 }
@@ -166,12 +179,66 @@ struct Shader {
     // What is under it: x, y, width, height from the node's corner, logical
     // units; a width of 0 is nothing.
     backdrop: vec4<f32>,
+    // Its simulation (`compute`): cells across and down, agents, their
+    // size drawn; their colour.
+    sim: vec4<f32>,
+    agent_color: vec4<f32>,
     transform: mat4x4<f32>,
     values: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> shader: Shader;
 @group(1) @binding(0) var genoma_backdrop: texture_2d<f32>;
 @group(1) @binding(1) var genoma_backdrop_sampler: sampler;
+@group(2) @binding(0) var genoma_state: texture_2d<f32>;
+@group(2) @binding(1) var<storage, read> genoma_agents: array<vec4<f32>>;
+
+struct Agent {
+    at: vec2<f32>,
+    velocity: vec2<f32>,
+    data: vec4<f32>,
+};
+
+// A simulation's step numbers, there so that one file can hold both its
+// `shade` and its `step` or `agent`: read only in the compute pass, where
+// they are set; here they are 0.
+struct GenomaStep {
+    grid: vec2<i32>,
+    agents: i32,
+    frame: u32,
+    dt: f32,
+};
+var<private> sim: GenomaStep;
+
+// What its simulation holds now: its grid's size in cells; a cell,
+// wrapping round the edges; the grid at `p`, logical units from the node's
+// corner, blended between cells; the agents, and one of them.
+fn g_grid() -> vec2<i32> {
+    return vec2<i32>(shader.sim.xy);
+}
+
+fn g_cell(c: vec2<i32>) -> vec4<f32> {
+    let n = max(g_grid(), vec2<i32>(1));
+    return textureLoad(genoma_state, ((c % n) + n) % n, 0);
+}
+
+fn g_state(p: vec2<f32>) -> vec4<f32> {
+    let f = p / max(shader.size, vec2<f32>(1.0)) * vec2<f32>(max(g_grid(), vec2<i32>(1))) - 0.5;
+    let i = vec2<i32>(floor(f));
+    let t = fract(f);
+    let top = mix(g_cell(i), g_cell(i + vec2<i32>(1, 0)), t.x);
+    let bottom = mix(g_cell(i + vec2<i32>(0, 1)), g_cell(i + vec2<i32>(1, 1)), t.x);
+    return mix(top, bottom, t.y);
+}
+
+fn g_agents() -> i32 {
+    return i32(shader.sim.z);
+}
+
+fn g_agent(i: i32) -> Agent {
+    let j = u32(clamp(i, 0, max(g_agents() - 1, 0))) * 2u;
+    let a = genoma_agents[j];
+    return Agent(a.xy, a.zw, genoma_agents[j + 1u]);
+}
 
 // What the surface drew under the node at `p` (logical units from its
 // corner), premultiplied; transparent where there is nothing, or for a
@@ -251,7 +318,70 @@ pub(crate) struct Pipeline {
     sampler: wgpu::Sampler,
     /// A transparent texel, for a shader that reads nothing under it.
     nothing: wgpu::BindGroup,
+    /// What shader nodes simulate (`compute`), and each draw's: its key,
+    /// and the agents Genoma draws for it.
+    sims: crate::sim::Sims,
+    draw_sims: Vec<Option<(u64, u32)>>,
+    /// Agents drawn as dots stretched along their velocity.
+    agents: wgpu::RenderPipeline,
 }
+
+/// The agents' module, as compiled.
+pub(crate) fn agents_source() -> String {
+    format!("{PRELUDE}\n{AGENTS}")
+}
+
+/// Agents drawn by Genoma: a dot stretched along its velocity, twice as
+/// long as it is wide, in the node's agent colour, inside its clip.
+const AGENTS: &str = r#"
+fn shade(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.0); }
+
+struct AgentVaryings {
+    @builtin(position) position: vec4<f32>,
+    @location(0) unturned: vec2<f32>,
+    @location(1) local: vec2<f32>,
+    @location(2) @interpolate(flat) half: vec2<f32>,
+};
+
+@vertex
+fn genoma_agent_vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) i: u32) -> AgentVaryings {
+    let a = genoma_agents[i * 2u];
+    let size = shader.sim.w;
+    var along = vec2<f32>(1.0, 0.0);
+    let speed = length(a.zw);
+    if (speed > 1e-4) {
+        along = a.zw / speed;
+    }
+    let across = vec2<f32>(-along.y, along.x);
+    let half = vec2<f32>(size, size * 0.5);
+    let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u)) * 2.0 - 1.0;
+    let local = corner * (half + vec2<f32>(1.0));
+    let pixel = shader.origin + a.xy * shader.scale + along * local.x + across * local.y;
+    let t = vec4<f32>(pixel, 0.0, 1.0) * shader.transform;
+    let ndc = (t.xy / t.w) / shader.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    var out: AgentVaryings;
+    out.position = vec4<f32>(ndc * t.w, 0.0, t.w);
+    out.unturned = pixel;
+    out.local = local;
+    out.half = half;
+    return out;
+}
+
+@fragment
+fn genoma_agent_fs(in: AgentVaryings) -> @location(0) vec4<f32> {
+    let q = in.unturned;
+    let c = shader.clip;
+    if (q.x < c.x || q.y < c.y || q.x >= c.z || q.y >= c.w) {
+        discard;
+    }
+    // A capsule along x: a segment as long as it is longer than wide.
+    let reach = in.half.x - in.half.y;
+    let d = length(vec2<f32>(max(abs(in.local.x) - reach, 0.0), in.local.y));
+    let cover = clamp(in.half.y - d + 0.5, 0.0, 1.0) * shader.alpha;
+    let colour = shader.agent_color;
+    return vec4<f32>(colour.rgb * colour.a, colour.a) * cover;
+}
+"#;
 
 impl Pipeline {
     pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipeline {
@@ -308,10 +438,35 @@ impl Pipeline {
             view_formats: &[],
         });
         let nothing = Self::under_group(device, &under_layout, &sampler, &blank.create_view(&Default::default()));
+        let sims = crate::sim::Sims::new(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader"),
-            bind_group_layouts: &[Some(&group_layout), Some(&under_layout)],
+            bind_group_layouts: &[Some(&group_layout), Some(&under_layout), Some(&sims.shown_layout)],
             ..Default::default()
+        });
+        let agents_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shader agents"),
+            source: wgpu::ShaderSource::Wgsl(agents_source().into()),
+        });
+        let agents = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shader agents"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState { module: &agents_module, entry_point: Some("genoma_agent_vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &agents_module,
+                entry_point: Some("genoma_agent_fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let capacity = 4;
         let (uniforms, group) = Self::buffer(device, &group_layout, capacity);
@@ -331,6 +486,9 @@ impl Pipeline {
             under_layout,
             sampler,
             nothing,
+            sims,
+            draw_sims: Vec::new(),
+            agents,
         }
     }
 
@@ -453,6 +611,7 @@ impl Pipeline {
     pub(crate) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, viewport: [f32; 2], shaders: &[crate::Shader]) {
         self.draws.clear();
         self.backdrops.clear();
+        self.draw_sims.clear();
         self.uploads += 1;
         if self.uploads % 256 == 0 {
             let now = self.uploads;
@@ -480,6 +639,17 @@ impl Pipeline {
             for (j, v) in s.values.iter().take(VALUES).enumerate() {
                 values[j / 4][j % 4] = *v;
             }
+            // Its simulation made ready, and what its shader reads of it.
+            let (mut sim, mut agent_color) = ([0.0; 4], [0.0; 4]);
+            if let Some(m) = &s.sim {
+                self.sims.upload(device, queue, m, s.size, s.time, s.scale, s.pointer, &s.values);
+                sim = [m.grid[0] as f32, m.grid[1] as f32, m.agents as f32, m.agent_size];
+                agent_color = m.agent_color;
+                let drawn = if m.agent_size > 0.0 { m.agents } else { 0 };
+                self.draw_sims.push(Some((m.key, drawn)));
+            } else {
+                self.draw_sims.push(None);
+            }
             let u = Uniforms {
                 origin: s.origin,
                 size: s.size,
@@ -493,6 +663,8 @@ impl Pipeline {
                 _pad: 0.0,
                 pointer: s.pointer,
                 backdrop: s.backdrop.map_or([0.0; 4], |(_, b)| b),
+                sim,
+                agent_color,
                 transform: s.transform,
                 values,
             };
@@ -509,17 +681,35 @@ impl Pipeline {
         queue.write_buffer(&self.uniforms, 0, &bytes);
     }
 
+    /// The simulations of the shaders just uploaded take the steps they
+    /// are owed, before anything is drawn.
+    pub(crate) fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let keys: Vec<u64> = self.draw_sims.iter().flatten().map(|(k, _)| *k).collect();
+        if !keys.is_empty() {
+            self.sims.simulate(encoder, keys.into_iter());
+        }
+    }
+
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, only: std::ops::Range<usize>) {
         for (i, key) in self.draws.iter().enumerate() {
             if !only.contains(&i) {
                 continue;
             }
             let Some((Some(pipeline), _)) = self.pipelines.get(key) else { continue };
+            let sim = self.draw_sims.get(i).copied().flatten();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.group, &[(i as u64 * STRIDE) as u32]);
             let under = self.backdrops.get(i).copied().flatten().and_then(|k| self.under.get(&k)).map_or(&self.nothing, |(g, _)| g);
             pass.set_bind_group(1, under, &[]);
+            pass.set_bind_group(2, self.sims.shown(sim.map(|(k, _)| k)), &[]);
             pass.draw(0..4, 0..1);
+            // Its agents, over what it shaded.
+            if let Some((_, agents)) = sim
+                && agents > 0
+            {
+                pass.set_pipeline(&self.agents);
+                pass.draw(0..4, 0..agents);
+            }
         }
     }
 }

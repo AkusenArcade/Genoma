@@ -588,6 +588,8 @@ impl Gpu {
         images.upload(id, &self.device, &self.queue, [width as f32, height as f32], &list.images);
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
         shaders.upload(&self.device, &self.queue, [width as f32, height as f32], &list.shaders);
+        // Shader nodes' simulations step before anything is drawn.
+        shaders.simulate(encoder);
         // Sprites are kept as images are, and bound from there.
         for e in &list.emitters {
             if let Some(s) = &e.sprite {

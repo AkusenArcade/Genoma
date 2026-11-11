@@ -283,6 +283,21 @@ pub struct Node {
     follow: f32,
     clock: bool,
     time: f32,
+    /// What it simulates (`compute`): the WGSL and its key; whether that
+    /// file's own `shade` can draw the node, and why not; why the
+    /// simulation itself is not run.
+    compute: Option<(Arc<String>, u64)>,
+    compute_shades: Result<(), String>,
+    compute_error: Option<String>,
+    /// Its grid (cells across and down; unset, a cell every two logical
+    /// units), its agents, how large Genoma draws them (logical units),
+    /// steps a second, the steps taken and the part of one owed.
+    grid: Option<[u32; 2]>,
+    agents: u32,
+    agent_size: f32,
+    steps_rate: f32,
+    steps_taken: u64,
+    steps_owed: f32,
     /// Props set at least once: the first value is placed, never animated.
     seen: Vec<Prop>,
     /// A path's outline: SVG path data, or a polygon's corners; how its
@@ -443,6 +458,15 @@ impl Node {
             follow: 0.0,
             clock: false,
             time: 0.0,
+            compute: None,
+            compute_shades: Ok(()),
+            compute_error: None,
+            grid: None,
+            agents: 0,
+            agent_size: 0.0,
+            steps_rate: 60.0,
+            steps_taken: 0,
+            steps_owed: 0.0,
             seen: Vec::new(),
             outline: None,
             points: Vec::new(),
@@ -1392,7 +1416,8 @@ impl Scene {
         self.pointer = pointer;
         let mut reads = false;
         self.walk(self.root, &mut |_, n| {
-            reads |= n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"));
+            reads |= n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"))
+                || n.compute.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"));
         });
         if reads {
             self.dirty = true;
@@ -1918,6 +1943,61 @@ impl Scene {
                     n.interactive = true;
                 }
             }
+            Prop::Compute => {
+                let path = take!(text);
+                // As `src`: read when set, `genoma:name` one Genoma ships,
+                // checked before it goes to the device.
+                let read = match path.strip_prefix("genoma:") {
+                    Some(name) => genoma_render::sim::built_in(name)
+                        .map(str::to_owned)
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such built-in simulation")),
+                    None => std::fs::read_to_string(&path),
+                };
+                let file = std::path::Path::new(&path).file_name().map_or(path.clone(), |f| f.to_string_lossy().into_owned());
+                n.compute_error = None;
+                n.compute = match read {
+                    Ok(source) => {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(&("compute", &source), &mut h);
+                        let key = std::hash::Hasher::finish(&h);
+                        match genoma_render::sim::check(&source) {
+                            Ok(()) => {
+                                // Its own `shade`, for a node with no `src`.
+                                n.compute_shades = checked(key, &source).map_err(|e| format!("{file}: {e}"));
+                                Some((Arc::new(source), key))
+                            }
+                            Err(e) => {
+                                log::warn!("g.shader compute {path}: {e}");
+                                n.compute_error = Some(format!("{file}: {e}"));
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("g.shader compute {path}: {e}");
+                        n.compute_error = Some(format!("{file}: {e}"));
+                        None
+                    }
+                };
+                // Started afresh with another file.
+                n.steps_taken = 0;
+                n.steps_owed = 0.0;
+                if n.compute.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer")) {
+                    n.interactive = true;
+                }
+                mover = true;
+            }
+            Prop::Grid => {
+                let v = take!(numbers);
+                n.grid = match v.as_slice() {
+                    [w, h, ..] => Some([w.clamp(1.0, 2048.0) as u32, h.clamp(1.0, 2048.0) as u32]),
+                    [w] => Some([w.clamp(1.0, 2048.0) as u32; 2]),
+                    [] => None,
+                };
+            }
+            Prop::Agents => n.agents = take!(number).clamp(0.0, 65536.0) as u32,
+            Prop::AgentSize => n.agent_size = take!(number).max(0.0),
+            Prop::Steps => n.steps_rate = take!(number).clamp(0.0, 960.0),
             Prop::Src => {
                 let src = take!(text);
                 // Another picture: an animation starts from its first frame.
@@ -2228,6 +2308,13 @@ impl Scene {
                     // clock's; after a quiet spell neither leaps.
                     n.time += dt.min(if n.clock { 0.05 } else { 0.1 });
                     self.dirty = true;
+                }
+                // Its simulation steps while its clock runs, at its rate.
+                if n.clock && n.compute.is_some() {
+                    n.steps_owed += n.steps_rate * dt.min(0.05);
+                    let whole = n.steps_owed.floor();
+                    n.steps_owed -= whole;
+                    n.steps_taken += whole as u64;
                 }
                 if n.clock {
                     motion.moving = true;
@@ -4167,10 +4254,33 @@ fn collect_node(
             }
         }
         Kind::Shader => {
-            if let Some(said) = &n.shader_error {
+            // Shaded by its `src`, or by its simulation's own `shade`.
+            let shaded = n.shader.clone().or_else(|| n.compute.clone().filter(|_| n.compute_shades.is_ok()));
+            let said = n.shader_error.clone().or_else(|| n.compute_error.clone()).or_else(|| match (&n.shader, &n.compute_shades) {
+                (None, Err(e)) if n.compute.is_some() => Some(e.clone()),
+                _ => None,
+            });
+            if let Some(said) = &said {
                 shader_error(fonts, said, [origin[0] * scale, origin[1] * scale], [layout.size.width * scale, layout.size.height * scale], scale, out);
             }
-            if let Some((source, key)) = n.shader.clone() {
+            let sim = n.compute.as_ref().map(|(source, source_key)| {
+                let grid = n.grid.unwrap_or([
+                    (layout.size.width / 2.0).round().max(1.0) as u32,
+                    (layout.size.height / 2.0).round().max(1.0) as u32,
+                ]);
+                genoma_render::sim::Sim {
+                    key: n.uid,
+                    source: source.clone(),
+                    source_key: *source_key,
+                    grid: if source.contains("fn step(") { grid } else { [0, 0] },
+                    agents: if source.contains("fn agent(") { n.agents } else { 0 },
+                    steps: n.steps_taken,
+                    dt: 1.0 / n.steps_rate.max(1.0),
+                    agent_size: n.agent_size * scale,
+                    agent_color: fade(n.fill),
+                }
+            });
+            if let Some((source, key)) = shaded {
                 out.list.push_shader(genoma_render::Shader {
                     source,
                     key,
@@ -4188,6 +4298,7 @@ fn collect_node(
                         None => [-1.0e6, -1.0e6, 0.0, 0.0],
                     },
                     backdrop: out.under.filter(|(n, ..)| *n == node).map(|(_, key, at)| (key, at)),
+                    sim,
                 });
             }
         }
@@ -5081,6 +5192,39 @@ mod tests {
         // The shelf's box, square: a box is not rounded unless told.
         assert_eq!(p.walls[0], [40.0, 0.0, 160.0, 20.0]);
         assert_eq!(p.walls[1][0], 0.0);
+    }
+
+    #[test]
+    fn a_simulation_steps_with_its_clock_and_shades_with_its_own_file() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let water = scene.create(Kind::Shader, Role::None);
+        scene.append(root, water);
+        for (p, v) in [(Prop::Width, 80.0), (Prop::Height, 40.0), (Prop::Steps, 100.0)] {
+            scene.set(water, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(water, Prop::Compute, Value::Text("genoma:waves".into()), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.shaders.len(), 1, "no src: the file's own shade draws it");
+        let sim = list.shaders[0].sim.clone().expect("a simulation");
+        assert_eq!((sim.grid, sim.agents, sim.steps), ([40, 20], 0, 0), "a cell every two units; no agents in a grid's file");
+        assert_eq!(list.shaders[0].key, sim.source_key);
+        // Stopped clock, no steps; running, a hundred a second.
+        let start = Instant::now();
+        scene.advance(start + Duration::from_millis(30), 1.0);
+        assert_eq!(scene.draw_list(1.0).shaders[0].sim.as_ref().unwrap().steps, 0);
+        scene.set(water, Prop::Clock, Value::Bool(true), None).unwrap();
+        for i in 1..=10 {
+            scene.advance(start + Duration::from_millis(30 + 20 * i), 1.0);
+        }
+        let steps = scene.draw_list(1.0).shaders[0].sim.as_ref().unwrap().steps;
+        assert!((18..=21).contains(&steps), "{steps} steps in 0.2 s");
+        // A file with a mistake is said over the node, and nothing runs.
+        scene.set(water, Prop::Compute, Value::Text("genoma:nothing".into()), None).unwrap();
+        let list = scene.draw_list(1.0);
+        assert!(list.shaders.is_empty() && !list.texts.is_empty());
     }
 
     #[test]

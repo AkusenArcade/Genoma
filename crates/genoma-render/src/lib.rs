@@ -28,6 +28,7 @@ mod image;
 pub mod particles;
 mod rect;
 pub mod shader;
+pub mod sim;
 
 pub use particles::{Emitter, EmitterParams};
 pub use rect::Rect;
@@ -911,6 +912,7 @@ mod tests {
             ("image", crate::image::SHADER),
             ("particles", &crate::particles::draw_source()),
             ("particles step", &crate::particles::step_source()),
+            ("shader agents", &crate::shader::agents_source()),
             ("blur", crate::blur::SOURCE),
         ] {
             let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));

@@ -34,6 +34,19 @@ changes what a shell sees.
   bounce off, keeping `bounce` of their speed. Such an emitter's particles
   are stepped by a compute pass on the GPU; the others stay worked out
   from their age.
+- Simulations of one's own: `compute` on a `g.shader` names WGSL with
+  `fn step(cell: vec2<i32>, me: vec4<f32>) -> vec4<f32>`, a grid's (each
+  cell from what the grid held a step before, `g_cell`), and/or
+  `fn agent(i: i32, me: Agent) -> Agent`, agents' (each from what all
+  were, `g_agent`). They are stepped by a compute pass while the node's
+  clock runs, `steps` a second (at most eight a frame), the state kept on
+  the GPU in two of each, swapped every step; `grid`, `agents`, and
+  `agent_size` for Genoma to draw the agents in the node's `fill`. The
+  node's `shade` reads `g_state(p)`, `g_cell` and `g_agent`; without a
+  `src`, the file's own `shade` draws it. Built in:
+  `genoma:reaction-diffusion`, `genoma:waves`, `genoma:boids`, also as
+  `kit.effects.reaction_diffusion`, `waves` and `boids`.
+  `examples/simulations` has them and a Game of Life written by hand.
 - Sprites: an emitter with an `icon` or a `src` draws each particle as
   that picture, tinted by its colour, turning at up to `spin` degrees a
   second. `examples/particles` shows all of it.
