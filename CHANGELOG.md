@@ -6,7 +6,7 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
-## Unreleased
+## 0.1.11 — 2026-11-12
 
 ### Added
 
