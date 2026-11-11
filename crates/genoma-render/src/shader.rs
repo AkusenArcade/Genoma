@@ -71,6 +71,10 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("grain", include_str!("shaders/grain.wgsl")),
     ("glass", include_str!("shaders/glass.wgsl")),
     ("chart", include_str!("shaders/chart.wgsl")),
+    ("pixelate", include_str!("shaders/pixelate.wgsl")),
+    ("chromatic", include_str!("shaders/chromatic.wgsl")),
+    ("wave", include_str!("shaders/wave.wgsl")),
+    ("glow", include_str!("shaders/glow.wgsl")),
 ];
 
 /// A built-in effect's WGSL, by its name without `genoma:`.
@@ -240,6 +244,9 @@ pub(crate) struct Pipeline {
     /// What is under a node, drawn: its texture bound for the shader, and
     /// when last used.
     under: HashMap<u64, (wgpu::BindGroup, u64)>,
+    /// The surface each of those was drawn for: let go with its frame
+    /// (`release`), as the images' are.
+    owners: HashMap<u64, crate::SurfaceId>,
     under_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// A transparent texel, for a shader that reads nothing under it.
@@ -319,6 +326,7 @@ impl Pipeline {
             capacity,
             draws: Vec::new(),
             backdrops: Vec::new(),
+            owners: HashMap::new(),
             under: HashMap::new(),
             under_layout,
             sampler,
@@ -343,9 +351,26 @@ impl Pipeline {
     }
 
     /// What is under a node, drawn into `view`, for the shaders that read it.
-    pub(crate) fn adopt_backdrop(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
+    pub(crate) fn adopt_backdrop(&mut self, id: crate::SurfaceId, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
         let group = Self::under_group(device, &self.under_layout, &self.sampler, view);
         self.under.insert(key, (group, self.uploads));
+        self.owners.insert(key, id);
+    }
+
+    /// What is under nodes, drawn for `id`, that its frame no longer reads.
+    pub(crate) fn release(&mut self, id: crate::SurfaceId, keep: &std::collections::HashSet<u64>) {
+        let gone: Vec<u64> = self.owners.iter().filter(|(k, s)| **s == id && !keep.contains(*k)).map(|(k, _)| *k).collect();
+        for key in gone {
+            self.owners.remove(&key);
+            self.under.remove(&key);
+        }
+    }
+
+    /// A picture adopted for one draw only (a post-processing pass's), let
+    /// go once it is drawn.
+    pub(crate) fn drop_backdrop(&mut self, key: u64) {
+        self.under.remove(&key);
+        self.owners.remove(&key);
     }
 
     fn buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
@@ -433,6 +458,8 @@ impl Pipeline {
             let now = self.uploads;
             self.pipelines.retain(|_, (_, used)| now - *used < 1024);
             self.under.retain(|_, (_, used)| now - *used < 1024);
+            let under = &self.under;
+            self.owners.retain(|k, _| under.contains_key(k));
         }
         if shaders.is_empty() {
             return;

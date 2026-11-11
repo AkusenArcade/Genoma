@@ -155,6 +155,8 @@ pub enum Prop {
     BlurRadius,
     BackdropBlur,
     Backdrop,
+    Pass,
+    Cache,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +336,8 @@ pub const PROPS: &[PropInfo] = &[
     p("blur_radius", Prop::BlurRadius, Ty::Number, true, "The node and everything in it drawn blurred, after depth has turned it: the Gaussian's spread, logical units, as CSS's blur(). 0 (the default) costs nothing; a radius at rest is blurred once and kept, a moving one each frame."),
     p("backdrop_blur", Prop::BackdropBlur, Ty::Number, true, "What this surface drew under the node, blurred this much (logical units, as CSS's backdrop-filter: blur()), shows through it inside its shape: frosted glass in the shell, whatever the compositor offers. A flat node's; 0 (the default) costs nothing, and a blur at rest is kept. Windows of other programs are the compositor's (`blur`)."),
     p("backdrop", Prop::Backdrop, Ty::Bool, false, "A shader that reads what its surface drew under it: g_backdrop(p) in its WGSL, a little beyond its edges too, for glass that bends what is behind it. Drawn again only when what is under changes."),
+    p("pass", Prop::Pass, Ty::Bool, false, "A shader drawn as its parent's post-processing rather than over it: the parent and its other children go into a picture, and each pass child in turn reads what is there with g_backdrop(p) and draws over its own box, the next pass reading what it left. Out of the flow, it covers its parent unless given a width and height; the picture reaches as far as the passes' boxes do. Drawn again only when what is in it or a pass's numbers, clock or pointer change."),
+    p("cache", Prop::Cache, Ty::Bool, false, "The node and what it holds drawn once into a picture and shown as that, drawn again only when something in it changes: a rich subtree beside something that moves costs one image a frame."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node; a row of a g.list it reaches is scrolled into view. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
     p("drag_files", Prop::DragFiles, Ty::Text, false, "Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line. A dock's application, a download, a picture."),

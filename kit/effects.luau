@@ -24,7 +24,16 @@
 --   glass     radius (corners), bend (how far the rim pulls what is under),
 --             aberration (the colours parting at the rim), frost, tint,
 --             rim (its top edge's light, 0…1); reads what is under it
+---- Passes: post-processing for the node they are put in (`pass = true`,
+-- set for you). The node and its other children are drawn into a picture,
+-- and each pass in turn draws it again over the node's box:
 --
+--   pixelate  size (a cell's side)
+--   chromatic offset (how far red and blue part at a corner)
+--   wave      amplitude, wavelength, speed (waves a second)
+--   glow      radius (how far light spreads), strength, threshold (0…1)
+--
+
 -- Each source is also there for a g.shader of one's own to start from; and
 -- every g.shader has the g_ library (noise, distance fields, colour) the
 -- README lists.
@@ -48,7 +57,7 @@ end
 -- What a node takes, apart from an effect's own parameters.
 local NODE = {
     "id", "width", "height", "grow", "overlay", "attach", "offset_x", "offset_y", "opacity", "present",
-    "follow", "min_width", "max_width", "rotate_x", "rotate_y", "depth", "perspective", "pivot_x", "pivot_y",
+    "follow", "pass", "min_width", "max_width", "rotate_x", "rotate_y", "depth", "perspective", "pivot_x", "pivot_y",
 }
 
 local function effect(name: string, t: { [any]: any }, moving: { string }, values: () -> { number }): any
@@ -115,6 +124,37 @@ end
 function M.grain(t: { [any]: any }): any
     return effect("grain", t, { "rate" }, function()
         return { read(t.amount) or 0.06, read(t.size) or 1, read(t.rate) or 0 }
+    end)
+end
+
+-- A pass: the effect put on the node it is in rather than drawn over it.
+local function pass(name: string, t: { [any]: any }, moving: { string }, values: () -> { number }): any
+    local copy = table.clone(t)
+    copy.pass = true
+    return effect(name, copy, moving, values)
+end
+
+function M.pixelate(t: { [any]: any }): any
+    return pass("pixelate", t, {}, function()
+        return { read(t.size) or 6 }
+    end)
+end
+
+function M.chromatic(t: { [any]: any }): any
+    return pass("chromatic", t, {}, function()
+        return { read(t.offset) or 3 }
+    end)
+end
+
+function M.wave(t: { [any]: any }): any
+    return pass("wave", t, { "speed" }, function()
+        return { read(t.amplitude) or 4, read(t.wavelength) or 60, read(t.speed) or 0 }
+    end)
+end
+
+function M.glow(t: { [any]: any }): any
+    return pass("glow", t, {}, function()
+        return { read(t.radius) or 12, read(t.strength) or 1, read(t.threshold) or 0.5 }
     end)
 end
 

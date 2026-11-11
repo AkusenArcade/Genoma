@@ -149,6 +149,11 @@ pub(crate) struct Pipeline {
     /// surfaces, lost its picture, and showed black while it was decoded
     /// again whenever anything made it draw (a settings page, a new picture).
     shown: HashMap<SurfaceId, Vec<u64>>,
+    /// Pictures drawn on the GPU for a surface's groups (blurred, masked,
+    /// post-processed), by key: the surface. One that moves is a new key
+    /// each frame, so each is let go as soon as its surface stops showing
+    /// it (`release`) instead of waiting out a thousand uploads.
+    adopted: HashMap<u64, SurfaceId>,
     quads: wgpu::Buffer,
     capacity: usize,
     /// Each quad's texture, its mask's, and its blend.
@@ -306,6 +311,7 @@ impl Pipeline {
             sizes: HashMap::new(),
             uploads: 0,
             shown: HashMap::new(),
+            adopted: HashMap::new(),
             quads,
             capacity,
             draws: Vec::new(),
@@ -346,8 +352,9 @@ impl Pipeline {
 
     /// A texture drawn on the GPU (a blurred subtree), kept by `key` as an
     /// uploaded one is, and let go the same way.
-    pub(crate) fn adopt(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView, bytes: u64) {
+    pub(crate) fn adopt(&mut self, id: SurfaceId, device: &wgpu::Device, key: u64, view: &wgpu::TextureView, bytes: u64) {
         self.sizes.insert(key, bytes);
+        self.adopted.insert(key, id);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image"),
             layout: &self.texture_layout,
@@ -357,6 +364,17 @@ impl Pipeline {
             ],
         });
         self.textures.insert(key, (group, self.uploads));
+    }
+
+    /// The pictures drawn for `id`'s groups that its frame no longer
+    /// shows, let go.
+    pub(crate) fn release(&mut self, id: SurfaceId, keep: &std::collections::HashSet<u64>) {
+        let gone: Vec<u64> = self.adopted.iter().filter(|(k, s)| **s == id && !keep.contains(*k)).map(|(k, _)| *k).collect();
+        for key in gone {
+            self.adopted.remove(&key);
+            self.textures.remove(&key);
+            self.sizes.remove(&key);
+        }
     }
 
     pub(crate) fn upload(

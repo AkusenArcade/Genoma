@@ -67,7 +67,7 @@ pub(crate) struct Pipeline {
 
 /// A texture the blur reads or writes.
 pub(crate) struct Sheet {
-    _texture: wgpu::Texture,
+    pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub size: [u32; 2],
 }
@@ -81,11 +81,14 @@ impl Sheet {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        Sheet { _texture: texture, view, size: [size[0].max(1), size[1].max(1)] }
+        Sheet { texture, view, size: [size[0].max(1), size[1].max(1)] }
     }
 }
 

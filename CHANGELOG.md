@@ -6,6 +6,30 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- Post-processing: a `g.shader` child with `pass = true` takes its parent
+  and the parent's other children, drawn into a picture, and draws it
+  again over its own box, reading it with `g_backdrop(p)`. Passes run in
+  the order written, each reading what the last one left; a pass covers
+  its parent unless given a size. The picture is drawn again only when
+  what is in it, or a pass's numbers, clock or pointer, change.
+  `examples/passes`.
+- `cache = true`: a node and what it holds drawn once into a picture and
+  shown as that until something in it changes.
+- Four built-in passes, `genoma:pixelate`, `genoma:chromatic`,
+  `genoma:wave` and `genoma:glow` (a bloom), and `kit.effects.pixelate`,
+  `chromatic`, `wave` and `glow`, which set `pass = true`.
+
+### Fixed
+
+- A picture drawn for a group (blurred, masked, blended, post-processed)
+  is let go as soon as its surface no longer shows it. One that moves is a
+  new picture every frame, and each was kept until about a thousand
+  drawings later.
+
 ## 0.1.10 — 2026-11-11
 
 ### Fixed

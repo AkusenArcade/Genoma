@@ -179,6 +179,13 @@ pub struct Group {
     pub bounds: [f32; 4],
     /// The Gaussian's standard deviation, physical pixels.
     pub sigma: f32,
+    /// Post-processing, in order: each pass a shader node drawn over its own
+    /// box in the texture (origin and clip measured from the bounds'
+    /// corner), its `g_backdrop` reading what the passes before it left,
+    /// the subtree as drawn for the first. Outside a pass's box what was
+    /// there stays. The renderer names the texture read: a pass's
+    /// `backdrop` brings only where it lies from the pass's corner.
+    pub passes: Vec<Shader>,
 }
 
 impl Group {

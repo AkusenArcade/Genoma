@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`blur`](examples/blur/shell.luau),
+[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -129,11 +129,23 @@ return g.surface {
   antialiased edge) and colour (`g_rgba`, `g_premul`, `g_over`); see
   `crates/genoma-render/src/shaders/library.wgsl`. A shader with
   `backdrop = true` reads what its surface drew under it with
-  `g_backdrop(p)`, a little beyond its edges too. Seven effects come built
+  `g_backdrop(p)`, a little beyond its edges too. Eleven effects come built
   in, `src = "genoma:noise"` (`ripple`, `dissolve`, `vignette`, `grain`,
-  `glass`, a pane that bends what is under it at its rim, and `chart`), and `require("@genoma/kit/effects")` gives them as nodes with
-  named parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
+  `glass`, a pane that bends what is under it at its rim, `chart`, and the
+  passes `pixelate`, `chromatic`, `wave` and `glow`), and
+  `require("@genoma/kit/effects")` gives them as nodes with named
+  parameters. `GENOMA_SHADER=file.wgsl cargo test -p genoma-render
   shader_file` checks a shader without drawing it. See `examples/effects`.
+- **Post-processing:** a `g.shader` child with `pass = true` is not drawn
+  over its parent but run on it: the parent and its other children are
+  drawn into a picture, and each pass, in the order written, draws it
+  again over its own box, reading what the pass before it left with
+  `g_backdrop(p)` (what its `shade` returns there replaces what was).
+  A pass covers its parent unless given a width and height; a larger one
+  lets a glow reach past the parent's edges. The picture is kept while
+  what is in it and its passes' numbers, clock and pointer rest.
+  `cache = true` is the same picture with no pass: a rich subtree beside
+  something that moves costs one image a frame. See `examples/passes`.
 - **Masks:** a child with `mask = true` is not drawn but used as its
   parent's mask: the parent and its other children show only where the
   mask is opaque, as much as it is. A text over a picture with

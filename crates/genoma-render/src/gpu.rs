@@ -192,7 +192,21 @@ impl Gpu {
     pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
         let started = std::time::Instant::now();
         let counts = (list.rects.len(), list.images.len(), list.texts.len());
+        // What this frame shows of the pictures drawn for groups: the rest
+        // of this surface's are let go once it is drawn.
+        let keep: std::collections::HashSet<u64> = list
+            .images
+            .iter()
+            .flat_map(|i| std::iter::once(i.key).chain(i.mask))
+            .chain(list.groups.iter().map(|g| g.key))
+            .collect();
         self.draw_inner(id, width, height, list);
+        if let Some(images) = &mut self.images {
+            images.release(id, &keep);
+        }
+        if let Some(shaders) = &mut self.shaders {
+            shaders.release(id, &keep);
+        }
         let took = started.elapsed();
         log::trace!("render {} us", took.as_micros());
         let tally = self.tallies.entry(id).or_insert((0, Default::default(), Default::default(), std::time::Instant::now()));
@@ -489,14 +503,67 @@ impl Gpu {
             } else {
                 sheet
             };
+            let done = self.post_process(group, done, format);
             if let Some(images) = &mut self.images {
-                images.adopt(&self.device, group.key, &done.view, u64::from(size[0]) * u64::from(size[1]) * 4);
+                images.adopt(id, &self.device, group.key, &done.view, u64::from(size[0]) * u64::from(size[1]) * 4);
             }
             if let Some(shaders) = &mut self.shaders {
-                shaders.adopt_backdrop(&self.device, group.key, &done.view);
+                shaders.adopt_backdrop(id, &self.device, group.key, &done.view);
             }
             log::debug!("surface {id}: drew a group, {}×{} px, blurred over {:.1} px", size[0], size[1], group.sigma);
         }
+    }
+
+    /// `stage`, a group as drawn, through its passes in turn: each reads
+    /// what the one before left (its `g_backdrop`) and draws over its own
+    /// box in a copy of it, emptied first, so what a pass returns there
+    /// replaces what was; outside its box the picture goes on as it was.
+    fn post_process(&mut self, group: &crate::Group, mut stage: blur::Sheet, format: wgpu::TextureFormat) -> blur::Sheet {
+        if group.passes.is_empty() {
+            return stage;
+        }
+        let size = stage.size;
+        let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
+        let clear = self.clear.get_or_insert_with(|| Clear::new(&self.device, format));
+        for (i, pass) in group.passes.iter().enumerate() {
+            // The picture this pass reads, named only while it draws.
+            let reading = group.key ^ 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1);
+            shaders.adopt_backdrop(SurfaceId::MAX, &self.device, reading, &stage.view);
+            let mut drawn = pass.clone();
+            drawn.backdrop = Some((reading, pass.backdrop.map_or([0.0; 4], |(_, at)| at)));
+            let next = blur::Sheet::new(&self.device, format, size, "post-processing pass");
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_texture(
+                stage.texture.as_image_copy(),
+                next.texture.as_image_copy(),
+                wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            );
+            shaders.upload(&self.device, &self.queue, [size[0] as f32, size[1] as f32], std::slice::from_ref(&drawn));
+            // The pass's box, whole pixels, inside the texture.
+            let x0 = drawn.origin[0].floor().clamp(0.0, size[0] as f32) as u32;
+            let y0 = drawn.origin[1].floor().clamp(0.0, size[1] as f32) as u32;
+            let x1 = (drawn.origin[0] + drawn.size[0] * drawn.scale).ceil().clamp(0.0, size[0] as f32) as u32;
+            let y1 = (drawn.origin[1] + drawn.size[1] * drawn.scale).ceil().clamp(0.0, size[1] as f32) as u32;
+            if x1 > x0 && y1 > y0 {
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("post-processing pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &next.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                });
+                rp.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                clear.draw(&mut rp);
+                shaders.draw(&mut rp, 0..1);
+            }
+            self.queue.submit([encoder.finish()]);
+            shaders.drop_backdrop(reading);
+            stage = next;
+        }
+        stage
     }
 
     /// Draws `list` into `view`: the whole of it cleared first, or only

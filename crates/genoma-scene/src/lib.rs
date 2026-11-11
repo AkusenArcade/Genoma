@@ -211,6 +211,10 @@ pub struct Node {
     slice: Option<[f32; 4]>,
     /// Drawn as its parent's mask rather than as itself.
     mask: bool,
+    /// A shader drawn as its parent's post-processing (`pass`).
+    pass: bool,
+    /// Drawn into a picture of its own and kept (`cache`).
+    cache: bool,
     /// How it meets what is under: `genoma_render::Image::blend`.
     blend: u8,
     /// An image's colours: saturation, contrast, brightness, then a tint
@@ -390,6 +394,8 @@ impl Node {
             frame_left: f32::INFINITY,
             slice: None,
             mask: false,
+            pass: false,
+            cache: false,
             blend: 0,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
@@ -1655,6 +1661,14 @@ impl Scene {
             Prop::InhibitIdle => n.inhibit_idle = take!(flag),
             Prop::Playing => n.playing = take!(flag),
             Prop::Mask => n.mask = take!(flag),
+            Prop::Cache => n.cache = take!(flag),
+            Prop::Pass => {
+                // Out of the flow, as an overlay; without a size of its own it
+                // covers its parent (`place`).
+                n.pass = take!(flag);
+                style.position = if n.pass { taffy::Position::Absolute } else { taffy::Position::Relative };
+                restyle = true;
+            }
             Prop::Blend => {
                 n.blend = match take!(text).as_str() {
                     "multiply" => 1,
@@ -2350,7 +2364,7 @@ impl Scene {
         let others = self.combined_shapes();
         self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, passes: None, viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2835,6 +2849,9 @@ struct Out<'a> {
     animated: Vec<NodeId>,
     /// While a masked node is gathered: where its `mask` children draw.
     mask: Option<DrawList>,
+    /// While a node with pass children is gathered: the node, and its
+    /// passes as they are met, in the picture's place.
+    passes: Option<(NodeId, Vec<genoma_render::Shader>)>,
     /// The surface, physical pixels: an image reaching past it is decoded
     /// only for what of it is on it.
     viewport: [f32; 2],
@@ -2937,7 +2954,20 @@ fn rim_width(n: &Node, scale: f32) -> f32 {
 /// around it, a pixel larger or smaller than it asked for.
 fn place(tree: &TaffyTree<Node>, node: NodeId, parent: [f32; 4], parent_exact: [f32; 4], scale: f32) -> ([f32; 4], [f32; 4]) {
     let layout = *tree.layout(node).expect("laid out");
-    let size = [layout.size.width, layout.size.height];
+    let mut size = [layout.size.width, layout.size.height];
+    // A pass without a width or height of its own covers its parent along
+    // that axis, which taffy cannot say: an absolute box's insets are
+    // measured from the root.
+    if tree.get_node_context(node).is_some_and(|n| n.pass)
+        && let Ok(style) = tree.style(node)
+    {
+        if style.size.width.is_auto() {
+            size[0] = parent_exact[2];
+        }
+        if style.size.height.is_auto() {
+            size[1] = parent_exact[3];
+        }
+    }
     // An overlay is centred in its parent, whatever taffy reports for an
     // out-of-flow box.
     let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
@@ -3008,6 +3038,23 @@ fn collect(
     scale: f32,
     out: &mut Out,
 ) {
+    // A pass of the node being gathered: kept for its picture, not drawn
+    // here. What else it draws (its WGSL's mistake) is shown as it is.
+    if let Some((owner, _)) = &out.passes
+        && tree.parent(node) == Some(*owner)
+        && tree.get_node_context(node).is_some_and(|n| n.pass && n.kind == Kind::Shader)
+    {
+        let mut own = DrawList::default();
+        std::mem::swap(out.list, &mut own);
+        collect_node(tree, fonts, node, parent, parent_exact, 1.0, scale, out);
+        std::mem::swap(out.list, &mut own);
+        match own.shaders.first() {
+            Some(shader) => out.passes.as_mut().expect("checked above").1.push(shader.clone()),
+            None if !own.is_empty() => out.list.append(own),
+            None => {}
+        }
+        return;
+    }
     let raise = !out.raised && tree.get_node_context(node).is_some_and(|n| n.raised && n.present);
     if raise {
         std::mem::swap(out.list, &mut out.upper);
@@ -3110,13 +3157,13 @@ fn blended(mut own: DrawList, blend: u8, out: &mut Out) {
             (0, None)
         } else {
             let under_key = key(&under, 20);
-            out.list.groups.push(genoma_render::Group { key: under_key, list: under, bounds, sigma: 0.0 });
+            out.list.groups.push(genoma_render::Group { passes: Vec::new(), key: under_key, list: under, bounds, sigma: 0.0 });
             (blend, Some(under_key))
         }
     } else {
         (blend, None)
     };
-    out.list.groups.push(genoma_render::Group { key: own_key, list: own, bounds, sigma: 0.0 });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key: own_key, list: own, bounds, sigma: 0.0 });
     out.list.push_image(genoma_render::Image {
         key: own_key,
         pixels: Arc::new(Vec::new()),
@@ -3162,7 +3209,7 @@ fn under_for_shader(node: NodeId, rect: [f32; 4], scale: f32, out: &mut Out) -> 
         ("under", under.fingerprint(), area.map(f32::to_bits)).hash(&mut h);
         h.finish() | (1 << 63)
     };
-    out.list.groups.push(genoma_render::Group { key, list: under, bounds: area, sigma: 0.0 });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key, list: under, bounds: area, sigma: 0.0 });
     Some((node, key, [area[0] / scale - rect[0], area[1] / scale - rect[1], size[0] / scale, size[1] / scale]))
 }
 
@@ -3192,7 +3239,7 @@ fn backdrop(rect: [f32; 4], radius: f32, sigma: f32, out: &mut Out) {
         ("backdrop", under.fingerprint(), sigma.to_bits(), area.map(f32::to_bits)).hash(&mut h);
         h.finish() | (1 << 63)
     };
-    out.list.groups.push(genoma_render::Group { key, list: under, bounds: area, sigma });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key, list: under, bounds: area, sigma });
     out.list.push_image(genoma_render::Image {
         key,
         pixels: Arc::new(Vec::new()),
@@ -3235,12 +3282,117 @@ fn blurred_or_not(
     if radius > 0.0 {
         let mut own = DrawList::default();
         std::mem::swap(out.list, &mut own);
-        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        passed_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
         std::mem::swap(out.list, &mut own);
         blurred(own, radius * scale, out);
     } else {
-        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        passed_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out);
     }
+}
+
+/// A node and its subtree, drawn into a picture when it has passes to go
+/// through or asks to be kept (`cache`), or as they are.
+#[allow(clippy::too_many_arguments)]
+fn passed_or_not(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    parent_exact: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+) {
+    let grouped = tree.get_node_context(node).filter(|n| n.present).is_some_and(|n| {
+        n.cache
+            || tree
+                .children(node)
+                .unwrap_or_default()
+                .iter()
+                .any(|&c| tree.get_node_context(c).is_some_and(|c| c.present && c.pass && c.kind == Kind::Shader))
+    });
+    if !grouped {
+        collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        return;
+    }
+    let mut own = DrawList::default();
+    std::mem::swap(out.list, &mut own);
+    let saved = out.passes.replace((node, Vec::new()));
+    collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+    let passes = std::mem::replace(&mut out.passes, saved).map(|(_, p)| p).unwrap_or_default();
+    std::mem::swap(out.list, &mut own);
+    passed(own, passes, scale, out);
+}
+
+/// `own`, a subtree's list, drawn into a picture and put through `passes`
+/// (shader nodes as drawn on the surface) in turn. The picture covers what
+/// `own` paints and every pass's box, within the surface; it is keyed by
+/// what it holds and by each pass's source, numbers, clock and pointer, so
+/// one at rest is drawn once and kept.
+fn passed(mut own: DrawList, mut passes: Vec<genoma_render::Shader>, scale: f32, out: &mut Out) {
+    let mut area = own.paint_bounds();
+    for p in &passes {
+        let b = [p.origin[0], p.origin[1], p.origin[0] + p.size[0] * p.scale, p.origin[1] + p.size[1] * p.scale];
+        area = Some(match area {
+            Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+            None => b,
+        });
+    }
+    let Some([x0, y0, x1, y1]) = area else { return };
+    let bounds = [x0.max(0.0).floor(), y0.max(0.0).floor(), x1.min(out.viewport[0]).ceil(), y1.min(out.viewport[1]).ceil()];
+    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+        return;
+    }
+    // Groups inside it are drawn first, which its picture then shows.
+    out.list.groups.extend(std::mem::take(&mut own.groups));
+    let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
+    for p in &mut passes {
+        let corner = p.origin;
+        // In the picture, from its corner; the depth, clip and fade in
+        // force are the picture's, applied as it is shown.
+        p.origin = [corner[0] - bounds[0], corner[1] - bounds[1]];
+        p.clip = [0.0, 0.0, size[0], size[1]];
+        p.fade = [0.0; 4];
+        p.transform = Rect::IDENTITY;
+        p.alpha = 1.0;
+        p.backdrop = Some((0, [(bounds[0] - corner[0]) / scale, (bounds[1] - corner[1]) / scale, size[0] / scale, size[1] / scale]));
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ("passed", own.fingerprint(), bounds.map(f32::to_bits)).hash(&mut h);
+        for p in &passes {
+            p.key.hash(&mut h);
+            for v in p.origin.iter().chain(&p.size).chain(&p.values) {
+                v.to_bits().hash(&mut h);
+            }
+            // The pointer only for a pass that reads it: elsewhere it moves
+            // over the picture without drawing it again.
+            if p.source.contains("shader.pointer") {
+                p.pointer.map(f32::to_bits).hash(&mut h);
+            }
+            (p.scale.to_bits(), p.time.to_bits()).hash(&mut h);
+        }
+        h.finish() | (1 << 63)
+    };
+    out.list.groups.push(genoma_render::Group { passes, key, list: own, bounds, sigma: 0.0 });
+    out.list.push_image(genoma_render::Image {
+        key,
+        pixels: Arc::new(Vec::new()),
+        width: size[0] as u32,
+        height: size[1] as u32,
+        origin: [bounds[0], bounds[1]],
+        size,
+        uv: [0.0, 0.0, 1.0, 1.0],
+        radius: 0.0,
+        alpha: 1.0,
+        clip: out.clip,
+        fade: out.fade_of(),
+        transform: Rect::IDENTITY,
+        filter: genoma_render::Image::NO_FILTER,
+        mask: None,
+        blend: 0,
+    });
 }
 
 /// `own` shown only where `mask` is opaque: each drawn into a texture over
@@ -3268,8 +3420,8 @@ fn masked(mut own: DrawList, mut mask: DrawList, out: &mut Out) {
     };
     let (content_key, mask_key) = (key(&own, 1), key(&mask, 2));
     let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
-    out.list.groups.push(genoma_render::Group { key: content_key, list: own, bounds, sigma: 0.0 });
-    out.list.groups.push(genoma_render::Group { key: mask_key, list: mask, bounds, sigma: 0.0 });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key: content_key, list: own, bounds, sigma: 0.0 });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key: mask_key, list: mask, bounds, sigma: 0.0 });
     out.list.push_image(genoma_render::Image {
         key: content_key,
         pixels: Arc::new(Vec::new()),
@@ -3314,7 +3466,7 @@ fn blurred(mut own: DrawList, sigma: f32, out: &mut Out) {
         h.finish() | (1 << 63)
     };
     let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
-    out.list.groups.push(genoma_render::Group { key, list: own, bounds, sigma });
+    out.list.groups.push(genoma_render::Group { passes: Vec::new(), key, list: own, bounds, sigma });
     out.list.push_image(genoma_render::Image {
         key,
         pixels: Arc::new(Vec::new()),
@@ -4648,6 +4800,74 @@ mod tests {
         scene.set(hole, Prop::Mask, Value::Bool(false), None).unwrap();
         let plain = scene.draw_list(1.0);
         assert!(plain.groups.is_empty() && plain.rects.len() == 2);
+    }
+
+    #[test]
+    fn pass_children_put_their_parent_through_them_in_order() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, card);
+        for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 20.0)] {
+            scene.set(card, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(card, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        let mut passes = Vec::new();
+        for effect in ["genoma:ripple", "genoma:vignette"] {
+            let pass = scene.create(Kind::Shader, Role::None);
+            scene.append(card, pass);
+            scene.set(pass, Prop::Src, Value::Text(effect.into()), None).unwrap();
+            passes.push(pass);
+        }
+        scene.layout(Some(200.0), Some(100.0));
+        let plain = scene.draw_list(1.0);
+        assert_eq!((plain.shaders.len(), plain.groups.len()), (2, 0), "not passes: drawn over the card");
+        for &pass in &passes {
+            scene.set(pass, Prop::Pass, Value::Bool(true), None).unwrap();
+        }
+        scene.layout(Some(200.0), Some(100.0));
+        let list = scene.draw_list(1.0);
+        assert!(list.rects.is_empty() && list.shaders.is_empty(), "the card and its passes are in the picture");
+        assert_eq!((list.groups.len(), list.images.len()), (1, 1));
+        let group = &list.groups[0];
+        assert_eq!(list.images[0].key, group.key);
+        assert_eq!(group.list.rects.len(), 1);
+        assert_eq!(group.passes.len(), 2);
+        // Out of the flow and over all of the card, in the order given.
+        let ripple = genoma_render::shader::built_in("ripple").unwrap();
+        assert_eq!(group.passes[0].source.as_str(), ripple);
+        for p in &group.passes {
+            assert_eq!(p.size, [40.0, 20.0]);
+            assert_eq!(p.clip, [0.0, 0.0, group.bounds[2] - group.bounds[0], group.bounds[3] - group.bounds[1]]);
+            let (_, at) = p.backdrop.unwrap();
+            assert_eq!([at[2], at[3]], [group.bounds[2] - group.bounds[0], group.bounds[3] - group.bounds[1]], "it reads the whole picture");
+        }
+        // At rest, the same picture; new numbers, another.
+        assert_eq!(scene.draw_list(1.0).groups[0].key, group.key);
+        scene.set(passes[1], Prop::Values, Value::Numbers(vec![0.5]), None).unwrap();
+        assert_ne!(scene.draw_list(1.0).groups[0].key, group.key);
+    }
+
+    #[test]
+    fn a_cached_node_is_one_picture_kept_while_it_rests() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, card);
+        for (p, v) in [(Prop::Width, 40.0), (Prop::Height, 20.0)] {
+            scene.set(card, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(card, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        scene.set(card, Prop::Cache, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let list = scene.draw_list(1.0);
+        assert_eq!((list.rects.len(), list.groups.len(), list.images.len()), (0, 1, 1));
+        assert!(list.groups[0].passes.is_empty());
+        assert_eq!(scene.draw_list(1.0).groups[0].key, list.groups[0].key);
+        scene.set(card, Prop::Fill, Value::Color([0.0, 1.0, 0.0, 1.0]), None).unwrap();
+        assert_ne!(scene.draw_list(1.0).groups[0].key, list.groups[0].key);
     }
 
     #[test]
