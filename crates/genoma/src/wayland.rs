@@ -2081,13 +2081,18 @@ impl App {
     /// pointer for. A catching surface leaves those to them, so a press on
     /// another membrane's cell reaches that cell rather than closing this
     /// one: the two regions never overlap, whatever the stacking. Only full
-    /// surfaces are counted, since they alone share the output's origin.
+    /// surfaces are counted, since they alone share the output's origin,
+    /// and only those on its layer or above: one on a lower layer is under
+    /// it by the compositor's own order, so a surface over everything (a
+    /// selection rectangle on the overlay) takes the pointer everywhere
+    /// rather than handing it to an open panel beneath.
     fn holes_for(&self, i: usize) -> Vec<[i32; 4]> {
         let s = &self.surfaces[i];
+        let rank = self.specs.get(s.spec).map_or(layer_rank("top"), |spec| layer_rank(&spec.layer));
         let mut holes = Vec::new();
         for (j, other) in self.surfaces.iter().enumerate() {
-            let full = self.specs.get(other.spec).is_some_and(|spec| spec.full);
-            if j == i || !full || !other.configured || other.output != s.output {
+            let Some(spec) = self.specs.get(other.spec) else { continue };
+            if j == i || !spec.full || layer_rank(&spec.layer) < rank || !other.configured || other.output != s.output {
                 continue;
             }
             for r in other.scene.borrow().input_rects() {
@@ -2577,6 +2582,17 @@ fn rounded(region: &mut Vec<[i32; 4]>, x: i32, y: i32, w: i32, h: i32, r: i32) {
         let inset = (r as f32 - (r as f32 * r as f32 - d * d).max(0.0).sqrt()).round() as i32;
         region.push([x + inset, y + i, w - 2 * inset, 1]);
         region.push([x + inset, y + h - 1 - i, w - 2 * inset, 1]);
+    }
+}
+
+/// Where a layer sits in the compositor's stacking, lowest first. An
+/// unknown name is Top, as the surface is made on it.
+fn layer_rank(layer: &str) -> u8 {
+    match layer {
+        "background" => 0,
+        "bottom" => 1,
+        "overlay" => 3,
+        _ => 2,
     }
 }
 
@@ -3478,6 +3494,17 @@ mod tests {
         assert_eq!(files, vec!["/home/a/My Pictures/città.png".to_owned(), "/tmp/x".to_owned()]);
         assert_eq!(super::preferred_mime(&["text/plain".into(), "text/uri-list".into()]).as_deref(), Some("text/uri-list"));
         assert_eq!(super::preferred_mime(&["image/png".into()]), None);
+    }
+
+    #[test]
+    fn layers_rank_in_the_compositors_order() {
+        use super::layer_rank;
+        assert!(layer_rank("background") < layer_rank("bottom"));
+        assert!(layer_rank("bottom") < layer_rank("top"));
+        assert!(layer_rank("top") < layer_rank("overlay"));
+        // A surface made with no layer, or one Genoma does not know, is on Top.
+        assert_eq!(layer_rank(""), layer_rank("top"));
+        assert_eq!(layer_rank("lock"), layer_rank("top"));
     }
 
     #[test]

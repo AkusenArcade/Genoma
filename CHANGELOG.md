@@ -109,6 +109,13 @@ changes what a shell sees.
 - Requiring `@genoma/compositor` no longer fails where no IPC is known: it
   falls back on the protocols, and is empty where those are missing too.
 
+### Fixed
+
+- A catching surface leaves the pointer only to full surfaces on its own
+  layer or above. A surface on the overlay that catches (a selection
+  rectangle) no longer has holes where a panel open on a Top surface
+  takes the pointer: there the press went to the panel underneath.
+
 ## 0.1.8 — 2026-11-10
 
 ### Added
