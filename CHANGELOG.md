@@ -34,6 +34,13 @@ changes what a shell sees.
   bounce off, keeping `bounce` of their speed. Such an emitter's particles
   are stepped by a compute pass on the GPU; the others stay worked out
   from their age.
+- Shared transitions: `morph = "name"` on any node. A node of that name
+  shown anew, where another of the same name was drawn a moment ago and
+  is no longer shown, starts from that one's rectangle and roundness and
+  grows to its own over the `morph` timing (`morph_timing` names
+  another; 0.35 s easing out without one), the other's picture fading out
+  inside the moving shape and its own children coming in over the second
+  half, clipped to it. Nothing is scaled. `examples/morph`.
 - Simulations of one's own: `compute` on a `g.shader` names WGSL with
   `fn step(cell: vec2<i32>, me: vec4<f32>) -> vec4<f32>`, a grid's (each
   cell from what the grid held a step before, `g_cell`), and/or

@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`blur`](examples/blur/shell.luau),
+[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -159,6 +159,13 @@ return g.surface {
   draws it; `agent_size` has Genoma draw the agents too.
   `genoma:reaction-diffusion`, `genoma:waves` and `genoma:boids` come
   built in, and as `kit.effects` nodes. See `examples/simulations`.
+- **Shared transitions:** nodes with the same `morph = "name"` are one
+  thing in two states. When one is shown where another of that name was
+  drawn a moment ago and is no longer shown, it grows from that one's
+  rectangle and roundness to its own on the `morph` timing (or
+  `morph_timing`), the other's picture fading out inside the moving shape
+  and its own content coming in; never scaled. A chip opens into a panel
+  and closes back into it. See `examples/morph`.
 - **Post-processing:** a `g.shader` child with `pass = true` is not drawn
   over its parent but run on it: the parent and its other children are
   drawn into a picture, and each pass, in the order written, draws it

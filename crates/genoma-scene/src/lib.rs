@@ -190,6 +190,13 @@ pub struct Node {
     /// was then, unclipped: what the keyboard's focus may reach, and where
     /// a well scrolls to bring it into view.
     drawn_frame: u64,
+    /// A shared transition's name (`morph`) and the timing it moves on;
+    /// the one under way; where and how round it was last drawn, logical
+    /// units, for the next node of its name to start from.
+    morph_name: Option<String>,
+    morph_timing: Option<String>,
+    morph: Option<Morph>,
+    morph_rect: [f32; 5],
     /// The frame that last laid it out (its `bounds` are that frame's): a
     /// node inside something absent keeps an old one.
     laid_frame: u64,
@@ -397,6 +404,10 @@ impl Node {
             // A field takes the pointer, to place its caret.
             interactive: kind == Kind::Field,
             drawn_frame: 0,
+            morph_name: None,
+            morph_timing: None,
+            morph: None,
+            morph_rect: [0.0; 5],
             laid_frame: 0,
             extent: [0.0; 4],
             opacity: 1.0,
@@ -726,6 +737,9 @@ pub struct Scene {
     animations: Vec<Animation>,
     /// Nodes with a pulse or an orbit, stepped on every advance.
     movers: Vec<NodeId>,
+    /// Each morph's name's last drawn node, and the nodes morphing now.
+    shots: std::collections::HashMap<String, Shot>,
+    morphing: Vec<NodeId>,
     last_step: Option<Instant>,
     /// The surface's scale at the last frame: what a quarter pixel is.
     scale: f32,
@@ -790,6 +804,8 @@ impl Scene {
             fonts,
             animations: Vec::new(),
             movers: Vec::new(),
+            shots: std::collections::HashMap::new(),
+            morphing: Vec::new(),
             last_step: None,
             scale: 1.0,
             dirty: true,
@@ -1740,6 +1756,8 @@ impl Scene {
             Prop::Playing => n.playing = take!(flag),
             Prop::Mask => n.mask = take!(flag),
             Prop::Cache => n.cache = take!(flag),
+            Prop::Morph => n.morph_name = Some(take!(text)).filter(|t| !t.is_empty()),
+            Prop::MorphTiming => n.morph_timing = Some(take!(text)).filter(|t| !t.is_empty()),
             Prop::Pass => {
                 // Out of the flow, as an overlay; without a size of its own it
                 // covers its parent (`place`).
@@ -2221,6 +2239,19 @@ impl Scene {
             log::trace!("moving: {} animations {}", self.animations.len(), props.join(" "));
         }
         let mut motion = Motion { moving: self.animations.len() > waiting_unseen, wake: None };
+        // Morphs on their way; one done lets its node be as it is.
+        for node in std::mem::take(&mut self.morphing) {
+            if let Some(n) = self.tree.get_node_context_mut(node)
+                && let Some(m) = n.morph.as_mut()
+            {
+                m.t += dt.min(0.05) / m.duration.max(1e-3);
+                if m.t >= 1.0 {
+                    n.morph = None;
+                }
+                self.dirty = true;
+                motion.moving = true;
+            }
+        }
         // An image that finished decoding is news; one still decoding is
         // looked for again on a short beat.
         if self.images.collect() {
@@ -2536,7 +2567,7 @@ impl Scene {
         let others = self.combined_shapes();
         self.distance.begin(self.combine_names());
         let ring_colour = self.focus_ring.and_then(|n| self.navigate_scope(n)).and_then(|s| self.tree.get_node_context(s)).map(|s| s.focus_color);
-        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, passes: None, emitted: std::collections::HashMap::new(), viewport };
+        let mut out = Out { frame: self.frame, under: None, pointer: self.pointer, others, list: &mut list, fade: [0.0; 2], transform: Rect::IDENTITY, now: self.now, parent_shape: None, shape_here: None, clip: Rect::NO_CLIP, icons: &mut self.icons, images: &mut self.images, glyphs: &mut self.glyphs, distance: &mut self.distance, blur: Vec::new(), upper: DrawList::default(), raised: false, drawn_images: Vec::new(), animated: Vec::new(), mask: None, passes: None, emitted: std::collections::HashMap::new(), shots: std::mem::take(&mut self.shots), morphing: Vec::new(), viewport };
         collect(&mut self.tree, &mut fonts, self.root, [0.0; 4], [0.0; 4], 1.0, scale, &mut out);
         // The keyboard's ring: round the focused node, a little outside it,
         // in its walk's colour.
@@ -2566,6 +2597,8 @@ impl Scene {
         }
         self.blur = out.blur;
         self.animated = std::mem::take(&mut out.animated);
+        self.shots = std::mem::take(&mut out.shots);
+        self.morphing = std::mem::take(&mut out.morphing);
         for id in std::mem::take(&mut out.drawn_images) {
             if self.ready.insert(id) {
                 log::debug!("image {id:?} drawn for the first time");
@@ -3027,9 +3060,62 @@ struct Out<'a> {
     /// The emitters drawn so far, for their sub-emitters: their motion,
     /// their births and the births' generation.
     emitted: std::collections::HashMap<NodeId, Emitted>,
+    /// The nodes of each morph's name as last drawn, and those morphing.
+    shots: std::collections::HashMap<String, Shot>,
+    morphing: Vec<NodeId>,
     /// The surface, physical pixels: an image reaching past it is decoded
     /// only for what of it is on it.
     viewport: [f32; 2],
+}
+
+/// A node of a morph's name as last drawn: which, when, where and how
+/// round (x, y, width, height, radius, logical units), and its subtree's
+/// list with the bounds it paints (physical pixels), the picture a morph
+/// fades out.
+#[derive(Clone)]
+struct Shot {
+    node: NodeId,
+    frame: u64,
+    rect: [f32; 5],
+    list: Arc<DrawList>,
+    bounds: [f32; 4],
+}
+
+/// A node on its way from where another of its morph's name was (`from`)
+/// to its own place: `t` from 0 to 1 over `duration` seconds, eased by
+/// `curve`; the other's picture fading out over it.
+#[derive(Clone)]
+struct Morph {
+    from: [f32; 5],
+    t: f32,
+    duration: f32,
+    curve: genoma_core::timing::Curve,
+    picture: Option<Shot>,
+}
+
+impl Morph {
+    fn eased(&self) -> f32 {
+        self.curve.eval(f64::from(self.t.clamp(0.0, 1.0))) as f32
+    }
+}
+
+/// Whether a node is shown: present, and every node above it too.
+fn shown(tree: &TaffyTree<Node>, node: NodeId) -> bool {
+    let mut at = Some(node);
+    while let Some(id) = at {
+        match tree.get_node_context(id) {
+            Some(n) if n.present => at = tree.parent(id),
+            Some(_) => return false,
+            // The root has no context of its own.
+            None => return tree.parent(id).is_none() && id != node,
+        }
+    }
+    true
+}
+
+fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// An emitter as drawn, for its sub-emitters: its key, its motion, its
@@ -3490,10 +3576,45 @@ fn passed_or_not(
                 .iter()
                 .any(|&c| tree.get_node_context(c).is_some_and(|c| c.present && c.pass && c.kind == Kind::Shader))
     });
+    // A node with a morph's name is gathered apart and kept as its name's
+    // last shot, for the next node of that name to start from.
+    let named = tree.get_node_context(node).filter(|n| n.present).and_then(|n| n.morph_name.clone());
+    if let Some(name) = named {
+        let mut own = DrawList::default();
+        std::mem::swap(out.list, &mut own);
+        if grouped {
+            grouped_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        } else {
+            collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+        }
+        std::mem::swap(out.list, &mut own);
+        let drawn = tree.get_node_context(node).filter(|n| n.drawn_frame == out.frame).map(|n| n.morph_rect);
+        if let (Some(rect), Some(bounds)) = (drawn, own.paint_bounds()) {
+            let list = Arc::new(own.clone());
+            out.shots.insert(name, Shot { node, frame: out.frame, rect, list, bounds });
+        }
+        out.list.append(own);
+        return;
+    }
     if !grouped {
         collect_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
         return;
     }
+    grouped_node(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+}
+
+/// A node drawn into a picture of its own, through its passes.
+#[allow(clippy::too_many_arguments)]
+fn grouped_node(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    parent_exact: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+) {
     let mut own = DrawList::default();
     std::mem::swap(out.list, &mut own);
     let saved = out.passes.replace((node, Vec::new()));
@@ -3708,6 +3829,48 @@ fn collect_node(
         n.extent = own;
         n.laid_frame = out.frame;
     }
+    // A shared transition: a node of a morph's name shown anew, where
+    // another of that name was drawn a moment ago and is no longer shown,
+    // starts from where that one was.
+    let fresh = tree.get_node_context(node).is_some_and(|n| n.present && (n.drawn_frame == 0 || n.drawn_frame + 1 < out.frame));
+    let starting = tree
+        .get_node_context(node)
+        .filter(|_| fresh)
+        .and_then(|n| n.morph_name.as_ref())
+        .and_then(|name| out.shots.get(name))
+        .filter(|shot| shot.node != node && shot.frame + 2 >= out.frame && !shown(tree, shot.node))
+        .cloned();
+    if fresh && let Some(n) = tree.get_node_context_mut(node) {
+        // A morph left half way when it was hidden does not go on.
+        n.morph = starting.map(|shot| {
+            let timing = genoma_core::timing::get(n.morph_timing.as_deref().unwrap_or("morph")).filter(|t| t.duration > 0.0);
+            let (duration, curve) = timing.map_or((0.35, genoma_core::timing::Curve { x1: 0.2, y1: 0.0, x2: 0.0, y2: 1.0 }), |t| (t.duration as f32, t.curve));
+            Morph { from: shot.rect, t: 0.0, duration, curve, picture: Some(shot) }
+        });
+    }
+    // On its way: drawn in the rectangle and roundness between the two,
+    // its content coming in over the second half.
+    let morph = tree.get_node_context(node).and_then(|n| n.morph.clone());
+    let own_radius = tree.get_node_context(node).map_or(0.0, |n| {
+        let round = if n.kind == Kind::Capsule { own[3] / 2.0 } else { 0.0 };
+        n.radius.unwrap_or(round).min(own[2].min(own[3]) / 2.0)
+    });
+    let mut drawn_rect = [own[0], own[1], own[2], own[3], own_radius];
+    let mut content = 1.0;
+    if let Some(m) = &morph {
+        out.morphing.push(node);
+        let e = m.eased();
+        for (drawn, from) in drawn_rect.iter_mut().zip(m.from) {
+            *drawn = from + (*drawn - from) * e;
+        }
+        origin = [drawn_rect[0], drawn_rect[1]];
+        layout.size.width = drawn_rect[2].max(0.0);
+        layout.size.height = drawn_rect[3].max(0.0);
+        content = smoothstep(0.35, 1.0, e);
+    }
+    if let Some(n) = tree.get_node_context_mut(node) {
+        n.morph_rect = drawn_rect;
+    }
     // A sub-emitter reads its parent's particles.
     let up = tree.parent(node);
     let Some(n) = tree.get_node_context_mut(node) else { return };
@@ -3785,6 +3948,8 @@ fn collect_node(
             }
             let size = [w * scale, h * scale];
             let radius = n.radius.map_or(size[1] / 2.0, |r| r * scale).min(size[0].min(size[1]) / 2.0);
+            // Morphing: as round as it is on its way.
+            let radius = if morph.is_some() { (drawn_rect[4] * scale).min(size[0].min(size[1]) / 2.0) } else { radius };
             let rim = rim_width(n, scale);
             if n.blur {
                 if out.transform == Rect::IDENTITY {
@@ -4618,6 +4783,47 @@ fn collect_node(
         }
         Kind::Box => {}
     }
+    // Morphing: the other's picture fades out inside the moving shape, laid
+    // as it was drawn, from the shape's corner.
+    let mut morph_clip = None;
+    if let Some(m) = &morph {
+        let r = [drawn_rect[0] * scale, drawn_rect[1] * scale, (drawn_rect[0] + drawn_rect[2]) * scale, (drawn_rect[1] + drawn_rect[3]) * scale];
+        let c = [out.clip[0].max(r[0]), out.clip[1].max(r[1]), out.clip[2].min(r[2]), out.clip[3].min(r[3])];
+        morph_clip = Some(c);
+        let gone = 1.0 - smoothstep(0.0, 0.6, m.eased());
+        if let Some(shot) = m.picture.as_ref().filter(|_| gone > 0.0 && alpha > 0.0) {
+            let b = shot.bounds;
+            let bounds = [b[0].max(0.0).floor(), b[1].max(0.0).floor(), b[2].min(out.viewport[0]).ceil(), b[3].min(out.viewport[1]).ceil()];
+            if bounds[2] > bounds[0] && bounds[3] > bounds[1] {
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    ("morph", shot.list.fingerprint(), bounds.map(f32::to_bits)).hash(&mut h);
+                    h.finish() | (1 << 63)
+                };
+                out.list.groups.extend(shot.list.groups.iter().cloned());
+                out.list.groups.push(genoma_render::Group { passes: Vec::new(), key, list: (*shot.list).clone(), bounds, sigma: 0.0 });
+                let size = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
+                out.list.push_image(genoma_render::Image {
+                    key,
+                    pixels: Arc::new(Vec::new()),
+                    width: size[0] as u32,
+                    height: size[1] as u32,
+                    origin: [r[0] + bounds[0] - shot.rect[0] * scale, r[1] + bounds[1] - shot.rect[1] * scale],
+                    size,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    radius: drawn_rect[4] * scale,
+                    alpha: alpha * gone,
+                    clip: c,
+                    fade: out.fade_of(),
+                    transform: Rect::IDENTITY,
+                    filter: genoma_render::Image::NO_FILTER,
+                    mask: None,
+                    blend: 0,
+                });
+            }
+        }
+    }
     // A clipping node narrows the clip for everything inside it, and a
     // scrolled one moves its children up.
     let (clip, scroll, fade) = tree.get_node_context(node).map_or((false, 0.0, 0.0), |n| (n.clip, n.scroll_y, n.fade_bottom));
@@ -4634,6 +4840,10 @@ fn collect_node(
             out.fade = [c[3], fade * scale];
         }
     }
+    // And its content inside the moving shape, coming in.
+    if let Some(c) = morph_clip {
+        out.clip = [out.clip[0].max(c[0]), out.clip[1].max(c[1]), out.clip[2].min(c[2]), out.clip[3].min(c[3])];
+    }
     let scrolled = (scroll * scale).round() / scale;
     for child in tree.children(node).unwrap_or_default() {
         collect(
@@ -4642,7 +4852,7 @@ fn collect_node(
             child,
             [own[0], own[1] - scrolled, own[2], own[3]],
             [exact[0], exact[1] - scroll, exact[2], exact[3]],
-            alpha,
+            alpha * content,
             scale,
             out,
         );
@@ -5225,6 +5435,61 @@ mod tests {
         scene.set(water, Prop::Compute, Value::Text("genoma:nothing".into()), None).unwrap();
         let list = scene.draw_list(1.0);
         assert!(list.shaders.is_empty() && !list.texts.is_empty());
+    }
+
+    #[test]
+    fn a_node_shown_where_another_of_its_morph_was_grows_from_it() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let chip = scene.create(Kind::Capsule, Role::None);
+        let panel = scene.create(Kind::Capsule, Role::None);
+        let inside = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, chip);
+        scene.append(root, panel);
+        scene.append(panel, inside);
+        for (n, w, h) in [(chip, 40.0, 20.0), (panel, 160.0, 80.0), (inside, 20.0, 20.0)] {
+            scene.set(n, Prop::Width, Value::Number(w), None).unwrap();
+            scene.set(n, Prop::Height, Value::Number(h), None).unwrap();
+            scene.set(n, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        }
+        for n in [chip, panel] {
+            scene.set(n, Prop::Morph, Value::Text("card".into()), None).unwrap();
+            scene.set(n, Prop::Overlay, Value::Bool(true), None).unwrap();
+        }
+        scene.set(panel, Prop::Radius, Value::Number(12.0), None).unwrap();
+        scene.set(panel, Prop::Present, Value::Bool(false), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        scene.draw_list(1.0);
+        // The chip goes, the panel comes: it starts in the chip's place.
+        scene.set(chip, Prop::Present, Value::Bool(false), None).unwrap();
+        scene.set(panel, Prop::Present, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let list = scene.draw_list(1.0);
+        let panel_rect = list.rects[0];
+        assert_eq!(panel_rect.size, [40.0, 20.0], "the chip's size, to begin with");
+        assert_eq!(list.images.len(), 1, "the chip's picture, fading out over it");
+        assert_eq!(list.rects.len(), 1, "its content not in yet");
+        // On its way, then itself.
+        let start = Instant::now();
+        scene.advance(start, 1.0);
+        scene.advance(start + Duration::from_millis(50), 1.0);
+        scene.draw_list(1.0);
+        scene.advance(start + Duration::from_millis(100), 1.0);
+        let middle = scene.draw_list(1.0).rects[0].size;
+        assert!(middle[0] > 40.0 && middle[0] < 160.0, "{middle:?}");
+        for i in 3..30 {
+            scene.advance(start + Duration::from_millis(50 * i), 1.0);
+            scene.draw_list(1.0);
+        }
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.rects[0].size, [160.0, 80.0]);
+        assert_eq!((list.images.len(), list.rects.len()), (0, 2), "done: no picture, its content in");
+        // And back: the chip grows from the panel.
+        scene.set(panel, Prop::Present, Value::Bool(false), None).unwrap();
+        scene.set(chip, Prop::Present, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        assert_eq!(scene.draw_list(1.0).rects[0].size, [160.0, 80.0]);
     }
 
     #[test]

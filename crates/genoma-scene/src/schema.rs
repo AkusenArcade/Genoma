@@ -173,6 +173,8 @@ pub enum Prop {
     Agents,
     AgentSize,
     Steps,
+    Morph,
+    MorphTiming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,6 +372,8 @@ pub const PROPS: &[PropInfo] = &[
     p("steps", Prop::Steps, Ty::Number, false, "A simulation's steps a second (60 by default, at most 960), each `sim.dt` long; at most eight are taken a frame."),
     p("pass", Prop::Pass, Ty::Bool, false, "A shader drawn as its parent's post-processing rather than over it: the parent and its other children go into a picture, and each pass child in turn reads what is there with g_backdrop(p) and draws over its own box, the next pass reading what it left. Out of the flow, it covers its parent unless given a width and height; the picture reaches as far as the passes' boxes do. Drawn again only when what is in it or a pass's numbers, clock or pointer change."),
     p("cache", Prop::Cache, Ty::Bool, false, "The node and what it holds drawn once into a picture and shown as that, drawn again only when something in it changes: a rich subtree beside something that moves costs one image a frame."),
+    p("morph", Prop::Morph, Ty::Text, false, "A shared transition's name. A node of this name shown anew, where another of the same name was drawn a moment ago and is no longer shown, grows from that one's rectangle and roundness to its own, the other's picture fading out inside it and its own content coming in: a card opening into a page, a chip into a panel. Back again, the other morphs from it."),
+    p("morph_timing", Prop::MorphTiming, Ty::Text, false, "The `g.timing` entry a `morph` moves on (`morph` by default; unset there, 0.35 s easing out)."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node; a row of a g.list it reaches is scrolled into view. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
     p("drag_files", Prop::DragFiles, Ty::Text, false, "Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line. A dock's application, a download, a picture."),
