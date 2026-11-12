@@ -58,7 +58,8 @@ export type WatchedFile = {
     stop: (self: WatchedFile) -> (),
 }
 
-export type FolderEntry = { name: string, path: string, dir: boolean }
+-- size (bytes) and modified (seconds since 1970) with `details = true`.
+export type FolderEntry = { name: string, path: string, dir: boolean, size: number?, modified: number? }
 
 export type Folder = {
     -- By name, hidden ones left out; empty while the folder does not exist.
@@ -316,8 +317,10 @@ export type G = {
     }) -> Process,
     -- g.file { path, watch = true }: read now and whenever it changes.
     file: (t: { path: string, watch: boolean? }) -> WatchedFile,
-    -- g.folder { path, watch = true }: what is in a folder, followed.
-    folder: (t: { path: string, watch: boolean? }) -> Folder,
+    -- g.folder { path, watch = true, hidden = false, details = false }: what
+    -- is in a folder, followed; hidden keeps dot-files, details adds size
+    -- and modified to each entry.
+    folder: (t: { path: string, watch: boolean?, hidden: boolean?, details: boolean? }) -> Folder,
     -- g.socket { path, on_line, on_close }: a Unix socket, its input as lines.
     socket: (t: { path: string, on_line: ((line: string) -> ())?, on_close: (() -> ())? }) -> Socket,
     -- g.json("~/.config/…/file.json"): a data file read at load, only from

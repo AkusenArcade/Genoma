@@ -23,4 +23,8 @@ return {
     titlebar = require("@genoma/kit/titlebar"),
     chart = require("@genoma/kit/chart"),
     gestures = require("@genoma/kit/gestures"),
+    tree = require("@genoma/kit/tree"),
+    calendar = require("@genoma/kit/calendar"),
+    color_picker = require("@genoma/kit/color_picker"),
+    file_picker = require("@genoma/kit/file_picker"),
 }

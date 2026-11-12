@@ -439,10 +439,10 @@ g.file { path, watch = true }: read now and whenever it changes.
 ### `g.folder`
 
 ```luau
-folder: (t: { path: string, watch: boolean? }) -> Folder
+folder: (t: { path: string, watch: boolean?, hidden: boolean?, details: boolean? }) -> Folder
 ```
 
-g.folder { path, watch = true }: what is in a folder, followed.
+g.folder { path, watch = true, hidden = false, details = false }: what is in a folder, followed; hidden keeps dot-files, details adds size and modified to each entry.
 
 ### `g.socket`
 
@@ -1856,11 +1856,15 @@ Something running that can be stopped: a timer, a watch.
 
 ### FolderEntry
 
+size (bytes) and modified (seconds since 1970) with `details = true`.
+
 | Field | Type | |
 |---|---|---|
 | `name` | `string` |  |
 | `path` | `string` |  |
 | `dir` | `boolean` |  |
+| `size` | `number?` |  |
+| `modified` | `number?` |  |
 
 ### Folder
 

@@ -558,17 +558,29 @@ pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
 
 // ---- g.folder --------------------------------------------------------------
 
-/// One entry of a folder: its name, and whether it is a folder itself.
+/// One entry of a folder: its name, and whether it is a folder itself;
+/// its size and when it last changed (seconds since 1970) when asked for
+/// with `details`, else 0.
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     name: String,
     dir: bool,
+    size: u64,
+    modified: f64,
+}
+
+/// What a folder's listing takes in.
+#[derive(Clone, Copy)]
+struct Listing {
+    hidden: bool,
+    details: bool,
 }
 
 pub struct Folder {
     path: PathBuf,
     entries: Signal<Vec<Entry>>,
     stop: Rc<Stop>,
+    listing: Listing,
 }
 
 impl UserData for Folder {
@@ -583,6 +595,10 @@ impl UserData for Folder {
                 t.set("name", e.name.as_str())?;
                 t.set("path", this.path.join(&e.name).display().to_string())?;
                 t.set("dir", e.dir)?;
+                if this.listing.details {
+                    t.set("size", e.size)?;
+                    t.set("modified", e.modified)?;
+                }
                 list.set(i + 1, t)?;
             }
             Ok(list)
@@ -598,18 +614,29 @@ impl UserData for Folder {
     }
 }
 
-fn list_folder(path: &Path) -> Vec<Entry> {
+fn list_folder(path: &Path, listing: Listing) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(path) else { return Vec::new() };
     let mut out: Vec<Entry> = read
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
+            if name.starts_with('.') && !listing.hidden {
                 return None;
             }
             // Through a link, as a file manager shows it.
-            let dir = std::fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false);
-            Some(Entry { name, dir })
+            let meta = std::fs::metadata(e.path()).ok();
+            let dir = meta.as_ref().is_some_and(|m| m.is_dir());
+            let (size, modified) = match (&meta, listing.details) {
+                (Some(m), true) => (
+                    m.len(),
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0.0, |d| d.as_secs_f64()),
+                ),
+                _ => (0, 0.0),
+            };
+            Some(Entry { name, dir, size, modified })
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -618,10 +645,16 @@ fn list_folder(path: &Path) -> Vec<Entry> {
 
 /// `g.folder { path = "~/Pictures/Wallpapers" }`: what is in a folder, read
 /// now and again whenever an entry comes, goes or is renamed (`watch =
-/// false` reads once). Not recursive.
+/// false` reads once). Not recursive. `hidden = true` keeps the entries
+/// whose names begin with a dot; `details = true` gives each its `size`
+/// and `modified` time, and then a file written in place changes the list.
 pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
     let path = expand(&t.get::<String>("path")?);
-    let entries = Signal::new(list_folder(&path));
+    let listing = Listing {
+        hidden: t.get::<Option<bool>>("hidden")?.unwrap_or(false),
+        details: t.get::<Option<bool>>("details")?.unwrap_or(false),
+    };
+    let entries = Signal::new(list_folder(&path, listing));
     let stop = Stop::new(host);
     if t.get::<Option<bool>>("watch")?.unwrap_or(true) {
         match inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC) {
@@ -640,7 +673,7 @@ pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
                         }
                         // Set only when the list differs: a file written in
                         // place is a change of content, not of the folder.
-                        let now = list_folder(&path);
+                        let now = list_folder(&path, listing);
                         if entries.try_get().as_ref() != Some(&now) {
                             entries.set(now);
                         }
@@ -651,7 +684,7 @@ pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
             Err(e) => log::warn!("g.folder {}: no watch: {e}", path.display()),
         }
     }
-    Ok(Folder { path, entries, stop })
+    Ok(Folder { path, entries, stop, listing })
 }
 
 // ---- g.socket --------------------------------------------------------------

@@ -71,6 +71,25 @@ changes what a shell sees.
   springing back past `min`/`max`) and `dismissable` (swiped away or
   sprung back), each with `attach` to add its handlers to a node; timings
   `gesture_glide`, `gesture_snap`, `gesture_out`. `examples/gestures`.
+- `kit.tree`: items that hold items, virtualised (only the rows in view
+  are mounted), a branch's children asked for only once it opens;
+  selection by key; `tree.key(view, name)` walks it with the arrows.
+- `kit.calendar`: a month's grid, today ringed, `marks` for days with
+  something on them, `range` for two days, `min`/`max`, `first_weekday`,
+  `names` for another language; the wheel, a swipe and the header turn the
+  month; `calendar.key(view, name, mods)`, and `calendar.today`, `add`,
+  `stamp`, `days_in`, `weekday` for date arithmetic.
+- `kit.color_picker`: saturation and brightness on a field, hue and
+  opacity on strips, the hex to type, swatches; dragged, pressed or turned
+  with the wheel; `color_picker.button`, a swatch that opens one;
+  `color_picker.key(view, name)`.
+- `kit.file_picker`: a folder's entries (folders first, sizes, icons from
+  the icon theme), the user's folders as places, the path as steps back,
+  a typed filter, `filter` patterns, `multiple`, `folders`, `hidden`,
+  `preview` of pictures; `file_picker.key(view, name)`.
+- `g.folder { hidden = true, details = true }`: dot-files kept, and each
+  entry's `size` and `modified` time.
+- `examples/components`.
 - `g.animated` moves on a spring when its timing entry is one, a
   redirected spring keeping its speed; before, it jumped there.
 

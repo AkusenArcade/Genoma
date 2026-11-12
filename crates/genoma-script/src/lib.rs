@@ -2926,6 +2926,10 @@ const KIT: &[(&str, &str)] = &[
     ("chart", include_str!("../../../kit/chart.luau")),
     ("themes", include_str!("../../../kit/themes.luau")),
     ("gestures", include_str!("../../../kit/gestures.luau")),
+    ("tree", include_str!("../../../kit/tree.luau")),
+    ("calendar", include_str!("../../../kit/calendar.luau")),
+    ("color_picker", include_str!("../../../kit/color_picker.luau")),
+    ("file_picker", include_str!("../../../kit/file_picker.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {

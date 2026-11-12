@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`gestures`](examples/gestures/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
+[`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`gestures`](examples/gestures/shell.luau), [`components`](examples/components/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -247,7 +247,10 @@ return g.surface {
   it beside the surfaces with an `anchor` instead.
 - **The kit:** `require("@genoma/kit")` gives `button`, `toggle`,
   `slider`, `progress`, `menu`, `dropdown`, `tooltip`, `list`, `tabs`,
-  `field` and `dialog`, built on the nodes above and drawn in a neutral look of their
+  `field` and `dialog`, and the larger `tree` (virtualised, branches
+  opened lazily), `calendar` (marks, ranges), `color_picker` (with a
+  swatch `color_picker.button` that opens one) and `file_picker` (places,
+  filter, preview), built on the nodes above and drawn in a neutral look of their
   own, and `chart` (`chart.line`, `chart.area`, `chart.bars`: up to 1008
   numbers drawn by one shader node, no node per point). A dialog is a surface, returned beside the others.
   `kit.theme.set { accent = "#e6b062", radius = 10 }` changes it for every
