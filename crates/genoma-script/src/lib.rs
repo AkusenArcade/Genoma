@@ -124,6 +124,27 @@ pub enum Input {
     Drop(Dropped),
     /// Something being dragged came over the node (true) or left it.
     DropHover(bool),
+    /// A drag began, past the node's `drag_threshold`: where it was pressed,
+    /// local to the node pressed.
+    DragStart(f32, f32),
+    /// The drag ended: the pointer's or the finger's speed as it let go,
+    /// logical units a second, for what carries on.
+    DragEnd(f64, f64),
+    /// Held still, pressed, for the `long_press` timing: where, local to the
+    /// node pressed. A release after one the interface took is no click.
+    LongPress(f32, f32),
+    /// A quick stroke ended: "left", "right", "up" or "down", and its speed,
+    /// logical units a second. From a drag let go moving, or a touchpad's
+    /// swipe of several fingers.
+    Swipe(&'static str, f64),
+    /// Two fingers pinching, on a touchpad or a screen: the scale since they
+    /// began, the turn in degrees, the phase ("begin", "update", "end",
+    /// "cancel"), and their middle in surface coordinates, made local to
+    /// whoever handles it.
+    Pinch(f64, f64, &'static str, f32, f32),
+    /// Fingers came to rest on a touchpad (true) and lifted (false): what is
+    /// carrying on from a fling stops.
+    Hold(bool),
 }
 
 /// What a drop brought: the files of a `text/uri-list` as paths, the
@@ -158,13 +179,20 @@ impl Input {
             Input::DropHover(_) => "on_drop_hover",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
+            Input::DragStart(..) => "on_drag_start",
+            Input::DragEnd(..) => "on_drag_end",
+            Input::LongPress(..) => "on_long_press",
+            Input::Swipe(..) => "on_swipe",
+            Input::Pinch(..) => "on_pinch",
+            Input::Hold(_) => "on_hold",
         }
     }
 }
 
 const HANDLERS: &[&str] = &[
     "on_hover", "on_press", "on_release", "on_click", "on_drag", "on_move", "on_ready", "on_size", "on_focus", "on_focus_within", "on_wheel",
-    "on_fling", "on_outside", "on_key", "on_change", "on_submit", "on_drop", "on_drop_hover",
+    "on_fling", "on_outside", "on_key", "on_change", "on_submit", "on_drop", "on_drop_hover", "on_drag_start", "on_drag_end",
+    "on_long_press", "on_swipe", "on_pinch", "on_hold",
 ];
 
 /// What `g.focus_*` asks of the keyboard's focus, done by the host once the
@@ -1842,8 +1870,10 @@ impl Script {
     /// Delivers pointer input to the node hit in target `at`'s tree, or to
     /// the nearest ancestor that handles it: a wheel over a row reaches the
     /// list.
-    pub fn dispatch(&self, target: usize, node: genoma_scene::NodeId, input: Input) {
-        let Some(scene) = self.scenes.get(target) else { return };
+    /// Delivers `input` to `node`, or up to the nearest node that listens.
+    /// Whether one took it.
+    pub fn dispatch(&self, target: usize, node: genoma_scene::NodeId, input: Input) -> bool {
+        let Some(scene) = self.scenes.get(target) else { return false };
         let name = input.handler();
         let mut at = Some(node);
         while let Some(id) = at {
@@ -1904,11 +1934,27 @@ impl Script {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
                         f.call::<()>((lx, ly, *w, *h))
                     }
+                    Input::DragStart(x, y) | Input::LongPress(x, y) => f.call::<()>((*x, *y)),
+                    Input::DragEnd(vx, vy) => f.call::<()>((*vx, *vy)),
+                    Input::Swipe(direction, speed) => f.call::<()>((*direction, *speed)),
+                    Input::Pinch(scale, turn, phase, x, y) => {
+                        let (lx, ly) = scene.borrow().local(id, *x, *y);
+                        f.call::<()>((*scale, *turn, *phase, lx, ly))
+                    }
+                    // A hold a handler answers false to (nothing of its own
+                    // was moving) goes on to the scroller around it.
+                    Input::Hold(on) => match f.call::<LuaValue>(*on) {
+                        Ok(LuaValue::Boolean(false)) => {
+                            at = scene.borrow().parent(id);
+                            continue;
+                        }
+                        other => other.map(|_| ()),
+                    },
                 };
                 if let Err(e) = result {
                     log::error!("{name}: {e}");
                 }
-                return;
+                return true;
             }
             // Hover stays with its own node: the host tells each node the
             // pointer enters or leaves, the ancestors of the one hit
@@ -1917,10 +1963,11 @@ impl Script {
                 input,
                 Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_) | Input::Drop(_) | Input::DropHover(_)
             ) {
-                return;
+                return false;
             }
             at = scene.borrow().parent(id);
         }
+        false
     }
 
     pub fn dir(&self) -> &Path {
@@ -2878,6 +2925,7 @@ const KIT: &[(&str, &str)] = &[
     ("async", include_str!("../../../kit/async.luau")),
     ("chart", include_str!("../../../kit/chart.luau")),
     ("themes", include_str!("../../../kit/themes.luau")),
+    ("gestures", include_str!("../../../kit/gestures.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {

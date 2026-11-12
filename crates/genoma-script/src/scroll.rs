@@ -38,6 +38,8 @@ struct Scroller {
     host: Option<HostRef>,
     on_scroll: Option<Function>,
     told: Cell<[f64; 2]>,
+    /// A hold stopped it: it settles when the fingers lift.
+    held: Cell<bool>,
 }
 
 impl Scroller {
@@ -304,6 +306,30 @@ impl Scroller {
         true
     }
 
+    /// Fingers came to rest on the touchpad: what is moving stops where it
+    /// is. False when nothing was, so the scroller around hears it. Lifted,
+    /// a snapping scroller settles.
+    fn hold(self: &Rc<Self>, resting: bool) -> bool {
+        let Some(info) = self.info() else { return false };
+        if !resting {
+            if info.snap != 0 && self.held.replace(false) {
+                self.settle_later();
+                return true;
+            }
+            return false;
+        }
+        if self.ticking.get().is_none() {
+            return false;
+        }
+        self.stop();
+        self.cancel_settle();
+        let at = self.now(&info);
+        self.velocity.set([0.0; 2]);
+        self.target.set(at);
+        self.held.set(true);
+        true
+    }
+
     fn settle_later(self: &Rc<Self>) {
         self.cancel_settle();
         let Some(host) = &self.host else { return };
@@ -353,6 +379,7 @@ pub(crate) fn attach(
         host: crate::list::host(),
         on_scroll,
         told: Cell::new([0.0; 2]),
+        held: Cell::new(false),
     });
     scene.borrow_mut().set_interactive(node, true);
     // The handlers hold the scroller; they go with the node's.
@@ -360,14 +387,19 @@ pub(crate) fn attach(
     let on_wheel = lua.create_function(move |_, (dx, dy, steps): (f64, f64, Option<bool>)| {
         Ok(if s.wheel(dx, dy, steps.unwrap_or(false)) { LuaValue::Nil } else { LuaValue::Boolean(false) })
     })?;
-    let s = scroller;
+    let s = scroller.clone();
     let on_fling = lua.create_function(move |_, (vx, vy): (f64, f64)| {
         Ok(if s.fling_from(vx, vy) { LuaValue::Nil } else { LuaValue::Boolean(false) })
+    })?;
+    let s = scroller;
+    let on_hold = lua.create_function(move |_, resting: bool| {
+        Ok(if s.hold(resting) { LuaValue::Nil } else { LuaValue::Boolean(false) })
     })?;
     let mut handlers = handlers.borrow_mut();
     let mine = handlers.entry((target, node)).or_default();
     mine.insert("on_wheel", on_wheel);
     mine.insert("on_fling", on_fling);
+    mine.insert("on_hold", on_hold);
     Ok(())
 }
 

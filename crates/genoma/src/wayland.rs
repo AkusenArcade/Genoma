@@ -230,6 +230,8 @@ struct Surface {
     press_point: (f32, f32),
     /// The touchpad's recent movement: when, and how far, for the fling.
     strokes: Vec<(Instant, f64, f64)>,
+    /// The press under way: drag, long press, speed (gesture.rs).
+    press: gesture::Press,
     /// The surface covers its output: a cell is open, or closing.
     tall: bool,
     /// The output's logical size.
@@ -320,6 +322,7 @@ impl Surface {
             title_pressed: None,
             typing: false,
             strokes: Vec::new(),
+            press: gesture::Press::default(),
             tall: false,
             output_size,
             area: None,
@@ -395,7 +398,7 @@ pub struct App {
     modifiers: Modifiers,
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
-    input: Option<Box<dyn FnMut(usize, NodeId, Input)>>,
+    input: Option<Box<dyn FnMut(usize, NodeId, Input) -> bool>>,
     focus: Option<genoma_script::FocusQueue>,
     /// Surfaces the compositor gave another area than their trees were
     /// built for (another surface took or let go of a zone): each is built
@@ -458,6 +461,14 @@ pub struct App {
     /// the keys (CJK, emoji, dictation).
     text_input_manager: Option<ZwpTextInputManagerV3>,
     text_input: Option<ZwpTextInputV3>,
+    /// The screen's touches, and the touchpad's gestures (gesture.rs): the
+    /// fingers down, the pinch or swipe under way, and the node a resting
+    /// hold was told to.
+    touch: Option<smithay_client_toolkit::reexports::client::protocol::wl_touch::WlTouch>,
+    fingers: gesture::Fingers,
+    pointer_gestures: Option<smithay_client_toolkit::reexports::protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pad: Option<gesture::Pad>,
+    held: Option<(usize, NodeId)>,
     /// The surface the text input entered, whether it is enabled, the
     /// state last told to it, and what the input method sent before its
     /// next `done`.
@@ -550,6 +561,11 @@ impl App {
             dismissed: Vec::new(),
             text_input_manager: None,
             text_input: None,
+            touch: None,
+            fingers: gesture::Fingers::default(),
+            pointer_gestures: globals.bind(&qh, 1..=3, Ignore).ok(),
+            pad: None,
+            held: None,
             text_input_on: None,
             text_input_enabled: false,
             text_input_told: None,
@@ -1289,7 +1305,7 @@ impl App {
     }
 
     /// Where input is delivered: (the surface's tree index, node, input).
-    pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) + 'static) {
+    pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) -> bool + 'static) {
         self.input = Some(Box::new(f));
     }
 
@@ -2406,15 +2422,169 @@ impl App {
         self.surfaces.iter().position(|s| s.role.wl_surface() == Some(wl))
     }
 
+    /// A press, by the pointer or the first finger: `hit` is what it
+    /// landed on.
+    fn pointer_press(&mut self, i: usize, hit: Option<NodeId>, x: f32, y: f32, button: u32, serial: u32) {
+        let scene = self.surfaces[i].scene.clone();
+        self.input_serial = serial;
+        self.input_surface = self.surfaces[i].role.wl_surface().cloned();
+        // The pointer takes over from the keyboard's walk: its ring goes.
+        if self.walk_scope(i).is_some()
+            && let Some(f) = self.surfaces[i].focused.take()
+        {
+            self.deliver(i, f, Input::Focus(false));
+            scene.borrow_mut().set_focus_ring(None);
+        }
+        let catcher = scene.borrow().catcher();
+        if let Some(c) = catcher {
+            if hit.is_none_or(|h| !scene.borrow().within(h, c)) {
+                self.deliver(i, c, Input::Outside);
+            }
+        }
+        // A title bar's press is the compositor's: it moves the window, and
+        // nothing is pressed here.
+        if button == 0x110
+            && let Some(node) = hit
+            && scene.borrow().moves_window(node)
+            && self.press_title(i, serial)
+        {
+            return;
+        }
+        self.cancel_long_press(i);
+        self.surfaces[i].pressed = hit;
+        self.surfaces[i].press_point = (x, y);
+        let press = &mut self.surfaces[i].press;
+        press.id += 1;
+        press.dragging = false;
+        press.long_pressed = false;
+        press.samples.clear();
+        press.sample(Instant::now(), x, y);
+        if let Some(node) = hit {
+            let (lx, ly) = scene.borrow().local(node, x, y);
+            self.surfaces[i].pressed_at = (x - lx, y - ly);
+            // A field places its caret before the interface hears the press
+            // (which may give it the keys).
+            if button == 0x110 && scene.borrow().is_field(node) {
+                self.ensure_clipboard();
+                scene.borrow_mut().field_press(node, lx, self.modifiers.shift);
+            }
+            self.deliver(i, node, Input::Press(button, lx, ly));
+            self.await_long_press(i);
+        }
+    }
+
+    /// Held still for the `long_press` timing, the press becomes a long one.
+    fn await_long_press(&mut self, i: usize) {
+        let Some(handle) = &self.handle else { return };
+        let wait = genoma_core::timing::get("long_press")
+            .filter(|t| t.duration > 0.0)
+            .map_or(gesture::LONG_PRESS, |t| Duration::from_secs_f64(t.duration));
+        let (sid, id) = (self.surfaces[i].id, self.surfaces[i].press.id);
+        self.surfaces[i].press.timer = handle
+            .insert_source(Timer::from_duration(wait), move |_, _, app| {
+                if let Some(i) = app.surfaces.iter().position(|s| s.id == sid) {
+                    app.surfaces[i].press.timer = None;
+                    app.long_press(i, id);
+                }
+                TimeoutAction::Drop
+            })
+            .ok();
+    }
+
+    fn cancel_long_press(&mut self, i: usize) {
+        if let (Some(token), Some(handle)) = (self.surfaces[i].press.timer.take(), &self.handle) {
+            handle.remove(token);
+        }
+    }
+
+    fn long_press(&mut self, i: usize, id: u64) {
+        let Some(node) = self.surfaces[i].pressed else { return };
+        if self.surfaces[i].press.id != id {
+            return;
+        }
+        let (px, py) = self.surfaces[i].press_point;
+        let (lx, ly) = self.surfaces[i].scene.borrow().local(node, px, py);
+        let taken = self.deliver(i, node, Input::LongPress(lx, ly));
+        self.surfaces[i].press.long_pressed = taken;
+    }
+
+    /// The pointer or the first finger moving, pressed.
+    fn pointer_motion(&mut self, i: usize, x: f32, y: f32) {
+        let Some(node) = self.surfaces[i].pressed else { return };
+        if self.start_drag(i, node, x, y) {
+            return;
+        }
+        let scene = self.surfaces[i].scene.clone();
+        self.surfaces[i].press.sample(Instant::now(), x, y);
+        let (px, py) = self.surfaces[i].press_point;
+        let distance = (x - px).hypot(y - py);
+        if distance > gesture::SLOP {
+            self.cancel_long_press(i);
+        }
+        let (ox, oy) = self.surfaces[i].pressed_at;
+        if !self.surfaces[i].press.dragging {
+            // Without a threshold a drag starts with the first movement, as
+            // it always has.
+            let threshold = scene.borrow().drag_threshold(node);
+            if distance <= 0.0 || distance < threshold.unwrap_or(0.0) {
+                return;
+            }
+            self.surfaces[i].press.dragging = true;
+            self.deliver(i, node, Input::DragStart(px - ox, py - oy));
+        }
+        self.drag = Some((i, node, x - ox, y - oy));
+        if scene.borrow().is_field(node) {
+            scene.borrow_mut().field_drag(node, x - ox);
+        }
+    }
+
+    /// The pointer's button or the first finger let go.
+    fn pointer_release(&mut self, i: usize, hit: Option<NodeId>, x: f32, y: f32, button: u32) {
+        self.cancel_long_press(i);
+        let scene = self.surfaces[i].scene.clone();
+        // The node pressed hears its release wherever it is let go: a drag
+        // that ends over another node ends for the one that began it, as a
+        // pointer grab does. It is a click only let go over the node
+        // pressed, and not after a long press the interface took, nor after
+        // a drag past a threshold.
+        let pressed = self.surfaces[i].pressed.take();
+        if let Some(node) = pressed.or(hit) {
+            let (lx, ly) = scene.borrow().local(node, x, y);
+            self.deliver(i, node, Input::Release(button, lx, ly));
+            let mut clicks = pressed.is_some() && pressed == hit;
+            if let Some(p) = pressed {
+                clicks &= !self.surfaces[i].press.long_pressed;
+                if self.surfaces[i].press.dragging {
+                    let (vx, vy) = self.surfaces[i].press.velocity(Instant::now());
+                    self.deliver(i, p, Input::DragEnd(vx, vy));
+                    let (px, py) = self.surfaces[i].press_point;
+                    if let Some(way) = gesture::swipe((x - px).hypot(y - py), vx, vy) {
+                        self.deliver(i, p, Input::Swipe(way, vx.hypot(vy)));
+                    }
+                    clicks &= scene.borrow().drag_threshold(p).is_none();
+                }
+            }
+            if clicks {
+                self.deliver(i, node, Input::Click(button, lx, ly));
+            }
+        }
+        let press = &mut self.surfaces[i].press;
+        press.dragging = false;
+        press.long_pressed = false;
+        press.samples.clear();
+    }
+
     fn flush_drag(&mut self) {
         if let Some((i, node, x, y)) = self.drag.take() {
             self.deliver(i, node, Input::Drag(x, y));
         }
     }
 
-    fn deliver(&mut self, i: usize, node: NodeId, input: Input) {
-        if let Some(f) = self.input.as_mut() {
-            f(i, node, input);
+    /// Whether a node took it.
+    fn deliver(&mut self, i: usize, node: NodeId, input: Input) -> bool {
+        match self.input.as_mut() {
+            Some(f) => f(i, node, input),
+            None => false,
         }
     }
 
@@ -3168,6 +3338,18 @@ impl SeatHandler for App {
             if let (Some(pointer), Some(shapes)) = (&self.pointer, &self.cursor_shapes) {
                 self.cursor_device = Some(shapes.get_shape_device(pointer, qh));
             }
+            // The touchpad's pinch, swipe and hold, where the compositor
+            // offers them. The objects live as long as the connection.
+            if let (Some(pointer), Some(gestures)) = (&self.pointer, &self.pointer_gestures) {
+                gestures.get_pinch_gesture(pointer, qh, gesture::GestureData);
+                gestures.get_swipe_gesture(pointer, qh, gesture::GestureData);
+                if gestures.version() >= 3 {
+                    gestures.get_hold_gesture(pointer, qh, gesture::GestureData);
+                }
+            }
+        }
+        if capability == Capability::Touch && self.touch.is_none() {
+            self.touch = self.seats.get_touch(qh, &seat).ok();
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let _ = qh;
@@ -3280,74 +3462,9 @@ impl PointerHandler for App {
                 self.set_cursor(wanted);
             }
             match event.kind {
-                K::Motion { .. } => {
-                    if let Some(node) = self.surfaces[i].pressed
-                        && self.start_drag(i, node, x, y)
-                    {
-                        continue;
-                    }
-                    if let Some(node) = self.surfaces[i].pressed {
-                        let (ox, oy) = self.surfaces[i].pressed_at;
-                        self.drag = Some((i, node, x - ox, y - oy));
-                        if scene.borrow().is_field(node) {
-                            scene.borrow_mut().field_drag(node, x - ox);
-                        }
-                    }
-                }
-                K::Press { button, serial, .. } => {
-                    self.input_serial = serial;
-                    self.input_surface = self.surfaces[i].role.wl_surface().cloned();
-                    // The pointer takes over from the keyboard's walk: its
-                    // ring goes.
-                    if self.walk_scope(i).is_some()
-                        && let Some(f) = self.surfaces[i].focused.take()
-                    {
-                        self.deliver(i, f, Input::Focus(false));
-                        scene.borrow_mut().set_focus_ring(None);
-                    }
-                    let catcher = scene.borrow().catcher();
-                    if let Some(c) = catcher {
-                        if hit.is_none_or(|h| !scene.borrow().within(h, c)) {
-                            self.deliver(i, c, Input::Outside);
-                        }
-                    }
-                    // A title bar's press is the compositor's: it moves the
-                    // window, and nothing is pressed here.
-                    if button == 0x110
-                        && let Some(node) = hit
-                        && scene.borrow().moves_window(node)
-                        && self.press_title(i, serial)
-                    {
-                        continue;
-                    }
-                    self.surfaces[i].pressed = hit;
-                    self.surfaces[i].press_point = (x, y);
-                    if let Some(node) = hit {
-                        let (lx, ly) = scene.borrow().local(node, x, y);
-                        self.surfaces[i].pressed_at = (x - lx, y - ly);
-                        // A field places its caret before the interface
-                        // hears the press (which may give it the keys).
-                        if button == 0x110 && scene.borrow().is_field(node) {
-                            self.ensure_clipboard();
-                            scene.borrow_mut().field_press(node, lx, self.modifiers.shift);
-                        }
-                        self.deliver(i, node, Input::Press(button, lx, ly));
-                    }
-                }
-                K::Release { button, .. } => {
-                    // The node pressed hears its release wherever the pointer
-                    // is let go: a drag that ends over another node ends for
-                    // the one that began it, as a pointer grab does. It is a
-                    // click only let go over the node pressed.
-                    let pressed = self.surfaces[i].pressed.take();
-                    if let Some(node) = pressed.or(hit) {
-                        let (lx, ly) = scene.borrow().local(node, x, y);
-                        self.deliver(i, node, Input::Release(button, lx, ly));
-                        if pressed.is_some() && pressed == hit {
-                            self.deliver(i, node, Input::Click(button, lx, ly));
-                        }
-                    }
-                }
+                K::Motion { .. } => self.pointer_motion(i, x, y),
+                K::Press { button, serial, .. } => self.pointer_press(i, hit, x, y, button, serial),
+                K::Release { button, .. } => self.pointer_release(i, hit, x, y, button),
                 K::Axis { horizontal, vertical, source, .. } => {
                     let Some(node) = hit else { continue };
                     // A touchpad stroke is followed, and remembered: when the
@@ -3500,6 +3617,7 @@ delegate_registry!(App);
 
 mod displays;
 mod gamma;
+mod gesture;
 mod wm;
 smithay_client_toolkit::delegate_dispatch2!(App);
 

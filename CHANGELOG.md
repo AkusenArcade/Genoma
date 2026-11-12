@@ -51,6 +51,28 @@ changes what a shell sees.
   it stretches between them. Along an axis it is not pinned, `attach`
   still places it.
 - `examples/layout`.
+- Touchscreens: the first finger is the pointer — it presses, drags and
+  clicks what it touches — and a second makes the two a pinch.
+- Touchpad gestures (`zwp_pointer_gestures_v1`): pinch, swipe and hold.
+- `on_pinch(scale, rotation, phase, x, y)`: two fingers on a touchpad or
+  a screen, scale since they began, turn in degrees, phase `"begin"`,
+  `"update"`, `"end"` or `"cancel"`.
+- `on_swipe(direction, speed)`: a drag let go moving fast enough, far
+  enough, or a touchpad swipe of several fingers.
+- `on_long_press(x, y)`: a press held still for the `long_press` timing
+  (0.5 s without one); the release after one the interface took is no
+  click.
+- `on_drag_start(x, y)` and `on_drag_end(vx, vy)`, the speed at release;
+  `drag_threshold`, past which a press is a drag (and no click).
+- `on_hold(resting)`: fingers resting on a touchpad. Scrollers and
+  `g.list` stop a fling on it.
+- `require("@genoma/kit/gestures")`: `draggable` (axis, bounds, a throw
+  carried on, `snap` points to settle on), `zoomable` (pinch, wheel,
+  springing back past `min`/`max`) and `dismissable` (swiped away or
+  sprung back), each with `attach` to add its handlers to a node; timings
+  `gesture_glide`, `gesture_snap`, `gesture_out`. `examples/gestures`.
+- `g.animated` moves on a spring when its timing entry is one, a
+  redirected spring keeping its speed; before, it jumped there.
 
 ### Changed
 

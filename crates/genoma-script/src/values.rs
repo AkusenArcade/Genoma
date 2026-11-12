@@ -211,6 +211,23 @@ struct Motion {
     to: Kind,
     start: Instant,
     timing: Timing,
+    /// On a spring: where it is and how fast it goes, per component, and
+    /// when it was last stepped.
+    spring: Option<(Vec<f64>, Vec<f64>, Instant)>,
+}
+
+fn components(k: Kind) -> Vec<f64> {
+    match k {
+        Kind::Number(n) => vec![n],
+        Kind::Colour(c) => c.iter().map(|v| *v as f64).collect(),
+    }
+}
+
+fn from_components(like: Kind, x: &[f64]) -> Kind {
+    match like {
+        Kind::Number(_) => Kind::Number(x[0]),
+        Kind::Colour(_) => Kind::Colour([0, 1, 2, 3].map(|i| x[i].clamp(0.0, 1.0) as f32)),
+    }
 }
 
 struct Inner {
@@ -258,10 +275,36 @@ impl Inner {
     /// One step of the motion; `false` once it has arrived.
     fn step(&self) -> bool {
         let mut motion = self.motion.borrow_mut();
-        let Some(m) = motion.as_ref() else { return false };
+        let Some(m) = motion.as_mut() else { return false };
         let elapsed = m.start.elapsed().as_secs_f64() - m.timing.delay;
         if elapsed < 0.0 {
             return true;
+        }
+        // A spring integrates, as the scene's do: settled within a hair of
+        // its target and nearly still.
+        if let (Some(spring), Some((x, v, last))) = (m.timing.spring, m.spring.as_mut()) {
+            let now = Instant::now();
+            let dt = now.duration_since(*last).as_secs_f64().min(1.0 / 30.0);
+            *last = now;
+            let target = components(m.to);
+            let steps = ((dt / (1.0 / 480.0)).ceil() as usize).clamp(1, 64);
+            let h = dt / steps as f64;
+            for _ in 0..steps {
+                for i in 0..x.len() {
+                    let force = -spring.stiffness * (x[i] - target[i]) - spring.damping * v[i];
+                    v[i] += force / spring.mass * h;
+                    x[i] += v[i] * h;
+                }
+            }
+            let near = if matches!(m.to, Kind::Colour(_)) { 0.002 } else { 0.01 };
+            let settled = x.iter().zip(&target).all(|(p, t)| (p - t).abs() < near) && v.iter().all(|s| s.abs() < near * 4.0);
+            let value = if settled { m.to } else { from_components(m.to, x) };
+            if settled {
+                motion.take();
+            }
+            drop(motion);
+            self.value.set(Some(value));
+            return !settled;
         }
         let t = (elapsed / m.timing.duration.max(1e-6)).clamp(0.0, 1.0);
         let value = mix(m.from, m.to, m.timing.curve.eval(t));
@@ -298,8 +341,9 @@ impl UserData for Animated {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // a:set(value, "theme"): there over that timing set entry; without one,
-        // or with an entry that does not move, at once.
+        // a:set(value, "theme"): there over that timing set entry, its curve
+        // or its spring; without one, or with an entry that does not move,
+        // at once.
         methods.add_method("set", |_, this, (target, timing_name): (LuaValue, Option<String>)| {
             let to = from_lua(&target)?;
             let inner = &this.0;
@@ -309,7 +353,7 @@ impl UserData for Animated {
             };
             let from = untracked(|| inner.now());
             let moving = match (timing, from) {
-                (Some(t), Some(from)) if t.moves() && t.spring.is_none() && from != to => Some((t, from)),
+                (Some(t), Some(from)) if t.moves() && from != to => Some((t, from)),
                 _ => None,
             };
             let Some((timing, from)) = moving else {
@@ -317,7 +361,15 @@ impl UserData for Animated {
                 inner.value.set(Some(to));
                 return Ok(());
             };
-            *inner.motion.borrow_mut() = Some(Motion { from, to, start: Instant::now(), timing });
+            // A spring already moving keeps its speed: redirected, it bends
+            // toward the new target rather than starting again.
+            let spring = timing.spring.map(|_| {
+                let x = components(from);
+                let carried = inner.motion.borrow().as_ref().and_then(|m| m.spring.as_ref().map(|(_, v, _)| v.clone()));
+                let v = carried.filter(|v| v.len() == x.len()).unwrap_or_else(|| vec![0.0; x.len()]);
+                (x, v, Instant::now())
+            });
+            *inner.motion.borrow_mut() = Some(Motion { from, to, start: Instant::now(), timing, spring });
             MOVING.with(|m| {
                 let mut m = m.borrow_mut();
                 if !m.iter().any(|w| w.as_ptr() == Rc::as_ptr(inner)) {

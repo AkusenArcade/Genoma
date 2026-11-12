@@ -352,6 +352,20 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
         }
         Ok(())
     })?;
+    // Fingers resting on the touchpad stop a fling where it is; nothing
+    // moving, the hold is the scroller around's.
+    let s = Rc::downgrade(&scroll);
+    let on_hold = lua.create_function(move |_, resting: bool| {
+        let Some(s) = s.upgrade() else { return Ok(LuaValue::Boolean(false)) };
+        if !resting || s.ticking.get().is_none() {
+            return Ok(LuaValue::Boolean(false));
+        }
+        s.stop();
+        let at = s.now();
+        s.velocity.set(0.0);
+        s.target.set(at);
+        Ok(LuaValue::Nil)
+    })?;
     let theirs = handlers.borrow().get(&(target, node)).and_then(|h| h.get("on_size")).cloned();
     let (s, sc) = (Rc::downgrade(&scroll), scene.clone());
     let on_size = lua.create_function(move |_, (w, h): (f64, f64)| {
@@ -371,6 +385,7 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
         let mine = handlers.entry((target, node)).or_default();
         mine.insert("on_wheel", on_wheel);
         mine.insert("on_fling", on_fling);
+        mine.insert("on_hold", on_hold);
         mine.insert("on_size", on_size);
     }
     {

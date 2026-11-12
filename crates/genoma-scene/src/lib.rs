@@ -246,6 +246,7 @@ pub struct Node {
     /// stretches between them.
     inset: [Option<f32>; 4],
     size_given: [bool; 2],
+    drag_threshold: Option<f32>,
     dash: [f32; 2],
     italic: bool,
     wrap: bool,
@@ -450,6 +451,7 @@ impl Node {
             gap_lines: None,
             inset: [None; 4],
             size_given: [false; 2],
+            drag_threshold: None,
             dash: [0.0; 2],
             italic: false,
             wrap: false,
@@ -957,6 +959,19 @@ impl Scene {
             start: [l.padding.left + l.border.left, l.padding.top + l.border.top],
             children,
         })
+    }
+
+    /// How far a press on `node` must move to be a drag: its own
+    /// `drag_threshold`, or the nearest around it; None when none sets one.
+    pub fn drag_threshold(&self, node: NodeId) -> Option<f32> {
+        let mut at = Some(node);
+        while let Some(id) = at {
+            if let Some(t) = self.tree.get_node_context(id).and_then(|n| n.drag_threshold) {
+                return Some(t);
+            }
+            at = self.parent(id);
+        }
+        None
     }
 
     /// Whether a node around `node` (not `node` itself) scrolls down: a
@@ -1551,6 +1566,11 @@ impl Scene {
     }
 
     /// Whether a button is held, as the pointer last said.
+    /// Where the pointer is, and whether it is held; None off the surface.
+    pub fn pointer(&self) -> Option<(f32, f32, bool)> {
+        self.pointer
+    }
+
     pub fn pointer_held(&self) -> bool {
         self.pointer.is_some_and(|p| p.2)
     }
@@ -1967,6 +1987,7 @@ impl Scene {
             Prop::FadeBottom => n.fade_bottom = take!(number),
             Prop::ScrollY => n.scroll_y = take!(number),
             Prop::ScrollX => n.scroll_x = take!(number),
+            Prop::DragThreshold => n.drag_threshold = Some(take!(number).max(0.0)),
             Prop::Dash => n.dash[0] = take!(number).max(0.0),
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
             Prop::Italic => (n.italic, reshape) = (take!(flag), true),

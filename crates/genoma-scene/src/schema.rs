@@ -184,6 +184,7 @@ pub enum Prop {
     Top,
     Right,
     Bottom,
+    DragThreshold,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,6 +310,7 @@ pub const PROPS: &[PropInfo] = &[
     p("left", Prop::Left, Ty::Number, false, "An overlay's distance from its parent's left edge. With `right` too and no width, it stretches between them."),
     p("top", Prop::Top, Ty::Number, false, "An overlay's distance from its parent's top edge. With `bottom` too and no height, it stretches between them."),
     p("right", Prop::Right, Ty::Number, false, "An overlay's distance from its parent's right edge."),
+    p("drag_threshold", Prop::DragThreshold, Ty::Number, false, "How far a press must move, logical units, before it is a drag: `on_drag_start` then, `on_drag` after, and a press dragged that far is no click when let go. Without one a drag starts with the first movement and a release over the node still clicks. Read from the node pressed or the nearest around it that sets one."),
     p("bottom", Prop::Bottom, Ty::Number, false, "An overlay's distance from its parent's bottom edge."),
     p("dash", Prop::Dash, Ty::Number, false, "A round rim drawn in dashes this long, logical units; 0 is solid."),
     p("dash_gap", Prop::DashGap, Ty::Number, false, "The space between dashes, logical units."),
@@ -496,6 +498,21 @@ fn node_fields() -> String {
          \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ())?,\n\
          \x20   -- Something being dragged came over it (true) or left.\n\
          \x20   on_drop_hover: ((over: boolean) -> ())?,\n\
+         \x20   -- A drag began (past drag_threshold), where it was pressed; it\n\
+         \x20   -- ended, at this speed, logical units a second.\n\
+         \x20   on_drag_start: ((x: number, y: number) -> ())?,\n\
+         \x20   on_drag_end: ((vx: number, vy: number) -> ())?,\n\
+         \x20   -- Held still, pressed, for the long_press timing; the release is\n\
+         \x20   -- then no click.\n\
+         \x20   on_long_press: ((x: number, y: number) -> ())?,\n\
+         \x20   -- A quick stroke: a drag let go moving, or a touchpad swipe.\n\
+         \x20   on_swipe: ((direction: \"left\" | \"right\" | \"up\" | \"down\", speed: number) -> ())?,\n\
+         \x20   -- Two fingers, on a touchpad or a screen: scale since they began,\n\
+         \x20   -- turn in degrees, phase, and their middle.\n\
+         \x20   on_pinch: ((scale: number, rotation: number, phase: \"begin\" | \"update\" | \"end\" | \"cancel\", x: number, y: number) -> ())?,\n\
+         \x20   -- Fingers resting on a touchpad (true), lifted (false). Answering\n\
+         \x20   -- false passes it on.\n\
+         \x20   on_hold: ((resting: boolean) -> boolean?)?,\n\
          \x20   [number]: Node,\n",
     );
     out

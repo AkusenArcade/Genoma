@@ -17,8 +17,9 @@ export type Animated = {
     read value: number | string,
     -- Where it is going.
     read target: number | string,
-    -- a:set(value, "theme"): there over that timing entry; without one, or
-    -- with one that does not move, at once.
+    -- a:set(value, "theme"): there over that timing entry, its curve or
+    -- its spring (one redirected keeps its speed); without one, or with
+    -- one that does not move, at once.
     set: (self: Animated, value: number | string, timing: string?) -> (),
 }
 

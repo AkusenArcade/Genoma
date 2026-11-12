@@ -22,4 +22,5 @@ return {
     field = require("@genoma/kit/field"),
     titlebar = require("@genoma/kit/titlebar"),
     chart = require("@genoma/kit/chart"),
+    gestures = require("@genoma/kit/gestures"),
 }

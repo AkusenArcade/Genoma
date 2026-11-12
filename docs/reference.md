@@ -139,6 +139,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `left` | number |  | An overlay's distance from its parent's left edge. With `right` too and no width, it stretches between them. |
 | `top` | number |  | An overlay's distance from its parent's top edge. With `bottom` too and no height, it stretches between them. |
 | `right` | number |  | An overlay's distance from its parent's right edge. |
+| `drag_threshold` | number |  | How far a press must move, logical units, before it is a drag: `on_drag_start` then, `on_drag` after, and a press dragged that far is no click when let go. Without one a drag starts with the first movement and a release over the node still clicks. Read from the node pressed or the nearest around it that sets one. |
 | `bottom` | number |  | An overlay's distance from its parent's bottom edge. |
 | `dash` | number |  | A round rim drawn in dashes this long, logical units; 0 is solid. |
 | `dash_gap` | number |  | The space between dashes, logical units. |
@@ -251,6 +252,12 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_submit`: `(text: string) -> ()`
 - `on_drop`: `(drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ()`
 - `on_drop_hover`: `(over: boolean) -> ()`
+- `on_drag_start`: `(x: number, y: number) -> ()`
+- `on_drag_end`: `(vx: number, vy: number) -> ()`
+- `on_long_press`: `(x: number, y: number) -> ()`
+- `on_swipe`: `(direction: "left" | "right" | "up" | "down", speed: number) -> ()`
+- `on_pinch`: `(scale: number, rotation: number, phase: "begin" | "update" | "end" | "cancel", x: number, y: number) -> ()`
+- `on_hold`: `(resting: boolean) -> boolean?`
 - `on_scroll`: `(x: number, y: number) -> ()`
 
 ## g
@@ -1815,7 +1822,7 @@ What g.animated gives: a number or "#rrggbbaa" that moves.
 |---|---|---|
 | `value` | `number \| string` | Where it is now. |
 | `target` | `number \| string` | Where it is going. |
-| `set` | `(self: Animated, value: number \| string, timing: string?) -> ()` | a:set(value, "theme"): there over that timing entry; without one, or with one that does not move, at once. |
+| `set` | `(self: Animated, value: number \| string, timing: string?) -> ()` | a:set(value, "theme"): there over that timing entry, its curve or its spring (one redirected keeps its speed); without one, or with one that does not move, at once. |
 
 ### Stoppable
 

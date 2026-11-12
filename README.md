@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
+[`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`gestures`](examples/gestures/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -227,6 +227,18 @@ return g.surface {
   steps or a touchpad's distance. `on_hover` means within: over a child,
   the pointer is still over its parent, which hears nothing until the
   pointer leaves it too.
+- **Gestures:** a touchscreen's first finger is the pointer (press, drag,
+  click), two fingers pinch. `on_pinch(scale, rotation, phase, x, y)`
+  hears two fingers on a screen or a touchpad, `on_swipe(direction,
+  speed)` a quick stroke (a drag let go moving, or a touchpad swipe),
+  `on_long_press(x, y)` a press held still (the release is then no
+  click), `on_drag_start` and `on_drag_end(vx, vy)` a drag's ends;
+  `drag_threshold = 6` makes a press a drag only past that distance.
+  Fingers resting on a touchpad (`on_hold`) stop a scroller's fling.
+  `require("@genoma/kit/gestures")` has them ready: `draggable` (bounds,
+  a throw that carries on, stops to settle on), `zoomable` (pinch and
+  wheel, springing back past its limits) and `dismissable` (swiped away,
+  or back if not far enough). See `examples/gestures`.
 - **Popups inside a tree:** a `g.popup` written as a child of a node is
   taken out at load and becomes a surface of its own, anchored to that
   node (which is given an id if it has none): a menu is written inside the
