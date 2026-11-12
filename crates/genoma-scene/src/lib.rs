@@ -232,6 +232,20 @@ pub struct Node {
     clip: bool,
     fade_bottom: f32,
     scroll_y: f32,
+    scroll_x: f32,
+    /// Which axes Genoma scrolls itself (`scroll`): 1 across, 2 down.
+    scroll_axes: u8,
+    /// Where a scroller settles: 0 anywhere, 1 a child's start, 2 its centre.
+    snap: u8,
+    /// `gap` and `gap_lines` as given, laid on taffy's two gaps by direction.
+    gap: f32,
+    gap_lines: Option<f32>,
+    /// An overlay's distances from its parent's left, top, right and
+    /// bottom edges (`left`, …), and whether it was given a width and a
+    /// height: one pinned to both edges of an axis without a size there
+    /// stretches between them.
+    inset: [Option<f32>; 4],
+    size_given: [bool; 2],
     dash: [f32; 2],
     italic: bool,
     wrap: bool,
@@ -429,6 +443,13 @@ impl Node {
             clip: false,
             fade_bottom: 0.0,
             scroll_y: 0.0,
+            scroll_x: 0.0,
+            scroll_axes: 0,
+            snap: 0,
+            gap: 0.0,
+            gap_lines: None,
+            inset: [None; 4],
+            size_given: [false; 2],
             dash: [0.0; 2],
             italic: false,
             wrap: false,
@@ -535,7 +556,7 @@ struct Animation {
 /// quarter of a physical pixel for a length, under 1/500 for anything else.
 fn unseen(prop: Prop, a: &Value, b: &Value, scale: f32) -> bool {
     let lengths = [
-        Prop::Width, Prop::Height, Prop::Radius, Prop::OffsetX, Prop::OffsetY, Prop::ScrollY,
+        Prop::Width, Prop::Height, Prop::Radius, Prop::OffsetX, Prop::OffsetY, Prop::ScrollY, Prop::ScrollX,
         Prop::FromX, Prop::FromY, Prop::ToX, Prop::ToY, Prop::BendX, Prop::BendY,
     ];
     let near = if lengths.contains(&prop) { step() / scale.max(0.01) } else { 0.002 };
@@ -764,6 +785,9 @@ pub struct Scene {
     /// (none before the first layout), and the changes since the last take,
     /// for `on_size`.
     sized: std::collections::HashMap<NodeId, Option<[f32; 2]>>,
+    /// Overlays pinned to both edges of an axis without a size there: given
+    /// one after each layout (`stretch_pinned`).
+    pinned: std::collections::HashSet<NodeId>,
     newly_sized: Vec<(NodeId, f32, f32)>,
     /// The node an inspector points at, outlined over everything.
     highlight: Option<NodeId>,
@@ -820,6 +844,7 @@ impl Scene {
             newly_ready: Vec::new(),
             animated: Vec::new(),
             sized: Default::default(),
+            pinned: Default::default(),
             newly_sized: Vec::new(),
             highlight: None,
             focus_ring: None,
@@ -861,6 +886,90 @@ impl Scene {
     /// out: what its own height does not leave its children.
     pub fn inset_y(&self, node: NodeId) -> f32 {
         self.tree.layout(node).map_or(0.0, |l| l.padding.top + l.padding.bottom + l.border.top + l.border.bottom)
+    }
+
+    /// Gives each overlay pinned to both edges of an axis the room between
+    /// them in its parent as laid out; true when one changed, so the tree
+    /// is laid out again.
+    fn stretch_pinned(&mut self) -> bool {
+        let mut changed = false;
+        let pinned: Vec<NodeId> = self.pinned.iter().copied().collect();
+        for node in pinned {
+            let Some(n) = self.tree.get_node_context(node) else {
+                self.pinned.remove(&node);
+                continue;
+            };
+            let (inset, given) = (n.inset, n.size_given);
+            let Some(parent) = self.parent(node) else { continue };
+            let Ok(room) = self.tree.layout(parent).map(|l| [l.size.width, l.size.height]) else { continue };
+            let Ok(mut style) = self.tree.style(node).cloned() else { continue };
+            let mut set = false;
+            for axis in 0..2 {
+                if let (Some(a), Some(b), false) = (inset[axis], inset[axis + 2], given[axis]) {
+                    let want = Dimension::length((room[axis] - a - b).max(0.0));
+                    let size = if axis == 0 { &mut style.size.width } else { &mut style.size.height };
+                    if *size != want {
+                        *size = want;
+                        set = true;
+                    }
+                }
+            }
+            if set {
+                self.tree.set_style(node, style).ok();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// What a scroller needs to move: its axes, where it settles, how far
+    /// it can go, the room it shows its content in, its padding at the
+    /// start, and — when it snaps — its children's rectangles relative to
+    /// it, as laid out, before scrolling. None for a node that is not one.
+    pub fn scroll_info(&self, node: NodeId) -> Option<ScrollInfo> {
+        let n = self.tree.get_node_context(node)?;
+        if n.scroll_axes == 0 {
+            return None;
+        }
+        let l = self.tree.layout(node).ok()?;
+        let children = if n.snap == 0 {
+            Vec::new()
+        } else {
+            self.tree
+                .children(node)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| {
+                    self.tree.get_node_context(*c).is_some_and(|n| n.present)
+                        && self.tree.style(*c).is_ok_and(|s| s.position != taffy::Position::Absolute)
+                })
+                .filter_map(|c| self.tree.layout(c).ok().map(|l| [l.location.x, l.location.y, l.size.width, l.size.height]))
+                .collect()
+        };
+        Some(ScrollInfo {
+            axes: [n.scroll_axes & 1 != 0, n.scroll_axes & 2 != 0],
+            snap: n.snap,
+            room: [l.scroll_width(), l.scroll_height()],
+            view: [
+                (l.size.width - l.padding.left - l.padding.right - l.border.left - l.border.right).max(0.0),
+                (l.size.height - l.padding.top - l.padding.bottom - l.border.top - l.border.bottom).max(0.0),
+            ],
+            start: [l.padding.left + l.border.left, l.padding.top + l.border.top],
+            children,
+        })
+    }
+
+    /// Whether a node around `node` (not `node` itself) scrolls down: a
+    /// scroller with that axis, or a `g.list`.
+    pub fn scrolls_down_around(&self, node: NodeId) -> bool {
+        let mut at = self.parent(node);
+        while let Some(id) = at {
+            if self.tree.get_node_context(id).is_some_and(|n| n.scroll_axes & 2 != 0 || n.rows_list) {
+                return true;
+            }
+            at = self.parent(id);
+        }
+        false
     }
 
     /// The space between `node`'s children, logical units.
@@ -1143,6 +1252,7 @@ impl Scene {
         self.animations.retain(|a| a.node != node);
         self.movers.retain(|&m| m != node);
         self.sized.remove(&node);
+        self.pinned.remove(&node);
         self.newly_sized.retain(|&(n, ..)| n != node);
         let _ = self.tree.remove(node);
         self.dirty = true;
@@ -1608,6 +1718,7 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::Growth => Value::Number(n.growth),
             Prop::Reach => Value::Number(n.reach),
             Prop::ScrollY => Value::Number(n.scroll_y),
+            Prop::ScrollX => Value::Number(n.scroll_x),
             Prop::FromX => Value::Number(n.path[0]),
             Prop::FromY => Value::Number(n.path[1]),
             Prop::BendX => Value::Number(n.path[2]),
@@ -1676,8 +1787,14 @@ impl Scene {
             };
         }
         match prop {
-            Prop::Width => (style.size.width, restyle) = (Dimension::length(take!(number)), true),
-            Prop::Height => (style.size.height, restyle) = (Dimension::length(take!(number)), true),
+            Prop::Width => {
+                n.size_given[0] = true;
+                (style.size.width, restyle) = (Dimension::length(take!(number)), true)
+            }
+            Prop::Height => {
+                n.size_given[1] = true;
+                (style.size.height, restyle) = (Dimension::length(take!(number)), true)
+            }
             Prop::MinWidth => {
                 (style.min_size.width, restyle) = (LengthPercentageAuto::length(take!(number)), true)
             }
@@ -1702,11 +1819,64 @@ impl Scene {
                 let l = LengthPercentage::length(take!(number));
                 (style.padding.top, style.padding.bottom, restyle) = (l, l, true);
             }
-            Prop::Gap => (style.gap, restyle) = (Size::length(take!(number)), true),
+            Prop::Gap => {
+                n.gap = take!(number);
+                lay_gaps(&mut style, n.gap, n.gap_lines);
+                restyle = true;
+            }
+            Prop::GapLines => {
+                n.gap_lines = Some(take!(number));
+                lay_gaps(&mut style, n.gap, n.gap_lines);
+                restyle = true;
+            }
             Prop::Direction => {
                 style.flex_direction =
                     if take!(text) == "column" { FlexDirection::Column } else { FlexDirection::Row };
+                lay_gaps(&mut style, n.gap, n.gap_lines);
                 restyle = true;
+            }
+            Prop::Flow => {
+                let on = take!(flag);
+                style.flex_wrap = if on { taffy::FlexWrap::Wrap } else { taffy::FlexWrap::NoWrap };
+                // Lines packed at the start, not spread over a container
+                // taller than they are.
+                style.align_content = if on { taffy::AlignContent::FLEX_START } else { taffy::AlignContent::NORMAL };
+                restyle = true;
+            }
+            // Not taffy's insets: its absolute boxes are placed in their
+            // containing block, the root for Genoma's nodes, and making
+            // every node one would change how wide every overlay may grow.
+            // `place` puts them; `stretch_pinned` sizes them.
+            Prop::Left | Prop::Top | Prop::Right | Prop::Bottom => {
+                let i = match prop {
+                    Prop::Left => 0,
+                    Prop::Top => 1,
+                    Prop::Right => 2,
+                    _ => 3,
+                };
+                n.inset[i] = Some(take!(number));
+            }
+            Prop::Scroll => {
+                n.scroll_axes = match take!(text).as_str() {
+                    "x" => 1,
+                    "y" => 2,
+                    "both" => 3,
+                    _ => 0,
+                };
+                // A scroll container: its content does not set its least
+                // size, and what overflows is its room.
+                let axis = |on: bool| if on { taffy::Overflow::Hidden } else { taffy::Overflow::Visible };
+                style.overflow = taffy::Point { x: axis(n.scroll_axes & 1 != 0), y: axis(n.scroll_axes & 2 != 0) };
+                style.scrollbar_width = 0.0;
+                n.clip = n.scroll_axes != 0 || n.clip;
+                restyle = true;
+            }
+            Prop::Snap => {
+                n.snap = match take!(text).as_str() {
+                    "start" => 1,
+                    "center" => 2,
+                    _ => 0,
+                }
             }
             Prop::Align => {
                 style.align_items = match take!(text).as_str() {
@@ -1796,6 +1966,7 @@ impl Scene {
             Prop::Clip => n.clip = take!(flag),
             Prop::FadeBottom => n.fade_bottom = take!(number),
             Prop::ScrollY => n.scroll_y = take!(number),
+            Prop::ScrollX => n.scroll_x = take!(number),
             Prop::Dash => n.dash[0] = take!(number).max(0.0),
             Prop::DashGap => n.dash[1] = take!(number).max(0.0),
             Prop::Italic => (n.italic, reshape) = (take!(flag), true),
@@ -2131,11 +2302,30 @@ impl Scene {
                 restyle = true;
             }
         }
+        // A scroller's children aligned safely: content larger than it starts
+        // at its start rather than centred, half of it out of reach above.
+        if matches!(prop, Prop::Scroll | Prop::Align | Prop::Justify) && n.scroll_axes != 0 {
+            style.align_items.safety = taffy::AlignmentSafety::Safe;
+            style.justify_content.safety = taffy::AlignmentSafety::Safe;
+            restyle = true;
+        }
         let moves = n.pulse > 0.0 || n.orbit != 0.0 || n.wave_time > 0.0 || n.sway > 0.0 || n.arc_rate > 0.0 || n.kind == Kind::Emitter
             || n.kind == Kind::Shader;
         if reshape {
             n.buffer = None;
             self.tree.mark_dirty(node).ok();
+        }
+        if matches!(prop, Prop::Left | Prop::Top | Prop::Right | Prop::Bottom | Prop::Width | Prop::Height)
+            && let Some(n) = self.tree.get_node_context(node)
+        {
+            let stretches = (n.inset[0].is_some() && n.inset[2].is_some() && !n.size_given[0])
+                || (n.inset[1].is_some() && n.inset[3].is_some() && !n.size_given[1]);
+            if stretches {
+                self.pinned.insert(node);
+            } else {
+                self.pinned.remove(&node);
+            }
+            self.dirty = true;
         }
         if restyle {
             self.tree.set_style(node, style).ok();
@@ -2508,43 +2698,24 @@ impl Scene {
         }
         let mut fonts = self.fonts.lock().unwrap();
         let measure = |inputs: taffy::LayoutInput, _: NodeId, node: Option<&mut Node>, style: &Style| {
-            taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, _available| match node {
-                Some(n) if n.kind == Kind::Text => {
-                    let buffer = shape(&mut fonts, n);
-                    let (mut w, mut h) = (0.0f32, 0.0f32);
-                    for run in buffer.layout_runs() {
-                        w = w.max(run.line_w);
-                        h += run.line_height;
-                    }
-                    // Aligned lines are placed within the whole width, so the
-                    // node takes it.
-                    if n.text_align != 0 {
-                        w = n.max_width.unwrap_or(w);
-                    }
-                    Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h.ceil()) }
-                }
-                // A field is a line high, and as wide as what it shows and
-                // its caret unless given a width.
-                // A path reaches as far right and down as its outline, from
-                // its own corner, unless given a size.
-                Some(n) if n.kind == Kind::Path => Size {
-                    width: known.width.unwrap_or(n.reach_of_path[0].ceil()),
-                    height: known.height.unwrap_or(n.reach_of_path[1].ceil()),
-                },
-                Some(n) if n.kind == Kind::Field => {
-                    let buffer = shape(&mut fonts, n);
-                    let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) + 1.0;
-                    let h = (n.font_size * 1.2).ceil();
-                    Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h) }
-                }
-                _ => Size::ZERO,
-            })
+            measure_leaf(&mut fonts, inputs, node, style)
         };
         let space = Size {
             width: width.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
             height: height.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
         };
         self.tree.compute_layout_with_measure(self.root, space, measure).expect("layout");
+        drop(fonts);
+        // An overlay pinned to both edges takes the room between them, which
+        // is known only once its parent is laid out: given it, the tree is
+        // laid out again, its content at that size.
+        if self.stretch_pinned() {
+            let mut fonts = self.fonts.lock().unwrap();
+            let measure = |inputs: taffy::LayoutInput, _: NodeId, node: Option<&mut Node>, style: &Style| {
+                measure_leaf(&mut fonts, inputs, node, style)
+            };
+            self.tree.compute_layout_with_measure(self.root, space, measure).expect("layout");
+        }
         for (&node, told) in self.sized.iter_mut() {
             let Ok(l) = self.tree.layout(node) else { continue };
             let now = [l.size.width, l.size.height];
@@ -3238,7 +3409,8 @@ fn place(tree: &TaffyTree<Node>, node: NodeId, parent: [f32; 4], parent_exact: [
     let overlay = tree.style(node).is_ok_and(|s| s.position == taffy::Position::Absolute);
     let attach = tree.get_node_context(node).map_or(0, |n| n.attach);
     let p = parent_exact;
-    let at = if overlay {
+    let inset = tree.get_node_context(node).map_or([None; 4], |n| n.inset);
+    let mut at = if overlay {
         match attach {
             1 => [p[0], p[1] + p[3]],
             2 => [p[0], p[1] - size[1]],
@@ -3252,6 +3424,17 @@ fn place(tree: &TaffyTree<Node>, node: NodeId, parent: [f32; 4], parent_exact: [
     } else {
         [p[0] + layout.location.x, p[1] + layout.location.y]
     };
+    // An overlay pinned to its parent's edges (`left`, `top`, …) sits that
+    // far from them; along an axis it is not pinned, `attach` places it.
+    if overlay {
+        for axis in 0..2 {
+            if let Some(start) = inset[axis] {
+                at[axis] = p[axis] + start;
+            } else if let Some(end) = inset[axis + 2] {
+                at[axis] = p[axis] + p[axis + 2] - end - size[axis];
+            }
+        }
+    }
     // An offset moves the node and everything in it: a panel set below its
     // thread carries its content with it. It counts in the relation, so a
     // shape set in the middle by hand is centred as surely as one laid out
@@ -3261,6 +3444,69 @@ fn place(tree: &TaffyTree<Node>, node: NodeId, parent: [f32; 4], parent_exact: [
     let x = on_pixels(parent[0], parent[2], at[0] - p[0], p[2], size[0], scale);
     let y = on_pixels(parent[1], parent[3], at[1] - p[1], p[3], size[1], scale);
     ([x.0, y.0, x.1, y.1], [at[0], at[1], size[0], size[1]])
+}
+
+/// A leaf's size: a text's lines, a field's line, a path's reach.
+fn measure_leaf(fonts: &mut ct::FontSystem, inputs: taffy::LayoutInput, node: Option<&mut Node>, style: &Style) -> taffy::LayoutOutput {
+    taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, _available| match node {
+        Some(n) if n.kind == Kind::Text => {
+            let buffer = shape(fonts, n);
+            let (mut w, mut h) = (0.0f32, 0.0f32);
+            for run in buffer.layout_runs() {
+                w = w.max(run.line_w);
+                h += run.line_height;
+            }
+            // Aligned lines are placed within the whole width, so the
+            // node takes it.
+            if n.text_align != 0 {
+                w = n.max_width.unwrap_or(w);
+            }
+            Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h.ceil()) }
+        }
+        // A field is a line high, and as wide as what it shows and
+        // its caret unless given a width.
+        // A path reaches as far right and down as its outline, from
+        // its own corner, unless given a size.
+        Some(n) if n.kind == Kind::Path => Size {
+            width: known.width.unwrap_or(n.reach_of_path[0].ceil()),
+            height: known.height.unwrap_or(n.reach_of_path[1].ceil()),
+        },
+        Some(n) if n.kind == Kind::Field => {
+            let buffer = shape(fonts, n);
+            let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max) + 1.0;
+            let h = (n.font_size * 1.2).ceil();
+            Size { width: known.width.unwrap_or(w.ceil()), height: known.height.unwrap_or(h) }
+        }
+        _ => Size::ZERO,
+    })
+}
+
+/// A scroller's measures, logical units (`Scene::scroll_info`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollInfo {
+    /// Across, down.
+    pub axes: [bool; 2],
+    /// 0 anywhere, 1 a child's start, 2 its centre.
+    pub snap: u8,
+    /// How far it can scroll along each axis.
+    pub room: [f32; 2],
+    /// The content box it shows its content in.
+    pub view: [f32; 2],
+    /// Where that box begins inside the node: its padding and border.
+    pub start: [f32; 2],
+    /// Its children's rectangles (x, y, width, height) relative to it,
+    /// unscrolled; only when it snaps.
+    pub children: Vec<[f32; 4]>,
+}
+
+/// `gap` between a line's children and `gap_lines` between lines, on
+/// taffy's column and row gaps as the direction lays them.
+fn lay_gaps(style: &mut Style, gap: f32, lines: Option<f32>) {
+    let lines = lines.unwrap_or(gap);
+    style.gap = match style.flex_direction {
+        FlexDirection::Column | FlexDirection::ColumnReverse => Size { width: LengthPercentage::length(lines), height: LengthPercentage::length(gap) },
+        _ => Size { width: LengthPercentage::length(gap), height: LengthPercentage::length(lines) },
+    };
 }
 
 /// One axis of `place`: a span of `len` at `at` within an exact parent span
@@ -4826,7 +5072,16 @@ fn collect_node(
     }
     // A clipping node narrows the clip for everything inside it, and a
     // scrolled one moves its children up.
-    let (clip, scroll, fade) = tree.get_node_context(node).map_or((false, 0.0, 0.0), |n| (n.clip, n.scroll_y, n.fade_bottom));
+    let (clip, mut scroll, mut scroll_x, fade) =
+        tree.get_node_context(node).map_or((false, 0.0, 0.0, 0.0), |n| (n.clip, n.scroll_y, n.scroll_x, n.fade_bottom));
+    // A scroller Genoma moves goes no further than its content: content
+    // that shrank under it is not left scrolled past its end.
+    if let Some(axes) = tree.get_node_context(node).map(|n| n.scroll_axes).filter(|a| *a != 0)
+        && let Ok(l) = tree.layout(node)
+    {
+        scroll_x = if axes & 1 != 0 { scroll_x.clamp(0.0, l.scroll_width()) } else { 0.0 };
+        scroll = if axes & 2 != 0 { scroll.clamp(0.0, l.scroll_height()) } else { scroll };
+    }
     let saved = out.clip;
     let saved_fade = out.fade;
     let saved_parent = out.parent_shape;
@@ -4845,13 +5100,14 @@ fn collect_node(
         out.clip = [out.clip[0].max(c[0]), out.clip[1].max(c[1]), out.clip[2].min(c[2]), out.clip[3].min(c[3])];
     }
     let scrolled = (scroll * scale).round() / scale;
+    let scrolled_x = (scroll_x * scale).round() / scale;
     for child in tree.children(node).unwrap_or_default() {
         collect(
             tree,
             fonts,
             child,
-            [own[0], own[1] - scrolled, own[2], own[3]],
-            [exact[0], exact[1] - scroll, exact[2], exact[3]],
+            [own[0] - scrolled_x, own[1] - scrolled, own[2], own[3]],
+            [exact[0] - scroll_x, exact[1] - scroll, exact[2], exact[3]],
             alpha * content,
             scale,
             out,
@@ -5042,6 +5298,124 @@ mod tests {
         assert_eq!(rel(a), [10.0, (h - 20.0) / 2.0, 20.0, 20.0]);
         assert_eq!(rel(b), [35.0, (h - 10.0) / 2.0, 30.0, 10.0], "after a and the gap");
         assert_eq!(at[2], 75.0, "10 + 20 + 5 + 30 + 10: its content, gap and padding");
+    }
+
+    fn rel_to(scene: &Scene, parent: NodeId, n: NodeId) -> [f32; 4] {
+        let at = scene.extent(parent).unwrap();
+        let e = scene.extent(n).unwrap();
+        [e[0] - at[0], e[1] - at[1], e[2], e[3]]
+    }
+
+    fn sized(w: f32, h: f32) -> [(Prop, Value); 2] {
+        [(Prop::Width, Value::Number(w)), (Prop::Height, Value::Number(h))]
+    }
+
+    #[test]
+    fn flow_wraps_onto_lines_gap_lines_apart() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let row = boxed(&mut scene, root, &[
+            (Prop::Width, Value::Number(100.0)),
+            (Prop::Flow, Value::Bool(true)),
+            (Prop::Align, Value::Text("start".into())),
+            (Prop::Gap, Value::Number(10.0)),
+            (Prop::GapLines, Value::Number(4.0)),
+        ]);
+        let kids: Vec<_> = (0..3).map(|_| boxed(&mut scene, row, &sized(40.0, 20.0))).collect();
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, row, kids[0]), [0.0, 0.0, 40.0, 20.0]);
+        assert_eq!(rel_to(&scene, row, kids[1]), [50.0, 0.0, 40.0, 20.0], "a gap after the first");
+        assert_eq!(rel_to(&scene, row, kids[2]), [0.0, 24.0, 40.0, 20.0], "on the next line, gap_lines below");
+
+        // Down a column, the next line is the next column; the direction
+        // set after the gaps still lays them the right way round.
+        let column = boxed(&mut scene, root, &[
+            (Prop::Height, Value::Number(50.0)),
+            (Prop::Flow, Value::Bool(true)),
+            (Prop::Gap, Value::Number(10.0)),
+            (Prop::GapLines, Value::Number(4.0)),
+            (Prop::Direction, Value::Text("column".into())),
+            (Prop::Align, Value::Text("start".into())),
+        ]);
+        let kids: Vec<_> = (0..3).map(|_| boxed(&mut scene, column, &sized(40.0, 20.0))).collect();
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, column, kids[1]), [0.0, 30.0, 40.0, 20.0]);
+        assert_eq!(rel_to(&scene, column, kids[2]), [44.0, 0.0, 40.0, 20.0], "the next column, gap_lines across");
+    }
+
+    #[test]
+    fn an_overlay_pinned_to_edges_sits_there_and_stretches_between_two() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let parent = boxed(&mut scene, root, &[(Prop::Padding, Value::Number(8.0)), (Prop::Width, Value::Number(200.0)), (Prop::Height, Value::Number(100.0))]);
+        let corner = boxed(&mut scene, parent, &[
+            (Prop::Overlay, Value::Bool(true)),
+            (Prop::Width, Value::Number(30.0)),
+            (Prop::Height, Value::Number(20.0)),
+            (Prop::Left, Value::Number(10.0)),
+            (Prop::Bottom, Value::Number(5.0)),
+        ]);
+        let band = boxed(&mut scene, parent, &[
+            (Prop::Overlay, Value::Bool(true)),
+            (Prop::Height, Value::Number(10.0)),
+            (Prop::Left, Value::Number(0.0)),
+            (Prop::Right, Value::Number(0.0)),
+            (Prop::Top, Value::Number(40.0)),
+        ]);
+        // Pinned on one axis only: centred on the other, as attach says.
+        let side = boxed(&mut scene, parent, &[
+            (Prop::Overlay, Value::Bool(true)),
+            (Prop::Width, Value::Number(20.0)),
+            (Prop::Height, Value::Number(20.0)),
+            (Prop::Right, Value::Number(0.0)),
+        ]);
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, parent, corner), [10.0, 75.0, 30.0, 20.0], "from the edges, not the padding");
+        assert_eq!(rel_to(&scene, parent, band), [0.0, 40.0, 200.0, 10.0], "stretched edge to edge");
+        assert_eq!(rel_to(&scene, parent, side), [180.0, 40.0, 20.0, 20.0], "flush right, centred down");
+    }
+
+    #[test]
+    fn a_scroller_keeps_its_content_whole_and_moves_it_within_its_room() {
+        let mut scene = empty_scene();
+        let root = scene.root();
+        let well = boxed(&mut scene, root, &[
+            (Prop::Width, Value::Number(100.0)),
+            (Prop::Height, Value::Number(50.0)),
+            (Prop::Direction, Value::Text("column".into())),
+            (Prop::Scroll, Value::Text("y".into())),
+            (Prop::Snap, Value::Text("start".into())),
+        ]);
+        let kids: Vec<_> = (0..3).map(|_| boxed(&mut scene, well, &sized(100.0, 40.0))).collect();
+        laid_out(&mut scene, 400.0, 300.0);
+        let info = scene.scroll_info(well).unwrap();
+        assert_eq!(info.axes, [false, true]);
+        assert_eq!(info.room, [0.0, 70.0], "120 of content in 50");
+        assert_eq!(info.view, [100.0, 50.0]);
+        assert_eq!(info.children.len(), 3);
+        assert_eq!(info.children[1], [0.0, 40.0, 100.0, 40.0], "unscrolled, unsquashed");
+        assert_eq!(scene.extent(well).unwrap()[3], 50.0, "its content does not make it taller");
+
+        scene.set(well, Prop::ScrollY, Value::Number(30.0), None).unwrap();
+        scene.set(well, Prop::ScrollX, Value::Number(30.0), None).unwrap();
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, well, kids[1]), [0.0, 10.0, 100.0, 40.0], "up by 30, and not across: no x axis");
+
+        scene.set(well, Prop::ScrollY, Value::Number(500.0), None).unwrap();
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, well, kids[2]), [0.0, 10.0, 100.0, 40.0], "no further than its room");
+        let hidden = scene.hit_test(scene.extent(well).unwrap()[0] + 5.0, scene.extent(well).unwrap()[1] - 20.0);
+        assert!(hidden.is_none(), "what is scrolled out of the well is not hit");
+        assert!(scene.scroll_info(kids[0]).is_none());
+
+        // A box centres its children across; one too large for a scroller
+        // starts at its start, reachable, not half above it.
+        let map = boxed(&mut scene, root, &[(Prop::Width, Value::Number(100.0)), (Prop::Height, Value::Number(50.0)), (Prop::Scroll, Value::Text("both".into()))]);
+        let big = boxed(&mut scene, map, &sized(300.0, 200.0));
+        laid_out(&mut scene, 400.0, 300.0);
+        assert_eq!(rel_to(&scene, map, big), [0.0, 0.0, 300.0, 200.0]);
+        assert_eq!(scene.scroll_info(map).unwrap().room, [200.0, 150.0]);
+        assert!(scene.scrolls_down_around(kids[0]) && !scene.scrolls_down_around(well));
     }
 
     #[test]

@@ -131,6 +131,15 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `clip` | boolean |  | Children are drawn only inside this node's rectangle: a well that scrolls. Never on a cell, whose rim it would eat. |
 | `fade_bottom` | number |  | With `clip`: what is inside fades out over this many units above the foot, so a page longer than its well runs to the edge and goes, rather than stopping at a cut. |
 | `scroll_y` | number | yes | How far the children are scrolled up, logical units. |
+| `scroll_x` | number | yes | How far the children are scrolled left, logical units. |
+| `scroll` | "none" \| "x" \| "y" \| "both" |  | Genoma scrolls the children along these axes itself: the wheel in steps, a touchpad following the fingers and flung when they leave, shift and the wheel sideways (while the surface has the keyboard: Wayland tells the modifiers only there). Clips, and the content's own size is its room; `scroll_x` and `scroll_y` say where it is and move it. A scroller inside another takes only its own axes, and what it cannot use (it is at its end, or the gesture is across it) goes on to the one around it. `on_scroll(x, y)` hears it move. |
+| `snap` | "none" \| "start" \| "center" |  | With `scroll`: once a gesture ends, it settles with a child at its start or its centre; a wheel's step goes to the next child, a fling to the child it would have stopped at. A carousel, pages. |
+| `flow` | boolean |  | Children that do not fit on the line go on to the next: chips, tags, a cloud of icons. In a column, on to the next column. |
+| `gap_lines` | number |  | With `flow`: the space between lines, logical units; `gap` when not given. |
+| `left` | number |  | An overlay's distance from its parent's left edge. With `right` too and no width, it stretches between them. |
+| `top` | number |  | An overlay's distance from its parent's top edge. With `bottom` too and no height, it stretches between them. |
+| `right` | number |  | An overlay's distance from its parent's right edge. |
+| `bottom` | number |  | An overlay's distance from its parent's bottom edge. |
 | `dash` | number |  | A round rim drawn in dashes this long, logical units; 0 is solid. |
 | `dash_gap` | number |  | The space between dashes, logical units. |
 | `from_x` | number | yes | A thread's start, logical units inside its box. |
@@ -230,8 +239,8 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_drag`: `(dx: number, dy: number) -> ()`
 - `on_move`: `(x: number, y: number) -> ()`
 - `on_hover`: `(entered: boolean) -> ()`
-- `on_wheel`: `(dx: number, dy: number, steps: boolean) -> ()`
-- `on_fling`: `(vx: number, vy: number) -> ()`
+- `on_wheel`: `(dx: number, dy: number, steps: boolean) -> boolean?`
+- `on_fling`: `(vx: number, vy: number) -> boolean?`
 - `on_outside`: `() -> ()`
 - `on_key`: `(name: string, text: string?, mods: { ctrl: boolean, shift: boolean, alt: boolean, logo: boolean, code: number }) -> ()`
 - `on_ready`: `() -> ()`
@@ -242,6 +251,7 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_submit`: `(text: string) -> ()`
 - `on_drop`: `(drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ()`
 - `on_drop_hover`: `(over: boolean) -> ()`
+- `on_scroll`: `(x: number, y: number) -> ()`
 
 ## g
 

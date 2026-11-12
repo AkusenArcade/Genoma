@@ -24,6 +24,11 @@ pub(crate) fn set_host(host: HostRef) {
     HOST.with(|h| *h.borrow_mut() = Some(host));
 }
 
+/// The loop scrolling steps on, once an interface has loaded.
+pub(crate) fn host() -> Option<HostRef> {
+    HOST.with(|h| h.borrow().clone())
+}
+
 /// One row: what it was mounted from, kept while its key is shown.
 struct Row {
     key: String,
@@ -160,17 +165,17 @@ pub(crate) fn each(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
 // ---- g.list's scrolling ------------------------------------------------------
 
 /// The step between two positions while moving: about a frame at 120 Hz.
-const TICK: Duration = Duration::from_millis(8);
+pub(crate) const TICK: Duration = Duration::from_millis(8);
 /// Rows kept beyond each edge of the view, so a row is there as it enters.
 const OVERSCAN: usize = 3;
 /// How fast a wheel's step is caught up with: the seconds to cover 63% of
 /// what is left.
-const CATCH_UP: f64 = 0.05;
+pub(crate) const CATCH_UP: f64 = 0.05;
 /// How fast a fling slows, the same way: it carries on about its speed
 /// times this far.
-const GLIDE: f64 = 0.325;
+pub(crate) const GLIDE: f64 = 0.325;
 /// A fling slower than this, logical units a second, has stopped.
-const STILL: f64 = 20.0;
+pub(crate) const STILL: f64 = 20.0;
 /// The view's height before the first layout says it: a screen's worth of
 /// rows is mounted at once rather than a few, then the rest a frame later.
 const FIRST_VIEW: f64 = 1080.0;

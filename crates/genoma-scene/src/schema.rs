@@ -175,6 +175,15 @@ pub enum Prop {
     Steps,
     Morph,
     MorphTiming,
+    ScrollX,
+    Scroll,
+    Snap,
+    Flow,
+    GapLines,
+    Left,
+    Top,
+    Right,
+    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +301,15 @@ pub const PROPS: &[PropInfo] = &[
     p("clip", Prop::Clip, Ty::Bool, false, "Children are drawn only inside this node's rectangle: a well that scrolls. Never on a cell, whose rim it would eat."),
     p("fade_bottom", Prop::FadeBottom, Ty::Number, false, "With `clip`: what is inside fades out over this many units above the foot, so a page longer than its well runs to the edge and goes, rather than stopping at a cut."),
     p("scroll_y", Prop::ScrollY, Ty::Number, true, "How far the children are scrolled up, logical units."),
+    p("scroll_x", Prop::ScrollX, Ty::Number, true, "How far the children are scrolled left, logical units."),
+    p("scroll", Prop::Scroll, Ty::Choice(&["none", "x", "y", "both"]), false, "Genoma scrolls the children along these axes itself: the wheel in steps, a touchpad following the fingers and flung when they leave, shift and the wheel sideways (while the surface has the keyboard: Wayland tells the modifiers only there). Clips, and the content's own size is its room; `scroll_x` and `scroll_y` say where it is and move it. A scroller inside another takes only its own axes, and what it cannot use (it is at its end, or the gesture is across it) goes on to the one around it. `on_scroll(x, y)` hears it move."),
+    p("snap", Prop::Snap, Ty::Choice(&["none", "start", "center"]), false, "With `scroll`: once a gesture ends, it settles with a child at its start or its centre; a wheel's step goes to the next child, a fling to the child it would have stopped at. A carousel, pages."),
+    p("flow", Prop::Flow, Ty::Bool, false, "Children that do not fit on the line go on to the next: chips, tags, a cloud of icons. In a column, on to the next column."),
+    p("gap_lines", Prop::GapLines, Ty::Number, false, "With `flow`: the space between lines, logical units; `gap` when not given."),
+    p("left", Prop::Left, Ty::Number, false, "An overlay's distance from its parent's left edge. With `right` too and no width, it stretches between them."),
+    p("top", Prop::Top, Ty::Number, false, "An overlay's distance from its parent's top edge. With `bottom` too and no height, it stretches between them."),
+    p("right", Prop::Right, Ty::Number, false, "An overlay's distance from its parent's right edge."),
+    p("bottom", Prop::Bottom, Ty::Number, false, "An overlay's distance from its parent's bottom edge."),
     p("dash", Prop::Dash, Ty::Number, false, "A round rim drawn in dashes this long, logical units; 0 is solid."),
     p("dash_gap", Prop::DashGap, Ty::Number, false, "The space between dashes, logical units."),
     p("from_x", Prop::FromX, Ty::Number, true, "A thread's start, logical units inside its box."),
@@ -403,11 +421,11 @@ pub fn luau_definitions() -> String {
     // intersection makes every field of a table literal invariant, and a
     // `direction = "row"` would not match.
     let fields = node_fields();
-    out.push_str(&format!("export type Node = {{\n{fields}}}\n\n"));
+    out.push_str(&format!("export type Node = {{\n{fields}{SCROLLER}}}\n\n"));
     out.push_str(&format!(
         "-- g.each: a box with a row per item, kept by key. `row` gets the item\n\
          -- and its place as functions, so a row whose key stays follows them.\n\
-         export type Each<T> = {{\n{fields}{EACH}}}\n\n"
+         export type Each<T> = {{\n{fields}{SCROLLER}{EACH}}}\n\n"
     ));
     out.push_str(&format!(
         "-- g.list: a keyed list that scrolls, mounting only the rows in view.\n\
@@ -416,6 +434,9 @@ pub fn luau_definitions() -> String {
     ));
     out
 }
+
+// A list has an on_scroll of its own (LIST).
+const SCROLLER: &str = "    -- With `scroll`: where it has moved to, across and down.\n    on_scroll: ((x: number, y: number) -> ())?,\n";
 
 const EACH: &str = "    items: () -> { T },\n    key: (T) -> string | number,\n    row: (item: () -> T, index: () -> number) -> Node,\n";
 const LIST: &str = "    row_height: number,\n    -- A row's place, from 1: brought into view the least way.\n    reveal: (() -> number?)?,\n    -- Where it is scrolled to, and how far it can go.\n    on_scroll: ((offset: number, room: number) -> ())?,\n";
@@ -453,9 +474,11 @@ fn node_fields() -> String {
          \x20   on_move: ((x: number, y: number) -> ())?,\n\
          \x20   on_hover: ((entered: boolean) -> ())?,\n\
          \x20   -- Wheel steps (steps true) or touchpad distance in logical units.\n\
-         \x20   on_wheel: ((dx: number, dy: number, steps: boolean) -> ())?,\n\
+         \x20   -- Answering false passes it on to the node around, as a scroller\n\
+         \x20   -- at its end does.\n\
+         \x20   on_wheel: ((dx: number, dy: number, steps: boolean) -> boolean?)?,\n\
          \x20   -- The fingers left the touchpad moving: logical units a second.\n\
-         \x20   on_fling: ((vx: number, vy: number) -> ())?,\n\
+         \x20   on_fling: ((vx: number, vy: number) -> boolean?)?,\n\
          \x20   -- A press outside the node that catches.\n\
          \x20   on_outside: (() -> ())?,\n\
          \x20   -- A key: its name (\"Escape\", \"a\"), the text it types, the modifiers.\n\

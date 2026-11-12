@@ -3380,7 +3380,11 @@ impl PointerHandler for App {
                     // A wheel speaks in steps of 120; a touchpad in logical
                     // distance, and only when it speaks at all.
                     let step = |a: &AxisScroll| if a.value120 != 0 { a.value120 as f64 / 120.0 } else { a.absolute };
-                    let (dx, dy) = (step(&horizontal), step(&vertical));
+                    let (mut dx, mut dy) = (step(&horizontal), step(&vertical));
+                    // Shift and a wheel's steps go sideways.
+                    if self.modifiers.shift && vertical.value120 != 0 && dx == 0.0 {
+                        (dx, dy) = (dy, 0.0);
+                    }
                     if dx != 0.0 || dy != 0.0 {
                         let steps = horizontal.value120 != 0 || vertical.value120 != 0;
                         self.deliver(i, node, Input::Wheel(dx, dy, steps));

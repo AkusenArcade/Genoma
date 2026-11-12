@@ -32,8 +32,30 @@ changes what a shell sees.
   name, a near one (accent ← primary, danger ← alert), or worked out from
   its background, text and accent; `map` names them by hand.
 
+- `scroll = "x" | "y" | "both"` on any node: Genoma scrolls its children
+  itself, as `g.list` does its rows — the wheel in steps caught up with
+  over a few frames, a touchpad followed and flung, shift and the wheel
+  sideways. The content's own size is its room; `scroll_x` (new) and
+  `scroll_y` say where it is and move it, `on_scroll(x, y)` hears it. A
+  scroller takes only its own axes and hands what it cannot use — a
+  gesture across it, or one past its end — to the scroller around it.
+  Its children are aligned safely: content larger than it starts at its
+  start.
+- `snap = "start" | "center"` on a scroller: it settles with a child at
+  its start or centre; a wheel's step goes to the next child, a fling to
+  the child it would have stopped at.
+- `flow = true`: children that do not fit go on to the next line (the
+  next column, in a column), `gap_lines` apart (`gap` by default).
+- `left`, `top`, `right`, `bottom` on an overlay: its distance from its
+  parent's edges; pinned to both edges of an axis without a size there,
+  it stretches between them. Along an axis it is not pinned, `attach`
+  still places it.
+- `examples/layout`.
+
 ### Changed
 
+- `on_wheel` and `on_fling` may answer `false`: the event then goes on
+  to the node around, as it does when a node has no handler.
 - A colour set inside `g.crossing` crosses over the crossing's timing
   even where its node names a `transition` of its own: a control's hover
   fade no longer makes it arrive at a new palette before the rest.

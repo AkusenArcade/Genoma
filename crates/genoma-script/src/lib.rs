@@ -15,6 +15,7 @@ use std::{
 
 mod auth;
 mod colour;
+mod scroll;
 mod profile;
 pub mod dbus;
 mod greetd;
@@ -1868,8 +1869,23 @@ impl Script {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
                         f.call::<()>((lx, ly))
                     }
-                    Input::Wheel(dx, dy, steps) => f.call::<()>((*dx, *dy, *steps)),
-                    Input::Fling(dx, dy) => f.call::<()>((*dx, *dy)),
+                    // A wheel or a fling a handler answers `false` to goes on
+                    // to the node around it: a scroller at its end, or one
+                    // the gesture runs across, gives it to the one outside.
+                    Input::Wheel(dx, dy, steps) => match f.call::<LuaValue>((*dx, *dy, *steps)) {
+                        Ok(LuaValue::Boolean(false)) => {
+                            at = scene.borrow().parent(id);
+                            continue;
+                        }
+                        other => other.map(|_| ()),
+                    },
+                    Input::Fling(dx, dy) => match f.call::<LuaValue>((*dx, *dy)) {
+                        Ok(LuaValue::Boolean(false)) => {
+                            at = scene.borrow().parent(id);
+                            continue;
+                        }
+                        other => other.map(|_| ()),
+                    },
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
                     Input::Change(text) | Input::Submit(text) => f.call::<()>(text.as_str()),
                     Input::Focus(on) | Input::DropHover(on) => f.call::<()>(*on),
@@ -3362,6 +3378,9 @@ fn mount(
         }
     }
 
+    // scroll = "y": Genoma scrolls it (scroll.rs); its on_scroll is the
+    // scroller's, not a handler of the node's.
+    let scrolls = !list && t.contains_key("scroll")?;
     for pair in t.pairs::<LuaValue, LuaValue>() {
         let (key, value) = pair?;
         let LuaValue::String(key) = key else { continue };
@@ -3373,6 +3392,9 @@ fn mount(
             continue;
         }
         if list && matches!(key.as_str(), "row_height" | "reveal" | "on_scroll") {
+            continue;
+        }
+        if scrolls && key == "on_scroll" {
             continue;
         }
         if let Some(&name) = HANDLERS.iter().find(|h| **h == key) {
@@ -3401,6 +3423,10 @@ fn mount(
         }
     }
 
+    if scrolls {
+        let on_scroll: Option<Function> = t.get("on_scroll")?;
+        scroll::attach(&t.weak_lua().upgrade(), scene.clone(), handlers.clone(), target, node, on_scroll)?;
+    }
     if each {
         if t.raw_len() > 0 {
             return Err(err("g.each draws its children from row, and holds none of its own"));

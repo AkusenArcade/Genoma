@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`theme`](examples/theme/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
+[`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -115,6 +115,15 @@ return g.surface {
   filled with `fill`, stroked with `color` and `stroke`, with `join`,
   `cap`, `dash` and `even_odd`. It is drawn at the exact pixel size, and
   takes its outline's size unless given one.
+- **Layout:** rows and columns (flexbox: `direction`, `align`, `justify`,
+  `gap`, `grow`). `flow = true` sends what does not fit on to the next
+  line, `gap_lines` apart. An `overlay` sits over its siblings at its
+  `attach`, or pinned to its parent's edges with `left`, `top`, `right`
+  and `bottom` — stretched between two when it has no size there.
+  `scroll = "y"` (`"x"`, `"both"`) makes any node scroll its children:
+  wheel, touchpad and fling, `snap = "start"` or `"center"` to rest on a
+  child, `on_scroll(x, y)`; a scroller inside another takes only its own
+  axes and hands the rest on. See `examples/layout`.
 - **Shaders:** `g.shader { src = "field.wgsl", values = … }` draws a
   rectangle whose every pixel is your `fn shade(p: vec2<f32>) ->
   vec4<f32>`, fed `shader.size`, `shader.scale`, `shader.time` (with
