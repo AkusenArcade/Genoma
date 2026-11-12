@@ -193,6 +193,37 @@ export type WindowSurface = {
 
 -- ---- g -----------------------------------------------------------------------
 
+-- g.colour: arithmetic on "#rrggbb[aa]", as Qt does it (HSL, HSV,
+-- rounding), so a theme derives its colours once and in one way. Every
+-- colour it gives back is "#rrggbbaa".
+export type Colour = {
+    -- g.colour.parse("#7aa2f7") → { r, g, b, a }, 0 to 1; nil if not a colour.
+    parse: (hex: string) -> { r: number, g: number, b: number, a: number }?,
+    -- g.colour.format(r, g, b, a?) or g.colour.format({ r, g, b, a }).
+    format: (r: number | { r: number, g: number, b: number, a: number? }, g: number?, b: number?, a: number?) -> string,
+    -- g.colour.hsl("#…") → hue (-1 for a grey), saturation, lightness, alpha; 0 to 1.
+    hsl: (hex: string) -> (number, number, number, number),
+    hsla: (h: number, s: number, l: number, a: number?) -> string,
+    -- g.colour.hsv("#…") → hue (-1 for a grey), saturation, value, alpha.
+    hsv: (hex: string) -> (number, number, number, number),
+    hsva: (h: number, s: number, v: number, a: number?) -> string,
+    -- g.colour.alpha("#…", 0.5): the same colour at that opacity.
+    alpha: (hex: string, a: number) -> string,
+    -- g.colour.mix(a, b, 0.25): a quarter of the way from a to b.
+    mix: (a: string, b: string, t: number) -> string,
+    -- Lightness or saturation moved by an amount, negative to lower it.
+    lighten: (hex: string, amount: number) -> string,
+    saturate: (hex: string, amount: number) -> string,
+    -- g.colour.lift("#…", 0.05, dark): away from the background's side,
+    -- lighter on a dark theme (the default), darker on a light one.
+    lift: (hex: string, amount: number, dark: boolean?) -> string,
+    -- Rec. 709 weights on the encoded channels: below 0.5 reads as dark.
+    luma: (hex: string) -> number,
+    -- WCAG relative luminance, and the contrast ratio of two colours (1 to 21).
+    luminance: (hex: string) -> number,
+    contrast: (a: string, b: string) -> number,
+}
+
 export type Timing = {
     duration: number?,
     curve: { number }?,
@@ -302,6 +333,8 @@ export type G = {
     array: <T>(t: { T }) -> { T },
     -- g.env("NAME") → its value or nil.
     env: (name: string) -> string?,
+    -- Colour arithmetic: g.colour.lift, .mix, .contrast, …
+    colour: Colour,
     -- The interface's directory.
     dir: string,
     -- g.outputs() → the outputs the compositor has.

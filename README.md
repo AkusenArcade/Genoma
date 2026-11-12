@@ -65,7 +65,7 @@ compositor), [`notifications`](examples/notifications/shell.luau)
 file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`list`](examples/list/shell.luau). [`kit`](examples/kit/shell.luau),
 [`shapes`](examples/shapes/shell.luau),
-[`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
+[`theme`](examples/theme/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
 An interface is a directory with a `shell.luau` that returns one or more
@@ -235,6 +235,16 @@ return g.surface {
   [`kit/`](kit). Its times are `kit_quick`, `kit_move` and `kit_open`,
   defined with `g.timing_default`, so a shell retimes them with
   `g.timing` before or after requiring the kit. See `examples/kit`.
+- **A theme of one's own:** `require("@genoma/theme").new { roles,
+  derive, fixed, sizes, steps, fonts, type, timing }` gives a shell's
+  tokens as values every node binds to: `t.colour("surface")`,
+  `t.size("radius")` at the density step, `t.text("label", { … })`, and
+  the timing set after `t.speed`. `t.set { primary = "#…" }` and a palette
+  file followed with `t.source { path }` change the roles in a crossing,
+  every derived colour with them, the desktop moving together.
+  `kit.theme.follow(t)` gives the kit the same look. Colour arithmetic is
+  `g.colour` (`lift`, `mix`, `alpha`, `hsla`, `contrast`, …). See
+  `examples/theme`.
 - **Waiting without nesting:** `require("@genoma/async")` runs a task
   (`async.run(function() … end)`) in which `async.process`,
   `async.sleep`, `async.call` and `async.get` (D-Bus) and

@@ -483,6 +483,14 @@ env: (name: string) -> string?
 
 g.env("NAME") → its value or nil.
 
+### `g.colour`
+
+```luau
+colour: Colour
+```
+
+Colour arithmetic: g.colour.lift, .mix, .contrast, …
+
 ### `g.dir`
 
 ```luau
@@ -1953,6 +1961,27 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `present` | `(() -> boolean)?` |  |
 | `on_close` | `(() -> ())?` | The compositor asks to close it. With this, it is only told, and goes when `present` lets it go; without, it closes itself for good. |
 | `[number]` | `any` |  |
+
+### Colour
+
+g.colour: arithmetic on "#rrggbb[aa]", as Qt does it (HSL, HSV, rounding), so a theme derives its colours once and in one way. Every colour it gives back is "#rrggbbaa".
+
+| Field | Type | |
+|---|---|---|
+| `parse` | `(hex: string) -> { r: number, g: number, b: number, a: number }?` | g.colour.parse("#7aa2f7") → { r, g, b, a }, 0 to 1; nil if not a colour. |
+| `format` | `(r: number \| { r: number, g: number, b: number, a: number? }, g: number?, b: number?, a: number?) -> string` | g.colour.format(r, g, b, a?) or g.colour.format({ r, g, b, a }). |
+| `hsl` | `(hex: string) -> (number, number, number, number)` | g.colour.hsl("#…") → hue (-1 for a grey), saturation, lightness, alpha; 0 to 1. |
+| `hsla` | `(h: number, s: number, l: number, a: number?) -> string` |  |
+| `hsv` | `(hex: string) -> (number, number, number, number)` | g.colour.hsv("#…") → hue (-1 for a grey), saturation, value, alpha. |
+| `hsva` | `(h: number, s: number, v: number, a: number?) -> string` |  |
+| `alpha` | `(hex: string, a: number) -> string` | g.colour.alpha("#…", 0.5): the same colour at that opacity. |
+| `mix` | `(a: string, b: string, t: number) -> string` | g.colour.mix(a, b, 0.25): a quarter of the way from a to b. |
+| `lighten` | `(hex: string, amount: number) -> string` | Lightness or saturation moved by an amount, negative to lower it. |
+| `saturate` | `(hex: string, amount: number) -> string` |  |
+| `lift` | `(hex: string, amount: number, dark: boolean?) -> string` | g.colour.lift("#…", 0.05, dark): away from the background's side, lighter on a dark theme (the default), darker on a light one. |
+| `luma` | `(hex: string) -> number` | Rec. 709 weights on the encoded channels: below 0.5 reads as dark. |
+| `luminance` | `(hex: string) -> number` | WCAG relative luminance, and the contrast ratio of two colours (1 to 21). |
+| `contrast` | `(a: string, b: string) -> number` |  |
 
 ### Timing
 

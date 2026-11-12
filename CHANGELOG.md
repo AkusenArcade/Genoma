@@ -6,6 +6,38 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/theme`: a shell's own theme. `theme.new { roles, fixed,
+  derive, sizes, unscaled, steps, fonts, type, timing, crossing }` gives
+  tokens every node binds to: `t.colour(name)` (a palette role, a fixed
+  colour with a dark and a light form, or one derived from the others,
+  worked out once per change), `t.size(name)` at the density step
+  (`t.step("compact")`), `t.font(style)` and `t.text(style, props)` from
+  a type scale, and the timing set given to `g.timing` after `t.speed`
+  and `t.instant` (entries marked `fixed` are left alone; `t.seconds`
+  for timers). `t.set { primary = … }` changes roles in a crossing, so
+  the whole desktop moves to the new palette together; `t.source { path,
+  map }` follows a JSON palette file (matugen's, through a template or
+  `map`); `t.immediate` makes a palette being edited follow the hand.
+  `examples/theme`.
+- `g.colour`: Qt's colour arithmetic on "#rrggbb[aa]", `parse`,
+  `format`, `hsl`/`hsla`, `hsv`/`hsva`, `alpha`, `mix`, `lighten`,
+  `saturate`, `lift` (away from the background's side), `luma`, and
+  WCAG `luminance` and `contrast`. Channels round as QColor rounds them.
+- `kit.theme.follow(t)`: the kit's controls take their look from a
+  shell's theme — each token from the theme's colour or size of that
+  name, a near one (accent ← primary, danger ← alert), or worked out from
+  its background, text and accent; `map` names them by hand.
+
+### Changed
+
+- A colour set inside `g.crossing` crosses over the crossing's timing
+  even where its node names a `transition` of its own: a control's hover
+  fade no longer makes it arrive at a new palette before the rest.
+
 ## 0.1.11 — 2026-11-12
 
 ### Added

@@ -14,6 +14,7 @@ use std::{
 };
 
 mod auth;
+mod colour;
 mod profile;
 pub mod dbus;
 mod greetd;
@@ -2389,8 +2390,8 @@ impl Script {
         )?;
         // g.crossing("theme", fn): a batch whose colours cross rather than
         // jump. What `fn` changes reaches every binding once; each colour a
-        // binding then sets, where its node names no transition of its own,
-        // is carried from the old to the new over that timing entry by the
+        // binding then sets, whatever transition its node names, is
+        // carried from the old to the new over that timing entry by the
         // scene. A palette crossed by stepping its roles in Luau re-ran
         // every binding at every step and filled the frame. Called from
         // inside a binding or an effect, the bindings would run after it,
@@ -2415,6 +2416,9 @@ impl Script {
         // g.env("XDG_CONFIG_HOME") → its value or nil: the sandbox has no
         // environment of its own.
         g.set("env", lua.create_function(|_, name: String| Ok(std::env::var(name).ok()))?)?;
+        // g.colour.lift("#…", 0.05), g.colour.contrast(a, b), …: colour
+        // arithmetic, Qt's, for what a theme derives (colour.rs).
+        g.set("colour", colour::table(lua)?)?;
         // g.signal(value): a value bindings follow, made anew by each load
         // (g.state is the one kept across loads).
         g.set("signal", lua.create_function(|_, initial: LuaValue| Ok(State(Signal::new(StateValue::from_lua(&initial)))))?)?;
@@ -2737,9 +2741,19 @@ impl Script {
                     };
                     LuaValue::UserData(data)
                 }
-                kit if kit == "@genoma/kit" || kit.starts_with("@genoma/kit/") || kit == "@genoma/async" => {
-                    // @genoma/async ships with the kit, a module of its own.
-                    let part = if kit == "@genoma/async" { "async" } else { kit.strip_prefix("@genoma/kit/").unwrap_or("init") };
+                kit if kit == "@genoma/kit"
+                    || kit.starts_with("@genoma/kit/")
+                    || kit == "@genoma/async"
+                    || kit == "@genoma/theme" =>
+                {
+                    // @genoma/async and @genoma/theme ship with the kit,
+                    // modules of their own (the kit's look is kit/theme;
+                    // a shell's own themes are kit/themes).
+                    let part = match kit {
+                        "@genoma/async" => "async",
+                        "@genoma/theme" => "themes",
+                        _ => kit.strip_prefix("@genoma/kit/").unwrap_or("init"),
+                    };
                     let source = kit_source(part).ok_or_else(|| err(format!("no module {kit}")))?;
                     owned_by(module_owner.get(), || lua.load(&source).set_name(kit).eval())?
                 }
@@ -2847,6 +2861,7 @@ const KIT: &[(&str, &str)] = &[
     ("titlebar", include_str!("../../../kit/titlebar.luau")),
     ("async", include_str!("../../../kit/async.luau")),
     ("chart", include_str!("../../../kit/chart.luau")),
+    ("themes", include_str!("../../../kit/themes.luau")),
 ];
 
 fn kit_source(part: &str) -> Option<String> {
@@ -3455,9 +3470,12 @@ fn bind(scene: Rc<RefCell<Scene>>, node: genoma_scene::NodeId, prop: Prop, f: Fu
         };
         match convert(prop, &value) {
             Ok(value) => {
-                let timing = timing_name.as_ref().and_then(TimingName::resolve).or_else(|| {
-                    if prop.info().ty == Ty::Color { CROSSING.with(|c| c.borrow().clone()) } else { None }
-                });
+                // A colour set while a crossing is under way crosses over
+                // its timing even where the node names one of its own (a
+                // control's hover fade): the desktop crosses together, not
+                // the controls first and the rest after.
+                let crossing = if prop.info().ty == Ty::Color { CROSSING.with(|c| c.borrow().clone()) } else { None };
+                let timing = crossing.or_else(|| timing_name.as_ref().and_then(TimingName::resolve));
                 if let Err(e) = scene.borrow_mut().set(node, prop, value, timing) {
                     log::error!("binding {prop:?}: {e}");
                 }
