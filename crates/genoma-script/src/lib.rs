@@ -607,6 +607,23 @@ impl UserData for VitalsRef {
         fields.add_field_method_get("gpu", |_, this| Ok(this.0.gpu.get()));
         fields.add_field_method_get("gpu_clock", |_, this| Ok(this.0.gpu_clock.get()));
         fields.add_field_method_get("cpu_clock", |_, this| Ok(this.0.cpu_clock.get()));
+        fields.add_field_method_get("cpu_temp", |_, this| Ok(this.0.cpu_temp.get()));
+        fields.add_field_method_get("gpu_temp", |_, this| Ok(this.0.gpu_temp.get()));
+        // vitals.sensors → { { kind, chip, label, value, high, critical }, … }
+        fields.add_field_method_get("sensors", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, s) in this.0.sensors.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("kind", s.kind)?;
+                t.set("chip", s.chip)?;
+                t.set("label", s.label)?;
+                t.set("value", s.value)?;
+                t.set("high", s.high)?;
+                t.set("critical", s.critical)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
     }
 }
 

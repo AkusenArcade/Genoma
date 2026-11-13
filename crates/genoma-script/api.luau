@@ -418,6 +418,25 @@ export type Vitals = {
     read gpu_clock: number,
     -- The processor's clock between its lowest and highest, 0…1.
     read cpu_clock: number,
+    -- °C, whole degrees: the processor package (k10temp, coretemp,
+    -- zenpower, cpu_thermal) and the card `gpu` reads (its edge); nil where
+    -- the machine does not say.
+    read cpu_temp: number?,
+    read gpu_temp: number?,
+    -- Every hwmon temperature (°C), fan (RPM, to ten) and power draw (W),
+    -- in the kernel's order. A temperature input with nothing on it is
+    -- left out.
+    read sensors: { {
+        kind: "temperature" | "fan" | "power",
+        -- The driver: "k10temp", "amdgpu", "nvme", "nct6799"…
+        chip: string,
+        -- The chip's label ("Tctl", "edge"), or the input's ("fan2").
+        label: string,
+        value: number,
+        -- Where the chip says it runs hot, and where it is in danger.
+        high: number?,
+        critical: number?,
+    } },
 }
 
 export type Window = {

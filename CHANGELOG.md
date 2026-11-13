@@ -14,6 +14,12 @@ changes what a shell sees.
   `compositor:switch_layout("next" | "prev" | n)`: the keyboard layouts
   on niri (from its event stream) and Hyprland (its main keyboard, asked
   again on `activelayout`).
+- `vitals.sensors`, `vitals.cpu_temp`, `vitals.gpu_temp`: the hwmon
+  temperatures (°C), fans (RPM) and power draw (W), with the chip's own
+  limits, sampled with the rest of `vitals`. The processor's is the
+  package sensor (k10temp, coretemp, zenpower, cpu_thermal), the card's
+  the `edge` of the card `vitals.gpu` reads. NVIDIA cards, which have no
+  hwmon, report none.
 
 ## 0.1.12 — 2026-11-12
 
