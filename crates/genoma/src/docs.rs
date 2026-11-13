@@ -378,6 +378,7 @@ mod tests {
             ("BrightnessRef", "Brightness"),
             ("DrivesRef", "Drives"),
             ("AccountsRef", "Accounts"),
+            ("PortalRef", "Portal"),
             ("Inhibition", "Inhibition"),
             ("SpectrumRef", "Spectrum"),
             ("SpectrumHold", "SpectrumHold"),

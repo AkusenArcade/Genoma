@@ -892,6 +892,19 @@ export type Drives = {
     include_loops: (self: Drives, on: boolean) -> (),
 }
 
+-- @genoma/portal: xdg-desktop-portal, what the desktop asks of every
+-- application, followed as it changes.
+export type Portal = {
+    -- Whether a portal answers.
+    read available: boolean,
+    -- org.freedesktop.appearance: "dark", "light" or "default".
+    read color_scheme: "dark" | "light" | "default",
+    -- "#rrggbb", or nil where the desktop sets none.
+    read accent: string?,
+    read high_contrast: boolean,
+    read reduced_motion: boolean,
+}
+
 export type User = {
     uid: number,
     login: string,

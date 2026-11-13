@@ -16,6 +16,9 @@ changes what a shell sees.
   accounts, most logged in first: a greeter's list), `available`,
   `error`, `:set_icon(path)` and `:set_name(name)`. Without
   AccountsService `me` comes from `/etc/passwd`.
+- `@genoma/portal`: xdg-desktop-portal's appearance settings,
+  `color_scheme` ("dark", "light", "default"), `accent` ("#rrggbb" or
+  nil), `high_contrast`, `reduced_motion`, followed on `SettingChanged`.
 
 ## 0.1.15 — 2026-11-13
 

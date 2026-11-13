@@ -34,6 +34,7 @@ use genoma_services::{
     brightness::Brightness,
     drives::Drives,
     accounts::Accounts,
+    portal::Portal,
     spectrum::Spectrum,
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
@@ -429,6 +430,8 @@ pub struct Services {
     pub drives: Rc<Drives>,
     /// AccountsService: this user and the people a greeter offers.
     pub accounts: Rc<Accounts>,
+    /// xdg-desktop-portal: the desktop's preferences.
+    pub portal: Rc<Portal>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1323,6 +1326,20 @@ impl UserData for DrivesRef {
             this.0.include_loops(on);
             Ok(())
         });
+    }
+}
+
+struct PortalRef(Rc<Portal>);
+
+impl UserData for PortalRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // portal.color_scheme → "dark", "light" or "default".
+        fields.add_field_method_get("color_scheme", |_, this| Ok(this.0.appearance.get().color_scheme));
+        // portal.accent → "#rrggbb" or nil.
+        fields.add_field_method_get("accent", |_, this| Ok(this.0.appearance.get().accent));
+        fields.add_field_method_get("high_contrast", |_, this| Ok(this.0.appearance.get().high_contrast));
+        fields.add_field_method_get("reduced_motion", |_, this| Ok(this.0.appearance.get().reduced_motion));
     }
 }
 
@@ -2928,7 +2945,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" | "@genoma/portal" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2954,6 +2971,7 @@ impl Script {
                         "brightness" => "brightness",
                         "drives" => "drives",
                         "accounts" => "accounts",
+                        "portal" => "portal",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2989,6 +3007,7 @@ impl Script {
                         "brightness" => lua.create_userdata(BrightnessRef(services.brightness.clone()))?,
                         "drives" => lua.create_userdata(DrivesRef(services.drives.clone()))?,
                         "accounts" => lua.create_userdata(AccountsRef(services.accounts.clone()))?,
+                        "portal" => lua.create_userdata(PortalRef(services.portal.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -3071,6 +3090,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("brightness", "Brightness"),
     ("drives", "Drives"),
     ("accounts", "Accounts"),
+    ("portal", "Portal"),
 ];
 
 /// The kit's modules by name, as built in.

@@ -30,6 +30,7 @@ pub mod notifications;
 pub mod niri;
 pub mod pam;
 pub mod polkit;
+pub mod portal;
 pub mod power;
 pub mod session;
 pub mod spectrum;
