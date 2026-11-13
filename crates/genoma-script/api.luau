@@ -816,6 +816,37 @@ export type Inhibition = {
     release: (self: Inhibition) -> (),
 }
 
+-- @genoma/brightness: the backlight (written through logind) and external
+-- monitors over DDC/CI (through ddcutil, when installed and /dev/i2c-* may
+-- be opened). DDC answers seconds after the start; nothing polls after.
+export type Brightness = {
+    -- The backlight first, then the monitors DDC found.
+    read displays: { {
+        kind: "backlight" | "ddc",
+        -- "eDP-1", "DP-2"; "display-<n>" where nothing says.
+        connector: string,
+        -- Over DDC, the monitor's model; "" for a backlight.
+        model: string,
+        -- 0…1, nil until the display has answered.
+        value: number?,
+        -- The hardware's top step.
+        max: number,
+    } },
+    -- Some display can be dimmed.
+    read available: boolean,
+    -- DDC detection is under way: more displays may come.
+    read detecting: boolean,
+    -- The last write's failure, or "".
+    read error: string,
+    -- 0…1 or nil: that connector's, the first display's without one.
+    value: (self: Brightness, connector: string?) -> number?,
+    -- Moves at once; the hardware follows. A dragged control sends every
+    -- step: only the latest waits for a slow monitor.
+    set: (self: Brightness, fraction: number, connector: string?) -> (),
+    -- Reads every display again, after a change made elsewhere.
+    refresh: (self: Brightness) -> (),
+}
+
 -- @genoma/session: logind. What the machine can do and doing it, the moment before sleep, inhibitors.
 export type Session = {
     -- Whether logind answers.

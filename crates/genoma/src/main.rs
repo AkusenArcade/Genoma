@@ -129,7 +129,7 @@ pub(crate) fn services() -> (Services, Streams) {
         }
     };
     let streams = Streams { niri: stream, compositor: compositor_stream };
-    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), displays: Rc::default(), gamma: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default(), spectrum: Rc::default() }, streams)
+    (Services { clock: Rc::new(Clock::new()), niri, compositor, vitals: Rc::new(Vitals::new()), power: Rc::default(), network: Rc::default(), media: Rc::default(), audio: Rc::default(), bluetooth: Rc::default(), toplevels: Rc::default(), displays: Rc::default(), gamma: Rc::default(), idle: Rc::default(), lock: Rc::default(), tray: Rc::default(), polkit: Rc::default(), notifications: Rc::default(), clipboard: Rc::default(), apps: Rc::default(), session: Rc::default(), spectrum: Rc::default(), brightness: Rc::default() }, streams)
 }
 
 /// The event streams opened with the services, read once required.
@@ -244,7 +244,7 @@ pub(crate) struct Sources {
 impl Sources {
     pub(crate) fn start<D: 'static>(&mut self, wants: impl Fn(&str) -> bool, handle: &LoopHandle<'static, D>) {
         for service in
-            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session", "spectrum"]
+            ["clock", "vitals", "niri", "compositor", "power", "network", "media", "audio", "bluetooth", "tray", "polkit", "notifications", "session", "spectrum", "brightness"]
         {
             if !wants(service) || self.started.contains(&service) {
                 continue;
@@ -408,6 +408,19 @@ impl Sources {
                             }
                         });
                     });
+                }
+                "brightness" => {
+                    let brightness = self.services.brightness.clone();
+                    let (post, updates) = channel();
+                    handle
+                        .insert_source(updates, move |event, _, _| {
+                            if let ChannelEvent::Msg(update) = event {
+                                brightness.apply(update);
+                            }
+                        })
+                        .expect("brightness channel");
+                    let bus = self.bus();
+                    self.services.brightness.start(bus, post);
                 }
                 "session" => {
                     let Some(bus) = self.bus() else { continue };

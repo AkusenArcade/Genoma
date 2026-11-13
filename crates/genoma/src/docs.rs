@@ -375,6 +375,7 @@ mod tests {
             ("ClipboardRef", "Clipboard"),
             ("AppsRef", "Apps"),
             ("SessionRef", "Session"),
+            ("BrightnessRef", "Brightness"),
             ("Inhibition", "Inhibition"),
             ("SpectrumRef", "Spectrum"),
             ("SpectrumHold", "SpectrumHold"),

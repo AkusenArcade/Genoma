@@ -31,6 +31,7 @@ use genoma_scene::{Kind, Prop, Role, Scene, Ty, Value};
 use genoma_services::{
     apps::{App as AppEntry, Apps},
     session::{Action as SessionAction, Session},
+    brightness::Brightness,
     spectrum::Spectrum,
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
@@ -420,6 +421,8 @@ pub struct Services {
     pub session: Rc<Session>,
     /// The sound as bands.
     pub spectrum: Rc<Spectrum>,
+    /// Backlight and DDC/CI.
+    pub brightness: Rc<Brightness>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1221,6 +1224,45 @@ impl UserData for SpectrumRef {
         // leaves the machine, from the next start.
         methods.add_method("listen_to", |_, this, source: String| {
             this.0.input.set(source == "input");
+            Ok(())
+        });
+    }
+}
+
+struct BrightnessRef(Rc<Brightness>);
+
+impl UserData for BrightnessRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // brightness.displays → { { kind, connector, model, value, max }, … },
+        // the backlight first. value is 0…1, or nil until read.
+        fields.add_field_method_get("displays", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, d) in this.0.displays.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("kind", d.kind)?;
+                t.set("connector", d.connector)?;
+                t.set("model", d.model)?;
+                t.set("value", d.value)?;
+                t.set("max", d.max)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        fields.add_field_method_get("available", |_, this| Ok(!this.0.displays.get().is_empty()));
+        fields.add_field_method_get("detecting", |_, this| Ok(this.0.detecting.get()));
+        fields.add_field_method_get("error", |_, this| Ok(this.0.error.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // brightness:value("DP-1") → 0…1 or nil; the first display's
+        // without a connector.
+        methods.add_method("value", |_, this, connector: Option<String>| Ok(this.0.value(connector.as_deref())));
+        // brightness:set(0.4, "DP-1"): the first display without a connector.
+        methods.add_method("set", |_, this, (fraction, connector): (f64, Option<String>)| {
+            this.0.set(fraction, connector.as_deref()).map_err(err)
+        });
+        methods.add_method("refresh", |_, this, ()| {
+            this.0.refresh();
             Ok(())
         });
     }
@@ -2785,7 +2827,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2808,6 +2850,7 @@ impl Script {
                         "apps" => "apps",
                         "session" => "session",
                         "spectrum" => "spectrum",
+                        "brightness" => "brightness",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2840,6 +2883,7 @@ impl Script {
                         "apps" => lua.create_userdata(AppsRef(services.apps.clone()))?,
                         "session" => lua.create_userdata(SessionRef(services.session.clone()))?,
                         "spectrum" => lua.create_userdata(SpectrumRef(services.spectrum.clone()))?,
+                        "brightness" => lua.create_userdata(BrightnessRef(services.brightness.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -2919,6 +2963,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("apps", "Apps"),
     ("session", "Session"),
     ("spectrum", "Spectrum"),
+    ("brightness", "Brightness"),
 ];
 
 /// The kit's modules by name, as built in.

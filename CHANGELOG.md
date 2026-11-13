@@ -6,6 +6,18 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/brightness`: the backlight (`/sys/class/backlight`, the one
+  on a connected DRM connector first, written through logind's
+  `SetBrightness`, no root or helper) and external monitors over DDC/CI
+  (`ddcutil`, detected once on a thread of its own, then addressed by
+  bus). `displays`, `available`, `detecting`, `error`,
+  `:value(connector?)`, `:set(fraction, connector?)` (a value set while
+  a monitor is still writing replaces the one waiting) and `:refresh()`.
+
 ## 0.1.13 — 2026-11-13
 
 ### Added

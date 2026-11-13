@@ -5,11 +5,14 @@
 //! (a socket to read, an interval to sample at) and the runtime's event loop
 //! drives it, so everything the shell does runs on one loop that sleeps when
 //! nothing happens. D-Bus is the exception the PRD allows (§4): its
-//! connections live on one bus thread, which posts into the loop.
+//! connections live on one bus thread, which posts into the loop. DDC/CI
+//! is the other: `ddcutil` blocks for seconds, so brightness talks to
+//! external monitors from a thread of its own, which posts the same way.
 
 pub mod apps;
 pub mod audio;
 pub mod bluetooth;
+pub mod brightness;
 pub mod bus;
 pub mod clipboard;
 pub mod clock;
