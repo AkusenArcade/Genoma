@@ -766,6 +766,14 @@ read focused: Window?
 read windows: { Window }
 ```
 
+### `compositor.keyboard`
+
+```luau
+read keyboard: { layouts: { string }, current: number?, name: string? }
+```
+
+The keyboard layouts, niri's and Hyprland's; empty elsewhere. niri names them as xkb describes them ("English (US)"), Hyprland by code ("us"); `name` is the one in use, in full, on both.
+
 ### `compositor:workspaces`
 
 ```luau
@@ -815,6 +823,14 @@ minimize_window: (self: Compositor, id: string | number, minimized: boolean?) ->
 ```
 
 Minimizes (or, with false, brings back) a window.
+
+### `compositor:switch_layout`
+
+```luau
+switch_layout: (self: Compositor, to: "next" | "prev" | number) -> ()
+```
+
+"next", "prev", or a place in keyboard.layouts, from 1.
 
 ## Vitals
 

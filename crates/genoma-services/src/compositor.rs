@@ -62,6 +62,28 @@ pub struct Window {
     pub minimized: bool,
 }
 
+/// The keyboard's layouts, as the compositor reports them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Keyboard {
+    /// In the compositor's order and words: niri gives xkb's descriptions
+    /// ("English (US)"), Hyprland the layout codes of its main keyboard
+    /// ("us", "it").
+    pub layouts: Vec<String>,
+    /// The one in use, an index into `layouts`.
+    pub current: Option<usize>,
+    /// The one in use, by its full name ("Italian"): what to show.
+    pub name: Option<String>,
+}
+
+/// Where [`Compositor::switch_layout`] goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayoutTarget {
+    Next,
+    Prev,
+    /// An index into [`Keyboard::layouts`].
+    Index(usize),
+}
+
 /// Which compositor, and what talking to it needs.
 pub enum Backend {
     Niri { socket: PathBuf, model: Niri },
@@ -118,6 +140,8 @@ pub struct Compositor {
     pub focused: Signal<Option<String>>,
     /// The focused window's title, or nothing when no window has focus.
     pub title: Memo<Option<String>>,
+    /// The keyboard layouts: niri and Hyprland say; empty elsewhere.
+    pub keyboard: Signal<Keyboard>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -162,7 +186,7 @@ impl Compositor {
             let id = focused.get()?;
             windows.get().into_iter().find(|w| w.id == id)?.title
         });
-        Compositor { backend, workspaces: Signal::new(Vec::new()), windows, focused, title }
+        Compositor { backend, workspaces: Signal::new(Vec::new()), windows, focused, title, keyboard: Signal::new(Keyboard::default()) }
     }
 
     /// Finds the compositor and opens its event stream. The caller reads
@@ -224,6 +248,10 @@ impl Compositor {
     pub fn line(&self, line: &str) {
         match &self.backend {
             Backend::Niri { model, .. } => {
+                if line.contains("\"KeyboardLayout") {
+                    self.niri_keyboard(line);
+                    return;
+                }
                 model.line(line);
                 self.take_niri(model);
             }
@@ -272,6 +300,29 @@ impl Compositor {
             self.set_windows(windows);
             self.set_focused(focused);
         });
+    }
+
+    /// `KeyboardLayoutsChanged` carries the whole list, `KeyboardLayoutSwitched`
+    /// only the index.
+    fn niri_keyboard(&self, line: &str) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else { return };
+        let mut keyboard = self.keyboard.get_untracked().unwrap_or_default();
+        if let Some(layouts) = event.get("KeyboardLayoutsChanged").and_then(|e| e.get("keyboard_layouts")) {
+            keyboard.layouts = layouts
+                .get("names")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect();
+            keyboard.current = layouts.get("current_idx").and_then(Value::as_u64).map(|i| i as usize);
+        } else if let Some(idx) = event.get("KeyboardLayoutSwitched").and_then(|e| e.get("idx")).and_then(Value::as_u64) {
+            keyboard.current = Some(idx as usize);
+        } else {
+            return;
+        }
+        keyboard.name = keyboard.current.and_then(|i| keyboard.layouts.get(i).cloned());
+        self.set_keyboard(keyboard);
     }
 
     // ---- Hyprland -----------------------------------------------------------
@@ -358,6 +409,12 @@ impl Compositor {
             self.set_windows(windows);
             self.set_focused(focused);
         });
+        self.hyprland_keyboard();
+    }
+
+    /// The main keyboard's layouts, asked again.
+    fn hyprland_keyboard(&self) {
+        self.set_keyboard(hyprland_keyboard_of(&self.hyprland_json("devices")));
     }
 
     /// An event, `NAME>>DATA`: a title or the focus changed in place, any
@@ -380,6 +437,7 @@ impl Compositor {
             "activewindow" | "windowtitle" | "workspace" | "focusedmon" | "createworkspace" | "destroyworkspace"
             | "moveworkspace" | "movewindow" | "monitoradded" | "monitorremoved" | "activespecial" => {}
             // Opening and closing a window are said once, without a v2.
+            "activelayout" => self.hyprland_keyboard(),
             "workspacev2" | "focusedmonv2" | "createworkspacev2" | "destroyworkspacev2" | "moveworkspacev2" | "renameworkspace"
             | "openwindow" | "closewindow" | "movewindowv2" | "monitoraddedv2" | "monitorremovedv2" | "configreloaded" => {
                 self.hyprland_refresh()
@@ -560,6 +618,12 @@ impl Compositor {
         }
     }
 
+    fn set_keyboard(&self, keyboard: Keyboard) {
+        if self.keyboard.get_untracked().as_ref() != Some(&keyboard) {
+            self.keyboard.set(keyboard);
+        }
+    }
+
     fn set_focused(&self, id: Option<String>) {
         if self.focused.get_untracked().as_ref() != Some(&id) {
             self.focused.set(id);
@@ -668,6 +732,37 @@ impl Compositor {
         }
     }
 
+    /// Switches the keyboard layout. niri and Hyprland only; the new one
+    /// comes back through the event stream as [`Compositor::keyboard`].
+    pub fn switch_layout(&self, target: LayoutTarget) -> Result<(), String> {
+        if let LayoutTarget::Index(i) = target {
+            let count = self.keyboard.get_untracked().unwrap_or_default().layouts.len();
+            if i >= count {
+                return Err(format!("no layout {} (there are {count})", i + 1));
+            }
+        }
+        match &self.backend {
+            Backend::Niri { socket, .. } => {
+                let layout = match target {
+                    LayoutTarget::Next => "\"Next\"".to_owned(),
+                    LayoutTarget::Prev => "\"Prev\"".to_owned(),
+                    LayoutTarget::Index(i) => format!("{{\"Index\":{i}}}"),
+                };
+                Self::niri_action(socket, &format!("{{\"SwitchLayout\":{{\"layout\":{layout}}}}}"))
+            }
+            Backend::Hyprland { .. } => {
+                let to = match target {
+                    LayoutTarget::Next => "next".to_owned(),
+                    LayoutTarget::Prev => "prev".to_owned(),
+                    LayoutTarget::Index(i) => i.to_string(),
+                };
+                let reply = self.hyprland(&format!("switchxkblayout all {to}"))?;
+                if reply.trim() == "ok" { Ok(()) } else { Err(reply.trim().to_owned()) }
+            }
+            _ => Err(format!("{} does not switch keyboard layouts", self.name())),
+        }
+    }
+
     pub fn close_window(&self, id: &str) -> Result<(), String> {
         match &self.backend {
             Backend::Niri { socket, .. } => {
@@ -682,6 +777,20 @@ impl Compositor {
             Backend::Wayland { .. } => self.ask_runtime(Request::CloseWindow(id.to_owned())),
         }
     }
+}
+
+/// `j/devices`: the main keyboard's layouts (the first keyboard when none
+/// is marked main). `active_layout_index` is missing before Hyprland 0.47;
+/// the name is there in every version.
+fn hyprland_keyboard_of(devices: &Value) -> Keyboard {
+    let keyboards = devices.get("keyboards").and_then(Value::as_array).cloned().unwrap_or_default();
+    let Some(main) = keyboards.iter().find(|k| k.get("main").and_then(Value::as_bool) == Some(true)).or(keyboards.first()) else {
+        return Keyboard::default();
+    };
+    let layouts: Vec<String> =
+        main.get("layout").and_then(Value::as_str).unwrap_or("").split(',').map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+    let current = main.get("active_layout_index").and_then(Value::as_u64).map(|i| i as usize).filter(|i| *i < layouts.len());
+    Keyboard { layouts, current, name: text(main, "active_keymap") }
 }
 
 /// A window address, checked to be one: it goes into a Lua string.
@@ -781,6 +890,26 @@ mod tests {
             [Request::Minimize { window: "7".into(), minimized: true }, Request::FocusWorkspace("2".into())]
         );
         assert!(c.take_requests().is_empty());
+    }
+
+    #[test]
+    fn keyboard_layouts_from_niri_and_hyprland() {
+        let c = Compositor::new(Backend::Niri { socket: PathBuf::from("/nonexistent"), model: Niri::model() });
+        c.line(r#"{"KeyboardLayoutsChanged":{"keyboard_layouts":{"names":["English (US)","Italian"],"current_idx":0}}}"#);
+        assert_eq!(c.keyboard.get_untracked().unwrap().name.as_deref(), Some("English (US)"));
+        c.line(r#"{"KeyboardLayoutSwitched":{"idx":1}}"#);
+        let k = c.keyboard.get_untracked().unwrap();
+        assert_eq!((k.layouts.len(), k.current, k.name.as_deref()), (2, Some(1), Some("Italian")));
+        assert_eq!(c.switch_layout(LayoutTarget::Index(2)), Err("no layout 3 (there are 2)".into()));
+        let devices = serde_json::json!({ "keyboards": [
+            { "name": "virtual", "layout": "us", "active_keymap": "English (US)", "main": false },
+            { "name": "kbd", "layout": "us, it", "active_keymap": "Italian", "active_layout_index": 1, "main": true },
+        ] });
+        assert_eq!(
+            hyprland_keyboard_of(&devices),
+            Keyboard { layouts: vec!["us".into(), "it".into()], current: Some(1), name: Some("Italian".into()) }
+        );
+        assert_eq!(hyprland_keyboard_of(&Value::Null), Keyboard::default());
     }
 
     #[test]

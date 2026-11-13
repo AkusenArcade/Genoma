@@ -6,6 +6,15 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `compositor.keyboard` (`layouts`, `current`, `name`) and
+  `compositor:switch_layout("next" | "prev" | n)`: the keyboard layouts
+  on niri (from its event stream) and Hyprland (its main keyboard, asked
+  again on `activelayout`).
+
 ## 0.1.12 — 2026-11-12
 
 ### Added

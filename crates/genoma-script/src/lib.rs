@@ -517,6 +517,16 @@ impl UserData for CompositorRef {
             Some(w) => Ok(LuaValue::Table(window_table(lua, &this.0, w)?)),
             None => Ok(LuaValue::Nil),
         });
+        // compositor.keyboard → { layouts = { "English (US)", … }, current
+        // (from 1, or nil), name }: niri and Hyprland; empty layouts elsewhere.
+        fields.add_field_method_get("keyboard", |lua, this| {
+            let k = this.0.keyboard.get();
+            let t = lua.create_table()?;
+            t.set("layouts", lua.create_sequence_from(k.layouts)?)?;
+            t.set("current", k.current.map(|i| i + 1))?;
+            t.set("name", k.name)?;
+            Ok(t)
+        });
         // compositor.windows → { { id, title, app_id, workspace, output,
         // minimized }, … }
         fields.add_field_method_get("windows", |lua, this| {
@@ -567,6 +577,19 @@ impl UserData for CompositorRef {
         methods.add_method("focus_workspace", |_, this, id: LuaValue| this.0.focus_workspace(&id_arg(id)?).map_err(err));
         methods.add_method("focus_window", |_, this, id: LuaValue| this.0.focus_window(&id_arg(id)?).map_err(err));
         methods.add_method("close_window", |_, this, id: LuaValue| this.0.close_window(&id_arg(id)?).map_err(err));
+        // compositor:switch_layout("next" | "prev" | n): n from 1, as in
+        // compositor.keyboard.layouts. niri and Hyprland; elsewhere an error.
+        methods.add_method("switch_layout", |_, this, to: LuaValue| {
+            use genoma_services::compositor::LayoutTarget;
+            let target = match &to {
+                LuaValue::String(s) if &*s.to_string_lossy() == "next" => LayoutTarget::Next,
+                LuaValue::String(s) if &*s.to_string_lossy() == "prev" => LayoutTarget::Prev,
+                LuaValue::Integer(n) if *n >= 1 => LayoutTarget::Index(*n as usize - 1),
+                LuaValue::Number(n) if *n >= 1.0 && n.fract() == 0.0 => LayoutTarget::Index(*n as usize - 1),
+                _ => return Err(err("\"next\", \"prev\" or a layout's place, from 1")),
+            };
+            this.0.switch_layout(target).map_err(err)
+        });
         // compositor:minimize_window(id, minimized = true): only where
         // compositor.can_minimize; elsewhere an error.
         methods.add_method("minimize_window", |_, this, (id, minimized): (LuaValue, Option<bool>)| {

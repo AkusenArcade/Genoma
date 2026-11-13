@@ -455,6 +455,10 @@ export type Compositor = {
     read focused_output: string?,
     read focused: Window?,
     read windows: { Window },
+    -- The keyboard layouts, niri's and Hyprland's; empty elsewhere. niri
+    -- names them as xkb describes them ("English (US)"), Hyprland by code
+    -- ("us"); `name` is the one in use, in full, on both.
+    read keyboard: { layouts: { string }, current: number?, name: string? },
     -- compositor:workspaces("DP-1"), every output's without one, in order.
     workspaces: (self: Compositor, output: string?) -> { Workspace },
     -- compositor:active("DP-1") → the workspace shown there.
@@ -466,6 +470,8 @@ export type Compositor = {
     close_window: (self: Compositor, id: string | number) -> (),
     -- Minimizes (or, with false, brings back) a window.
     minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> (),
+    -- "next", "prev", or a place in keyboard.layouts, from 1.
+    switch_layout: (self: Compositor, to: "next" | "prev" | number) -> (),
 }
 
 -- @genoma/niri: niri's own model, with niri's numeric ids.
