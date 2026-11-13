@@ -6,6 +6,20 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/drives`: removable drives through udisks2. `list` gives each
+  drive's name, device, volumes (label, filesystem, size, mounts, free
+  space while mounted), `rate` (bytes a second being written, page cache
+  included: not safe to pull above 0), and `busy`/`error` for its
+  actions. `:mount(device)`, `:unmount(device)`, `:eject(id)` (every
+  volume unmounted, then the power off) go through udisks and polkit;
+  `:include_loops(true)` counts the user's loop devices too. udisks is
+  read again after its signals; rate and free space once a second, only
+  while something is mounted.
+
 ## 0.1.14 — 2026-11-13
 
 ### Added

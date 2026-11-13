@@ -32,6 +32,7 @@ use genoma_services::{
     apps::{App as AppEntry, Apps},
     session::{Action as SessionAction, Session},
     brightness::Brightness,
+    drives::Drives,
     spectrum::Spectrum,
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
@@ -423,6 +424,8 @@ pub struct Services {
     pub spectrum: Rc<Spectrum>,
     /// Backlight and DDC/CI.
     pub brightness: Rc<Brightness>,
+    /// udisks2: removable drives.
+    pub drives: Rc<Drives>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1263,6 +1266,58 @@ impl UserData for BrightnessRef {
         });
         methods.add_method("refresh", |_, this, ()| {
             this.0.refresh();
+            Ok(())
+        });
+    }
+}
+
+struct DrivesRef(Rc<Drives>);
+
+impl UserData for DrivesRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // drives.list → { { id, name, device, can_power_off, is_loop, rate,
+        // busy, error, volumes = { { device, label, kind, size, mounts,
+        // free }, … } }, … }
+        fields.add_field_method_get("list", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, d) in this.0.drives.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", d.id)?;
+                t.set("name", d.name)?;
+                t.set("device", d.device)?;
+                t.set("can_power_off", d.can_power_off)?;
+                t.set("is_loop", d.is_loop)?;
+                t.set("rate", d.rate)?;
+                t.set("busy", d.busy)?;
+                t.set("error", d.error)?;
+                let volumes = lua.create_table()?;
+                for (j, v) in d.volumes.into_iter().enumerate() {
+                    let vt = lua.create_table()?;
+                    vt.set("device", v.device)?;
+                    vt.set("label", v.label)?;
+                    vt.set("kind", v.kind)?;
+                    vt.set("size", v.size)?;
+                    vt.set("mounts", lua.create_sequence_from(v.mounts)?)?;
+                    vt.set("free", v.free)?;
+                    volumes.set(j + 1, vt)?;
+                }
+                t.set("volumes", volumes)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // drives:mount("/dev/sdb1"), :unmount("/dev/sdb1"): through udisks,
+        // which asks polkit; the drive is busy until it answers.
+        methods.add_method("mount", |_, this, device: String| this.0.mount(&device).map_err(err));
+        methods.add_method("unmount", |_, this, device: String| this.0.unmount(&device).map_err(err));
+        // drives:eject(id): every volume unmounted, then the power off.
+        methods.add_method("eject", |_, this, id: String| this.0.eject(&id).map_err(err));
+        // drives:include_loops(true): this user's loop devices count too.
+        methods.add_method("include_loops", |_, this, on: bool| {
+            this.0.include_loops(on);
             Ok(())
         });
     }
@@ -2827,7 +2882,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2851,6 +2906,7 @@ impl Script {
                         "session" => "session",
                         "spectrum" => "spectrum",
                         "brightness" => "brightness",
+                        "drives" => "drives",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2884,6 +2940,7 @@ impl Script {
                         "session" => lua.create_userdata(SessionRef(services.session.clone()))?,
                         "spectrum" => lua.create_userdata(SpectrumRef(services.spectrum.clone()))?,
                         "brightness" => lua.create_userdata(BrightnessRef(services.brightness.clone()))?,
+                        "drives" => lua.create_userdata(DrivesRef(services.drives.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -2964,6 +3021,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("session", "Session"),
     ("spectrum", "Spectrum"),
     ("brightness", "Brightness"),
+    ("drives", "Drives"),
 ];
 
 /// The kit's modules by name, as built in.

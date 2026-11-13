@@ -847,6 +847,51 @@ export type Brightness = {
     refresh: (self: Brightness) -> (),
 }
 
+export type Volume = {
+    -- "/dev/sdb1".
+    device: string,
+    label: string,
+    -- The filesystem: "vfat", "exfat", "ext4"…
+    kind: string,
+    -- Bytes.
+    size: number,
+    mounts: { string },
+    -- Bytes left, while mounted.
+    free: number?,
+}
+
+-- @genoma/drives: removable drives through udisks2. Read again after any
+-- udisks signal; the rate and free space once a second, only while a
+-- volume is mounted.
+export type Drives = {
+    -- Plugged in, with at least one volume; by device.
+    read list: { {
+        -- Stable while plugged in: what eject takes.
+        id: string,
+        -- Vendor and model, else the first label, else the device.
+        name: string,
+        -- The whole disk, "/dev/sdb".
+        device: string,
+        can_power_off: boolean,
+        is_loop: boolean,
+        -- Bytes a second being written now, page cache included: not
+        -- safe to pull while it is above 0.
+        rate: number,
+        -- "mounting", "unmounting", "ejecting" or "".
+        busy: string,
+        -- Why the last action failed, in words, or "".
+        error: string,
+        volumes: { Volume },
+    } },
+    mount: (self: Drives, device: string) -> (),
+    unmount: (self: Drives, device: string) -> (),
+    -- Unmounts every volume (waiting for the writing to end), then powers
+    -- the drive off; a loop device is deleted.
+    eject: (self: Drives, id: string) -> (),
+    -- Loop devices this user set up count as drives: a stick made of a file.
+    include_loops: (self: Drives, on: boolean) -> (),
+}
+
 -- @genoma/session: logind. What the machine can do and doing it, the moment before sleep, inhibitors.
 export type Session = {
     -- Whether logind answers.

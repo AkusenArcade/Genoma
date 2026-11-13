@@ -376,6 +376,7 @@ mod tests {
             ("AppsRef", "Apps"),
             ("SessionRef", "Session"),
             ("BrightnessRef", "Brightness"),
+            ("DrivesRef", "Drives"),
             ("Inhibition", "Inhibition"),
             ("SpectrumRef", "Spectrum"),
             ("SpectrumHold", "SpectrumHold"),

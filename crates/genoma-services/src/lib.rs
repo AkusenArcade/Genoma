@@ -18,6 +18,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod compositor;
 pub mod displays;
+pub mod drives;
 pub mod gamma;
 pub mod icons;
 pub mod idle;
