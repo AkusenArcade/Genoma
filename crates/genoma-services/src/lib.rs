@@ -9,6 +9,7 @@
 //! is the other: `ddcutil` blocks for seconds, so brightness talks to
 //! external monitors from a thread of its own, which posts the same way.
 
+pub mod accounts;
 pub mod apps;
 pub mod audio;
 pub mod bluetooth;

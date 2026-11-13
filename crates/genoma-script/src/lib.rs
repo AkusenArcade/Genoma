@@ -33,6 +33,7 @@ use genoma_services::{
     session::{Action as SessionAction, Session},
     brightness::Brightness,
     drives::Drives,
+    accounts::Accounts,
     spectrum::Spectrum,
     audio::Audio,
     bluetooth::{Bluetooth, DeviceCall},
@@ -426,6 +427,8 @@ pub struct Services {
     pub brightness: Rc<Brightness>,
     /// udisks2: removable drives.
     pub drives: Rc<Drives>,
+    /// AccountsService: this user and the people a greeter offers.
+    pub accounts: Rc<Accounts>,
 }
 
 struct NiriRef(Rc<Niri>);
@@ -1320,6 +1323,49 @@ impl UserData for DrivesRef {
             this.0.include_loops(on);
             Ok(())
         });
+    }
+}
+
+struct AccountsRef(Rc<Accounts>);
+
+fn user_table(lua: &Lua, u: genoma_services::accounts::User) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("uid", u.uid)?;
+    t.set("login", u.login)?;
+    t.set("name", u.name)?;
+    t.set("icon", u.icon)?;
+    t.set("email", u.email)?;
+    t.set("language", u.language)?;
+    t.set("administrator", u.administrator)?;
+    t.set("locked", u.locked)?;
+    t.set("home", u.home)?;
+    t.set("shell", u.shell)?;
+    t.set("logins", u.logins)?;
+    Ok(t)
+}
+
+impl UserData for AccountsRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+        // accounts.me → { uid, login, name, icon, email, language,
+        // administrator, locked, home, shell, logins }
+        fields.add_field_method_get("me", |lua, this| user_table(lua, this.0.me.get()));
+        // accounts.users → the people, most logged in first.
+        fields.add_field_method_get("users", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, u) in this.0.users.get().into_iter().enumerate() {
+                list.set(i + 1, user_table(lua, u)?)?;
+            }
+            Ok(list)
+        });
+        fields.add_field_method_get("error", |_, this| Ok(this.0.error.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // accounts:set_icon(path), :set_name(name): this user's, through
+        // AccountsService (which may ask polkit).
+        methods.add_method("set_icon", |_, this, path: String| this.0.set_icon(path).map_err(err));
+        methods.add_method("set_name", |_, this, name: String| this.0.set_name(name).map_err(err));
     }
 }
 
@@ -2882,7 +2928,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -2907,6 +2953,7 @@ impl Script {
                         "spectrum" => "spectrum",
                         "brightness" => "brightness",
                         "drives" => "drives",
+                        "accounts" => "accounts",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -2941,6 +2988,7 @@ impl Script {
                         "spectrum" => lua.create_userdata(SpectrumRef(services.spectrum.clone()))?,
                         "brightness" => lua.create_userdata(BrightnessRef(services.brightness.clone()))?,
                         "drives" => lua.create_userdata(DrivesRef(services.drives.clone()))?,
+                        "accounts" => lua.create_userdata(AccountsRef(services.accounts.clone()))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -3022,6 +3070,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("spectrum", "Spectrum"),
     ("brightness", "Brightness"),
     ("drives", "Drives"),
+    ("accounts", "Accounts"),
 ];
 
 /// The kit's modules by name, as built in.

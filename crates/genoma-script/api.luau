@@ -892,6 +892,38 @@ export type Drives = {
     include_loops: (self: Drives, on: boolean) -> (),
 }
 
+export type User = {
+    uid: number,
+    login: string,
+    -- The real name, or the login when there is none.
+    name: string,
+    -- A picture that can be read (AccountsService's, else ~/.face), or nil.
+    icon: string?,
+    email: string,
+    language: string,
+    administrator: boolean,
+    locked: boolean,
+    home: string,
+    shell: string,
+    -- How many times they logged in.
+    logins: number,
+}
+
+-- @genoma/accounts: AccountsService. Without it, `me` still comes from
+-- /etc/passwd and ~/.face, and nothing can be set.
+export type Accounts = {
+    read available: boolean,
+    -- This session's user.
+    read me: User,
+    -- The people (no system accounts), most logged in first: a greeter's.
+    read users: { User },
+    -- The last change's failure, or "".
+    read error: string,
+    -- A new picture, copied where the greeter and the lock read it.
+    set_icon: (self: Accounts, path: string) -> (),
+    set_name: (self: Accounts, name: string) -> (),
+}
+
 -- @genoma/session: logind. What the machine can do and doing it, the moment before sleep, inhibitors.
 export type Session = {
     -- Whether logind answers.

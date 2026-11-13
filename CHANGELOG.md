@@ -6,6 +6,17 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/accounts`: AccountsService. `me` (uid, login, name, a
+  readable `icon` with `~/.face` as fallback, email, language,
+  administrator, locked, home, shell, logins), `users` (no system
+  accounts, most logged in first: a greeter's list), `available`,
+  `error`, `:set_icon(path)` and `:set_name(name)`. Without
+  AccountsService `me` comes from `/etc/passwd`.
+
 ## 0.1.15 — 2026-11-13
 
 ### Added
