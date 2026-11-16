@@ -16,6 +16,10 @@ changes what a shell sees.
   `g.icon`.
 - `g.svg`'s `width` and `height` may be bindings: the document is fitted
   again as they change.
+- A shader takes `fps`: while its `clock` runs it is drawn that many
+  times a second instead of at every refresh, and the surface sleeps in
+  between. A slow motion reads the same at 30 as at 165, at a fraction of
+  the cost.
 
 ### Changed
 
@@ -27,6 +31,13 @@ changes what a shell sees.
 
 ### Fixed
 
+- Every `g.file` and `g.folder` is watched through one inotify instance
+  instead of one each: a shell watching sixty files held sixty of the
+  instances a user is given (128 on many systems, shared with every
+  program). A watched folder removed and made again is followed again.
+- A node with passes under depth is drawn where it is: its picture was
+  drawn already turned, so what it held landed outside it and was not
+  seen (a simulation's agents under a pass, on a node pushed back).
 - What is started where nothing owns it (a `g.watch` handler, a click, an
   IPC verb) belongs to the load and stops with it: a `g.file`, a timer or
   a process started there was never stopped, and every reload left its

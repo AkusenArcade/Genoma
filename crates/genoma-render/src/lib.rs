@@ -795,6 +795,23 @@ impl DrawList {
         self.over = other.over;
     }
 
+    /// The list with `depth` taken off every item that carries exactly it:
+    /// drawn flat, for a picture that is then shown through that matrix
+    /// itself. An item turned further by a matrix of its own keeps it.
+    pub fn flattened(mut self, depth: [[f32; 4]; 4]) -> DrawList {
+        let flat = |m: &mut [[f32; 4]; 4]| {
+            if *m == depth {
+                *m = Rect::IDENTITY;
+            }
+        };
+        self.rects.iter_mut().for_each(|r| flat(&mut r.transform));
+        self.paths.iter_mut().for_each(|p| flat(&mut p.transform));
+        self.images.iter_mut().for_each(|i| flat(&mut i.transform));
+        self.shaders.iter_mut().for_each(|s| flat(&mut s.transform));
+        self.emitters.iter_mut().for_each(|e| flat(&mut e.params.transform));
+        self
+    }
+
     /// Where what was pushed after `mark` leaves paint, as `paint_bounds`
     /// gives it for the whole list.
     pub fn paint_bounds_since(&self, mark: Layer) -> Option<[f32; 4]> {

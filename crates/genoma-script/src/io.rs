@@ -516,20 +516,163 @@ const FILE_EVENTS: inotify::WatchFlags = inotify::WatchFlags::CLOSE_WRITE
 /// `dir` watched for `events`; or, while it does not exist yet, the nearest
 /// directory above it that does, for what is made in it. Called again on
 /// each event, it goes down a level as each one is made, until the watch is
-/// on `dir` itself: true once it is. A file whose folder appears only later
-/// (matugen's output on a first start, `~/.config/bioma/generated/`) is
-/// seen from then on, not never.
-fn watch_toward(fd: BorrowedFd<'_>, dir: &Path, events: inotify::WatchFlags) -> bool {
+/// on `dir` itself: the watch it has, and true once it is on `dir`. A file
+/// whose folder appears only later (matugen's output on a first start,
+/// `~/.config/bioma/generated/`) is seen from then on, not never. Several
+/// watches on one directory are one, its events those of all of them.
+fn watch_toward(fd: BorrowedFd<'_>, dir: &Path, events: inotify::WatchFlags) -> (Option<i32>, bool) {
     let mut at = dir;
     while !at.is_dir() {
         match at.parent() {
             Some(up) => at = up,
-            None => return false,
+            None => return (None, false),
         }
     }
     let own = at == dir;
     let wanted = if own { events } else { inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO };
-    inotify::add_watch(fd, at, wanted).is_ok() && own
+    match inotify::add_watch(fd, at, wanted | inotify::WatchFlags::MASK_ADD) {
+        Ok(wd) => (Some(wd), own),
+        Err(_) => (None, false),
+    }
+}
+
+/// What a watched directory tells: the names of what changed in it, and
+/// whether the watch has only now reached it (then everything may have).
+type Changed = Box<dyn FnMut(&[Vec<u8>], bool)>;
+
+/// One directory someone watches.
+struct Watch {
+    id: u64,
+    dir: PathBuf,
+    wd: Option<i32>,
+    armed: bool,
+    /// Taken out while it is called: what it sets may watch or stop
+    /// watching something else.
+    changed: Option<Changed>,
+}
+
+/// Every `g.file` and `g.folder` watched through one inotify instance: an
+/// instance each was a descriptor each, and a user has few to give (128 on
+/// many systems, shared with every other program).
+struct Watches {
+    fd: OwnedFd,
+    host: HostRef,
+    token: Option<RegistrationToken>,
+    next: u64,
+    watches: Vec<Watch>,
+}
+
+thread_local! {
+    static WATCHES: RefCell<Option<Watches>> = const { RefCell::new(None) };
+}
+
+impl Watches {
+    /// A watch nobody has any more is given back.
+    fn release(&self, wd: Option<i32>) {
+        if let Some(wd) = wd
+            && !self.watches.iter().any(|w| w.wd == Some(wd))
+        {
+            let _ = inotify::remove_watch(&self.fd, wd);
+        }
+    }
+}
+
+/// `dir` watched until `stop` stops: `changed` hears of what happens in it.
+fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, changed: Changed) {
+    let id = WATCHES.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            let made = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC)
+                .map_err(std::io::Error::from)
+                .and_then(|fd| Ok((fd.try_clone()?, fd)));
+            match made {
+                Ok((fd, theirs)) => {
+                    let token = host.readable(theirs, Box::new(watches_ready));
+                    *w = Some(Watches { fd, host: host.clone(), token, next: 0, watches: Vec::new() });
+                }
+                Err(e) => {
+                    log::warn!("{what} {}: no watch: {e}", dir.display());
+                    return None;
+                }
+            }
+        }
+        let w = w.as_mut()?;
+        let (wd, armed) = watch_toward(w.fd.as_fd(), &dir, FILE_EVENTS);
+        w.next += 1;
+        w.watches.push(Watch { id: w.next, dir, wd, armed, changed: Some(changed) });
+        Some(w.next)
+    });
+    let Some(id) = id else { return };
+    *stop.also.borrow_mut() = Some(Box::new(move || {
+        WATCHES.with(|w| {
+            let mut w = w.borrow_mut();
+            let Some(all) = w.as_mut() else { return };
+            let Some(at) = all.watches.iter().position(|x| x.id == id) else { return };
+            let gone = all.watches.remove(at);
+            all.release(gone.wd);
+            // The last one: the instance goes with it.
+            if all.watches.is_empty()
+                && let Some(all) = w.take()
+                && let Some(token) = all.token
+            {
+                all.host.remove(token);
+            }
+        });
+    }));
+}
+
+/// The instance has events: each watch on a directory named in them hears
+/// of what changed there.
+fn watches_ready(fd: BorrowedFd<'_>) -> bool {
+    let mut seen: Vec<(i32, Option<Vec<u8>>, bool)> = Vec::new();
+    let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+    let mut events = inotify::Reader::new(fd, &mut buf);
+    while let Ok(event) = events.next() {
+        let gone = event.events().contains(inotify::ReadFlags::IGNORED);
+        seen.push((event.wd(), event.file_name().map(|n| n.to_bytes().to_vec()), gone));
+    }
+    let ids: Vec<u64> = WATCHES.with(|w| {
+        w.borrow().as_ref().map_or_else(Vec::new, |all| {
+            all.watches.iter().filter(|x| seen.iter().any(|(wd, ..)| x.wd == Some(*wd))).map(|x| x.id).collect()
+        })
+    });
+    for id in ids {
+        let taken = WATCHES.with(|w| {
+            let mut w = w.borrow_mut();
+            let all = w.as_mut()?;
+            let at = all.watches.iter().position(|x| x.id == id)?;
+            let wd = all.watches[at].wd;
+            let names: Vec<Vec<u8>> = seen.iter().filter(|(w, ..)| Some(*w) == wd).filter_map(|(_, n, _)| n.clone()).collect();
+            // Its directory removed, the watch went with it: toward it again.
+            if seen.iter().any(|(w, _, gone)| Some(*w) == wd && *gone) {
+                all.watches[at].wd = None;
+                all.watches[at].armed = false;
+            }
+            // Something made on the way to its folder: a level further.
+            let mut came = false;
+            if !all.watches[at].armed {
+                let before = all.watches[at].wd;
+                let (wd, armed) = watch_toward(all.fd.as_fd(), &all.watches[at].dir, FILE_EVENTS);
+                all.watches[at].wd = wd;
+                all.watches[at].armed = armed;
+                if before != wd {
+                    all.release(before);
+                }
+                came = true;
+            }
+            all.watches[at].changed.take().map(|c| (c, names, came))
+        });
+        let Some((mut changed, names, came)) = taken else { continue };
+        changed(&names, came);
+        WATCHES.with(|w| {
+            if let Some(all) = w.borrow_mut().as_mut()
+                && let Some(x) = all.watches.iter_mut().find(|x| x.id == id)
+            {
+                x.changed = Some(changed);
+            }
+        });
+    }
+    true
 }
 
 pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
@@ -545,32 +688,20 @@ pub fn file(host: &HostRef, t: Table) -> mlua::Result<Watched> {
         // replaces the file, and a watch on the old one would see nothing.
         let dir = path.parent().unwrap_or(Path::new("/")).to_owned();
         let name = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
-        match inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC) {
-            Ok(fd) => {
-                let mut armed = watch_toward(fd.as_fd(), &dir, FILE_EVENTS);
-                stop.hold(host.readable(
-                    fd,
-                    Box::new(move |fd| {
-                        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
-                        let mut events = inotify::Reader::new(fd, &mut buf);
-                        let mut ours = false;
-                        while let Ok(event) = events.next() {
-                            ours |= event.file_name().is_some_and(|n| n.to_bytes() == name.as_encoded_bytes());
-                        }
-                        // Something made on the way to its folder: a level
-                        // further, and read, as the file may have come with it.
-                        if !armed {
-                            armed = watch_toward(fd, &dir, FILE_EVENTS);
-                            text.set(read());
-                        } else if ours {
-                            text.set(read());
-                        }
-                        true
-                    }),
-                ))
-            }
-            Err(e) => log::warn!("g.file {}: no watch: {e}", path.display()),
-        }
+        let text = text.clone();
+        watch_dir(
+            host,
+            &stop,
+            dir,
+            "g.file",
+            Box::new(move |names, came| {
+                // Something made on the way to its folder: read, as the
+                // file may have come with it.
+                if came || names.iter().any(|n| n.as_slice() == name.as_encoded_bytes()) {
+                    text.set(read());
+                }
+            }),
+        );
     }
     Ok(Watched { path, text, stop })
 }
@@ -676,32 +807,22 @@ pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
     let entries = Signal::new(list_folder(&path, listing));
     let stop = Stop::new(host);
     if t.get::<Option<bool>>("watch")?.unwrap_or(true) {
-        match inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC) {
-            Ok(fd) => {
-                let (path, entries) = (path.clone(), entries.clone());
-                // A folder not there yet is waited for, as a file's is.
-                let mut armed = watch_toward(fd.as_fd(), &path, FILE_EVENTS);
-                stop.hold(host.readable(
-                    fd,
-                    Box::new(move |fd| {
-                        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
-                        let mut events = inotify::Reader::new(fd, &mut buf);
-                        while events.next().is_ok() {}
-                        if !armed {
-                            armed = watch_toward(fd, &path, FILE_EVENTS);
-                        }
-                        // Set only when the list differs: a file written in
-                        // place is a change of content, not of the folder.
-                        let now = list_folder(&path, listing);
-                        if entries.try_get().as_ref() != Some(&now) {
-                            entries.set(now);
-                        }
-                        true
-                    }),
-                ))
-            }
-            Err(e) => log::warn!("g.folder {}: no watch: {e}", path.display()),
-        }
+        let (dir, entries) = (path.clone(), entries.clone());
+        // A folder not there yet is waited for, as a file's is.
+        watch_dir(
+            host,
+            &stop,
+            path.clone(),
+            "g.folder",
+            Box::new(move |_, _| {
+                // Set only when the list differs: a file written in place
+                // is a change of content, not of the folder.
+                let now = list_folder(&dir, listing);
+                if entries.try_get().as_ref() != Some(&now) {
+                    entries.set(now);
+                }
+            }),
+        );
     }
     Ok(Folder { path, entries, stop, listing })
 }
@@ -793,11 +914,11 @@ mod watch_tests {
         std::fs::create_dir_all(&base).unwrap();
         let dir = base.join("bioma").join("generated");
         let fd = inotify::init(inotify::CreateFlags::NONBLOCK | inotify::CreateFlags::CLOEXEC).unwrap();
-        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "two levels missing: the base is watched");
+        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS).1, "two levels missing: the base is watched");
         std::fs::create_dir(base.join("bioma")).unwrap();
-        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "one level missing: a level down");
+        assert!(!watch_toward(fd.as_fd(), &dir, FILE_EVENTS).1, "one level missing: a level down");
         std::fs::create_dir(&dir).unwrap();
-        assert!(watch_toward(fd.as_fd(), &dir, FILE_EVENTS), "there: its own watch");
+        assert!(watch_toward(fd.as_fd(), &dir, FILE_EVENTS).1, "there: its own watch");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

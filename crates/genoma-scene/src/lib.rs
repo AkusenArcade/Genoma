@@ -326,6 +326,8 @@ pub struct Node {
     agents: u32,
     agent_size: f32,
     steps_rate: f32,
+    /// A clocked shader's frames a second; 0 is every refresh.
+    fps: f32,
     steps_taken: u64,
     steps_owed: f32,
     /// Props set at least once: the first value is placed, never animated.
@@ -522,6 +524,7 @@ impl Node {
             agents: 0,
             agent_size: 0.0,
             steps_rate: 60.0,
+            fps: 0.0,
             steps_taken: 0,
             steps_owed: 0.0,
             seen: Vec::new(),
@@ -2253,6 +2256,7 @@ impl Scene {
             Prop::Agents => n.agents = take!(number).clamp(0.0, 65536.0) as u32,
             Prop::AgentSize => n.agent_size = take!(number).max(0.0),
             Prop::Steps => n.steps_rate = take!(number).clamp(0.0, 960.0),
+            Prop::Fps => n.fps = take!(number).max(0.0),
             Prop::Src => {
                 let src = take!(text);
                 // Another picture: an animation starts from its first frame.
@@ -2604,20 +2608,27 @@ impl Scene {
                         }
                     }
                 }
+                // A clock held to so many frames a second: its frames are
+                // that far apart, and a longer gap is still no leap.
+                let beat = if n.clock && n.fps > 0.0 { Some(1.0 / n.fps.max(1.0)) } else { None };
+                let most = beat.map_or(0.05, |b| (b * 2.0).max(0.05));
                 if n.clock || moving {
                     // A paced shader's frames are further apart than a
                     // clock's; after a quiet spell neither leaps.
-                    n.time += dt.min(if n.clock { 0.05 } else { 0.1 });
+                    n.time += dt.min(if n.clock { most } else { 0.1 });
                     self.dirty = true;
                 }
                 // Its simulation steps while its clock runs, at its rate.
                 if n.clock && n.compute.is_some() {
-                    n.steps_owed += n.steps_rate * dt.min(0.05);
+                    n.steps_owed += n.steps_rate * dt.min(most);
                     let whole = n.steps_owed.floor();
                     n.steps_owed -= whole;
                     n.steps_taken += whole as u64;
                 }
-                if n.clock {
+                if let Some(beat) = beat {
+                    let wait = Duration::from_secs_f32(beat);
+                    motion.wake = Some(motion.wake.map_or(wait, |w| w.min(wait)));
+                } else if n.clock {
                     motion.moving = true;
                 } else if moving {
                     let wait = Duration::from_secs_f32((step() / (fastest * scale).max(1e-3)).min(0.1));
@@ -3977,6 +3988,12 @@ fn grouped_node(
 /// what it holds and by each pass's source, numbers, clock and pointer, so
 /// one at rest is drawn once and kept.
 fn passed(mut own: DrawList, mut passes: Vec<genoma_render::Shader>, scale: f32, out: &mut Out) {
+    // Under depth the picture is drawn flat and shown through the matrix:
+    // drawn turned, what it holds landed where the matrix sends it, outside
+    // a picture laid where the passes' boxes are.
+    if out.transform != Rect::IDENTITY {
+        own = own.flattened(out.transform);
+    }
     let mut area = own.paint_bounds();
     for p in &passes {
         let b = [p.origin[0], p.origin[1], p.origin[0] + p.size[0] * p.scale, p.origin[1] + p.size[1] * p.scale];
@@ -4035,7 +4052,7 @@ fn passed(mut own: DrawList, mut passes: Vec<genoma_render::Shader>, scale: f32,
         alpha: 1.0,
         clip: out.clip,
         fade: out.fade_of(),
-        transform: Rect::IDENTITY,
+        transform: out.transform,
         filter: genoma_render::Image::NO_FILTER,
         mask: None,
         blend: 0,
@@ -5989,6 +6006,36 @@ mod tests {
         // The shelf's box, square: a box is not rounded unless told.
         assert_eq!(p.walls[0], [40.0, 0.0, 160.0, 20.0]);
         assert_eq!(p.walls[1][0], 0.0);
+    }
+
+    #[test]
+    fn a_clock_held_to_a_rate_sleeps_between_its_frames() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let water = scene.create(Kind::Shader, Role::None);
+        scene.append(root, water);
+        for (p, v) in [(Prop::Width, 80.0), (Prop::Height, 40.0)] {
+            scene.set(water, p, Value::Number(v), None).unwrap();
+        }
+        scene.set(water, Prop::Compute, Value::Text("genoma:waves".into()), None).unwrap();
+        scene.set(water, Prop::Clock, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        scene.draw_list(1.0);
+        let start = Instant::now();
+        scene.advance(start, 1.0);
+        let every = scene.advance(start + Duration::from_millis(10), 1.0);
+        assert!(every.moving, "a clock alone: a frame every refresh");
+        scene.set(water, Prop::Fps, Value::Number(20.0), None).unwrap();
+        let before = scene.draw_list(1.0).shaders[0].sim.as_ref().unwrap().steps;
+        let paced = scene.advance(start + Duration::from_millis(60), 1.0);
+        assert!(!paced.moving, "held to a rate, the surface sleeps");
+        assert_eq!(paced.wake, Some(Duration::from_secs_f32(0.05)));
+        // A frame a twentieth later is its whole time, not a leap cut short.
+        scene.advance(start + Duration::from_millis(110), 1.0);
+        scene.advance(start + Duration::from_millis(160), 1.0);
+        let steps = scene.draw_list(1.0).shaders[0].sim.as_ref().unwrap().steps - before;
+        assert!((8..=10).contains(&steps), "sixty steps a second over 150 ms, {steps}");
     }
 
     #[test]
