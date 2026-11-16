@@ -32,7 +32,7 @@ pub mod shader;
 pub mod sim;
 
 pub use particles::{Emitter, EmitterParams};
-pub use path::{Path, PathVertex};
+pub use path::{Gradient, GradientKind, Path, PathVertex, Spread};
 pub use rect::Rect;
 pub use shader::Shader;
 pub use image::resident;
@@ -246,6 +246,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
     a.key == b.key
         && a.origin == b.origin
         && a.color == b.color
+        && a.gradient == b.gradient
         && a.alpha == b.alpha
         && a.clip == b.clip
         && a.fade == b.fade
@@ -600,6 +601,9 @@ impl DrawList {
                 v.to_bits().hash(&mut h);
             }
             p.alpha.to_bits().hash(&mut h);
+            if let Some(g) = &p.gradient {
+                format!("{g:?}").hash(&mut h);
+            }
         }
         for i in &self.images {
             i.key.hash(&mut h);

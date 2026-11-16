@@ -35,6 +35,45 @@ pub struct Mesh {
     pub bounds: [f32; 4],
 }
 
+/// How a gradient is laid over a path: a point of the mesh (physical
+/// pixels from its origin) is taken to the gradient's own space by
+/// `matrix` (a, b, c, d, e, f as SVG writes it: x' = a x + c y + e,
+/// y' = b x + d y + f), and there:
+/// - linear: from `params` (x1, y1) at 0 to (x2, y2) at 1;
+/// - radial: from the focal circle (`params` fx, fy, fr) at 0 to the circle
+///   (cx, cy, r) at 1, as SVG and the canvas draw it: `params` are
+///   cx, cy, r, fx, fy, fr;
+/// - conic: round (cx, cy) clockwise from twelve, turned by `params[2]`
+///   degrees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gradient {
+    pub kind: GradientKind,
+    pub spread: Spread,
+    pub matrix: [f32; 6],
+    pub params: [f32; 6],
+    /// Up to eight, in order: position 0…1 and straight sRGB-encoded RGBA.
+    pub stops: Vec<(f32, [f32; 4])>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientKind {
+    Linear,
+    Radial,
+    Conic,
+}
+
+/// Beyond 0 and 1: the end colours held, the gradient repeated, or
+/// mirrored back and forth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spread {
+    Pad,
+    Repeat,
+    Reflect,
+}
+
+/// The most stops a gradient keeps; past it the last are dropped.
+pub const STOPS: usize = 8;
+
 /// A filled outline in the draw list.
 #[derive(Clone)]
 pub struct Path {
@@ -45,6 +84,8 @@ pub struct Path {
     pub origin: [f32; 2],
     /// Straight sRGB-encoded RGBA, as everything else.
     pub color: [f32; 4],
+    /// In place of `color`, when given.
+    pub gradient: Option<Gradient>,
     pub alpha: f32,
     /// Drawn only inside this rectangle, physical pixels: x0, y0, x1, y1.
     pub clip: [f32; 4],
@@ -52,6 +93,54 @@ pub struct Path {
     pub fade: [f32; 4],
     /// Depth, as a rect's (see [`crate::Rect::transform`]).
     pub transform: [[f32; 4]; 4],
+}
+
+/// A gradient as the GPU reads it.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Paint {
+    /// Kind (1 linear, 2 radial, 3 conic), spread (0 pad, 1 repeat, 2
+    /// reflect), the count of stops.
+    head: [f32; 4],
+    /// The matrix's rows: x' and y'.
+    m0: [f32; 4],
+    m1: [f32; 4],
+    p0: [f32; 4],
+    p1: [f32; 4],
+    positions: [[f32; 4]; 2],
+    colors: [[f32; 4]; STOPS],
+}
+
+impl Paint {
+    fn of(g: &Gradient) -> Paint {
+        let [a, b, c, d, e, f] = g.matrix;
+        let mut paint = Paint {
+            head: [
+                match g.kind {
+                    GradientKind::Linear => 1.0,
+                    GradientKind::Radial => 2.0,
+                    GradientKind::Conic => 3.0,
+                },
+                match g.spread {
+                    Spread::Pad => 0.0,
+                    Spread::Repeat => 1.0,
+                    Spread::Reflect => 2.0,
+                },
+                g.stops.len().min(STOPS) as f32,
+                0.0,
+            ],
+            m0: [a, c, e, 0.0],
+            m1: [b, d, f, 0.0],
+            p0: [g.params[0], g.params[1], g.params[2], g.params[3]],
+            p1: [g.params[4], g.params[5], 0.0, 0.0],
+            ..Zeroable::zeroed()
+        };
+        for (i, (at, colour)) in g.stops.iter().take(STOPS).enumerate() {
+            paint.positions[i / 4][i % 4] = *at;
+            paint.colors[i] = *colour;
+        }
+        paint
+    }
 }
 
 /// `outline` filled by `rule` and tessellated within `tolerance` physical
@@ -228,7 +317,7 @@ impl Grid {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
-    /// Origin, then alpha and the fade's foot and span.
+    /// Origin, alpha, and the paint's place (-1: the colour).
     origin: [f32; 4],
     fade: [f32; 4],
     color: [f32; 4],
@@ -247,6 +336,17 @@ pub(crate) const SHADER: &str = r#"
 struct Globals { viewport: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
+struct Paint {
+    head: vec4<f32>,
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    positions: array<vec4<f32>, 2>,
+    colors: array<vec4<f32>, 8>,
+};
+@group(0) @binding(1) var<storage, read> paints: array<Paint>;
+
 struct Varyings {
     @builtin(position) position: vec4<f32>,
     @location(0) coverage: f32,
@@ -255,7 +355,84 @@ struct Varyings {
     @location(3) fade: vec3<f32>,
     // The pixel before the matrix, where the clip and the fade are measured.
     @location(4) unturned: vec2<f32>,
+    // The mesh's own point, where a gradient is measured, and its paint.
+    @location(5) local: vec2<f32>,
+    @location(6) @interpolate(flat) paint: i32,
 };
+
+// Where a point lies along the gradient, before the spread.
+fn along(paint: Paint, local: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(dot(paint.m0.xy, local) + paint.m0.z, dot(paint.m1.xy, local) + paint.m1.z);
+    let kind = paint.head.x;
+    if (kind < 1.5) {
+        let d = paint.p0.zw - paint.p0.xy;
+        return vec2<f32>(dot(q - paint.p0.xy, d) / max(dot(d, d), 1e-12), 1.0);
+    }
+    if (kind < 2.5) {
+        // Two circles, the focal (f, fr) at 0 and (c, r) at 1: the largest
+        // t whose circle passes through the point with a radius >= 0.
+        let c = paint.p0.xy;
+        let r = paint.p0.z;
+        let f = vec2<f32>(paint.p0.w, paint.p1.x);
+        let fr = paint.p1.y;
+        let cd = c - f;
+        let pd = q - f;
+        let dr = r - fr;
+        let a = dot(cd, cd) - dr * dr;
+        let b = dot(pd, cd) + fr * dr;
+        let k = dot(pd, pd) - fr * fr;
+        if (abs(a) < 1e-6) {
+            let t = k / (2.0 * b);
+            return vec2<f32>(t, select(0.0, 1.0, abs(b) > 1e-9 && fr + t * dr >= 0.0));
+        }
+        let disc = b * b - a * k;
+        if (disc < 0.0) {
+            return vec2<f32>(0.0, 0.0);
+        }
+        let root = sqrt(disc);
+        let t1 = (b + root) / a;
+        let t2 = (b - root) / a;
+        let t = max(t1, t2);
+        if (fr + t * dr >= 0.0) {
+            return vec2<f32>(t, 1.0);
+        }
+        let s = min(t1, t2);
+        return vec2<f32>(s, select(0.0, 1.0, fr + s * dr >= 0.0));
+    }
+    let v = q - paint.p0.xy;
+    return vec2<f32>(fract(atan2(v.x, -v.y) / 6.2831853 - paint.p0.z / 360.0 + 1.0), 1.0);
+}
+
+fn paint_colour(paint: Paint, local: vec2<f32>) -> vec4<f32> {
+    let found = along(paint, local);
+    if (found.y < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    var t = found.x;
+    let spread = paint.head.y;
+    if (spread > 1.5) {
+        t = 1.0 - abs(fract(t * 0.5) * 2.0 - 1.0);
+    } else if (spread > 0.5) {
+        t = fract(t);
+    } else {
+        t = clamp(t, 0.0, 1.0);
+    }
+    let count = i32(paint.head.z);
+    var colour = paint.colors[0];
+    for (var i = 1; i < count; i = i + 1) {
+        let before = paint.positions[(i - 1) / 4][(i - 1) % 4];
+        let at = paint.positions[i / 4][i % 4];
+        if (t >= at) {
+            colour = paint.colors[i];
+        } else if (t > before) {
+            colour = mix(paint.colors[i - 1], paint.colors[i], (t - before) / max(at - before, 1e-6));
+            break;
+        } else {
+            break;
+        }
+    }
+    return colour;
+}
 
 @vertex
 fn vs(@location(0) position: vec2<f32>, @location(1) coverage: f32,
@@ -271,6 +448,8 @@ fn vs(@location(0) position: vec2<f32>, @location(1) coverage: f32,
     out.clip = clip;
     out.fade = vec3<f32>(origin.z, fade.x, fade.y);
     out.unturned = pixel;
+    out.local = position;
+    out.paint = i32(origin.w);
     return out;
 }
 
@@ -284,8 +463,12 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
     if (in.fade.z > 0.0) {
         cover *= clamp((in.fade.y - p.y) / in.fade.z, 0.0, 1.0);
     }
-    let a = in.color.a * cover;
-    return vec4<f32>(in.color.rgb * a, a);
+    var colour = in.color;
+    if (in.paint >= 0) {
+        colour = paint_colour(paints[in.paint], in.local);
+    }
+    let a = colour.a * cover;
+    return vec4<f32>(colour.rgb * a, a);
 }
 "#;
 
@@ -300,7 +483,10 @@ struct GpuMesh {
 pub(crate) struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
+    globals_layout: wgpu::BindGroupLayout,
     globals_group: wgpu::BindGroup,
+    paints: wgpu::Buffer,
+    paint_capacity: usize,
     last_viewport: [f32; 2],
     instances: wgpu::Buffer,
     capacity: usize,
@@ -319,12 +505,20 @@ impl Pipeline {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("path"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("path globals"),
@@ -332,11 +526,8 @@ impl Pipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("path globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
-        });
+        let paints = Self::paint_buffer(device, 4);
+        let globals_group = Self::group(device, &globals_layout, &globals, &paints);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path"),
             bind_group_layouts: &[Some(&globals_layout)],
@@ -382,7 +573,10 @@ impl Pipeline {
         Pipeline {
             pipeline,
             globals,
+            globals_layout,
             globals_group,
+            paints,
+            paint_capacity: 4,
             last_viewport: [0.0; 2],
             instances: Self::instance_buffer(device, 16),
             capacity: 16,
@@ -390,6 +584,26 @@ impl Pipeline {
             keys: Vec::new(),
             uploads: 0,
         }
+    }
+
+    fn paint_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("path paints"),
+            size: (capacity * std::mem::size_of::<Paint>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, globals: &wgpu::Buffer, paints: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path globals"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: paints.as_entire_binding() },
+            ],
+        })
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -417,6 +631,7 @@ impl Pipeline {
             self.instances = Self::instance_buffer(device, self.capacity);
         }
         let mut instances = Vec::with_capacity(paths.len());
+        let mut paints: Vec<Paint> = Vec::new();
         for p in paths {
             let mesh = self.meshes.entry(p.key).or_insert_with(|| {
                 // An empty mesh still gets buffers: drawing it draws nothing.
@@ -439,8 +654,15 @@ impl Pipeline {
             });
             mesh.used = self.uploads;
             self.keys.push(p.key);
+            let paint = match &p.gradient {
+                Some(g) if !g.stops.is_empty() => {
+                    paints.push(Paint::of(g));
+                    (paints.len() - 1) as f32
+                }
+                _ => -1.0,
+            };
             instances.push(Instance {
-                origin: [p.origin[0], p.origin[1], p.alpha, 0.0],
+                origin: [p.origin[0], p.origin[1], p.alpha, paint],
                 fade: [p.fade[0], p.fade[1], 0.0, 0.0],
                 color: p.color,
                 clip: p.clip,
@@ -448,6 +670,14 @@ impl Pipeline {
             });
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        if !paints.is_empty() {
+            if paints.len() > self.paint_capacity {
+                self.paint_capacity = paints.len().next_power_of_two();
+                self.paints = Self::paint_buffer(device, self.paint_capacity);
+                self.globals_group = Self::group(device, &self.globals_layout, &self.globals, &self.paints);
+            }
+            queue.write_buffer(&self.paints, 0, bytemuck::cast_slice(&paints));
+        }
         if self.meshes.len() > MESHES_KEPT {
             let now = self.uploads;
             self.meshes.retain(|_, m| now - m.used < UNUSED_UPLOADS);

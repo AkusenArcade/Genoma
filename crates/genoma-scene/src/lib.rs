@@ -332,6 +332,13 @@ pub struct Node {
     cap: &'static str,
     even_odd: bool,
     reach_of_path: [f32; 2],
+    /// A stroke's part drawn, 0…1 of each outline's length.
+    trim: [f32; 2],
+    dash_offset: f32,
+    miter_limit: f32,
+    fill_paint: Vec<f32>,
+    stroke_paint: Vec<f32>,
+    stroke_stops: Vec<(f32, [f32; 4])>,
     /// Drawn as one shape with the capsule of this id: union (0), subtract
     /// (1) or intersect (2), this soft.
     combine_with: Option<String>,
@@ -509,6 +516,12 @@ impl Node {
             cap: "butt",
             even_odd: false,
             reach_of_path: [0.0; 2],
+            trim: [0.0, 1.0],
+            dash_offset: 0.0,
+            miter_limit: 4.0,
+            fill_paint: Vec::new(),
+            stroke_paint: Vec::new(),
+            stroke_stops: Vec::new(),
             combine_with: None,
             combine: 0,
             combine_soft: 0.0,
@@ -562,6 +575,9 @@ fn unseen(prop: Prop, a: &Value, b: &Value, scale: f32) -> bool {
         Prop::Width, Prop::Height, Prop::Radius, Prop::OffsetX, Prop::OffsetY, Prop::ScrollY, Prop::ScrollX,
         Prop::FromX, Prop::FromY, Prop::ToX, Prop::ToY, Prop::BendX, Prop::BendY,
     ];
+    if prop == Prop::D {
+        return a == b;
+    }
     let near = if lengths.contains(&prop) { step() / scale.max(0.01) } else { 0.002 };
     let (a, b) = (components(a), components(b));
     a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| (x - y).abs() < near)
@@ -1762,6 +1778,10 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::OffsetY => Value::Number(n.offset[1]),
             Prop::Fill => Value::Color(n.fill),
             Prop::FillBottom => Value::Color(n.fill_bottom),
+            Prop::TrimStart => Value::Number(n.trim[0]),
+            Prop::TrimEnd => Value::Number(n.trim[1]),
+            Prop::DashOffset => Value::Number(n.dash_offset),
+            Prop::D => Value::Text(n.outline.clone()?),
             Prop::RimTop => Value::Color(n.rim_top),
             Prop::RimBottom => Value::Color(n.rim_bottom),
             Prop::Color => Value::Color(n.color),
@@ -2263,6 +2283,13 @@ impl Scene {
                 }
             }
             Prop::EvenOdd => n.even_odd = take!(flag),
+            Prop::TrimStart => n.trim[0] = take!(number).clamp(0.0, 1.0),
+            Prop::TrimEnd => n.trim[1] = take!(number).clamp(0.0, 1.0),
+            Prop::DashOffset => n.dash_offset = take!(number),
+            Prop::MiterLimit => n.miter_limit = take!(number).max(1.0),
+            Prop::FillPaint => n.fill_paint = take!(numbers),
+            Prop::StrokePaint => n.stroke_paint = take!(numbers),
+            Prop::StrokeStops => n.stroke_stops = take!(stops),
             Prop::CombineWith => n.combine_with = Some(take!(text)).filter(|id| !id.is_empty()),
             Prop::Combine => {
                 n.combine = match take!(text).as_str() {
@@ -2438,6 +2465,7 @@ impl Scene {
                     }
                     Value::Color(c)
                 }
+                (Value::Text(f), Value::Text(to)) if a.prop == Prop::D => Value::Text(vector::morph(f, to, y)),
                 _ => a.to.clone(),
             } };
             let _ = self.apply(a.node, a.prop, value);
@@ -5046,10 +5074,18 @@ fn collect_node(
                 join: n.join,
                 cap: n.cap,
                 dash: n.dash,
+                dash_offset: n.dash_offset,
+                miter_limit: n.miter_limit,
+                trim: n.trim,
             };
-            let parts = [(vector::Part::Fill, n.fill), (vector::Part::Stroke, n.color)];
-            for (part, color) in parts {
-                if color[3] <= 0.0 || matches!(part, vector::Part::Stroke) && n.stroke.is_none_or(|s| s <= 0.0) {
+            let size = [layout.size.width * scale, layout.size.height * scale];
+            let fill_gradient = vector::gradient(&n.fill_paint, &n.fill_stops, scale)
+                .or_else(|| vector::box_gradient(n.fill, n.fill_bottom, &n.fill_stops, n.fill_angle, n.fill_shape, n.fill_across, size));
+            let stroke_gradient = vector::gradient(&n.stroke_paint, &n.stroke_stops, scale);
+            let parts = [(vector::Part::Fill, n.fill, fill_gradient), (vector::Part::Stroke, n.color, stroke_gradient)];
+            for (part, color, gradient) in parts {
+                let visible = color[3] > 0.0 || gradient.as_ref().is_some_and(|g| g.stops.iter().any(|(_, c)| c[3] > 0.0));
+                if !visible || matches!(part, vector::Part::Stroke) && n.stroke.is_none_or(|s| s <= 0.0) {
                     continue;
                 }
                 if let Some((key, mesh, faint)) = out.icons.meshes.get(&shape, part, scale) {
@@ -5058,6 +5094,7 @@ fn collect_node(
                         mesh,
                         origin: corner,
                         color,
+                        gradient,
                         alpha: alpha * faint,
                         clip,
                         fade: out.fade_of(),

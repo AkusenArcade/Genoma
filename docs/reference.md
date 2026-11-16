@@ -209,11 +209,18 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `focused` | boolean |  | While true, a field takes the keys and shows its caret: typing, the editing keys, Ctrl+A/C/X/V/Z/Y. Return reaches on_submit; Escape, Tab, Up and Down go on to on_key. |
 | `secret` | boolean |  | A field drawn as a dot a character, and never copied out: a password. |
 | `overlay` | boolean |  | Out of the parent's flow: laid over its siblings at the parent's alignment. |
-| `d` | string |  | A path's outline as SVG path data (M, L, C, Q, A, Z…), in logical units from the node's top-left corner. |
+| `d` | string | yes | A path's outline as SVG path data (M, L, C, Q, A, Z…), in logical units from the node's top-left corner. Animated with a timing, it morphs: outlines with the same commands move point by point; others are first divided until they match, an approximation. |
 | `points` | { number } |  | A path's polygon, closed: x and y of each corner in turn, logical units from the node's top-left corner. Used when `d` is not given. |
 | `join` | "miter" \| "round" \| "bevel" |  | How a path's outline turns its corners. |
 | `cap` | "butt" \| "round" \| "square" |  | How a path's open ends and dashes end. |
 | `even_odd` | boolean |  | A path filled by the even-odd rule: where it crosses itself, a hole. |
+| `trim_start` | number | yes | A path's stroke drawn only from this far along each outline, 0 to 1 of its length: with `trim_end`, a line drawn on as it animates. |
+| `trim_end` | number | yes | A path's stroke drawn only up to this far along each outline, 0 to 1 (1, the default, is the whole). |
+| `dash_offset` | number | yes | How far along the pattern a path's dashes start, logical units: animated, the dashes march. |
+| `miter_limit` | number |  | How long a mitred corner of a path's stroke may grow, in stroke widths, before it is bevelled (4 by default, as SVG). |
+| `fill_paint` | { number } |  | A path's fill as an exact gradient, what `g.svg` sets: `{ kind, spread, a, b, c, d, e, f, p1 … p6 }` — kind 1 linear (x1, y1, x2, y2), 2 radial (cx, cy, r, fx, fy, fr), 3 conic (cx, cy, degrees); spread 0 pad, 1 repeat, 2 reflect; the matrix takes the node's logical units to the gradient's. Its stops are `fill_stops`. Without it, a path takes the capsule's `fill_bottom`, `fill_stops`, `fill_angle`, `fill_shape` and `fill_across` over its box. |
+| `stroke_paint` | { number } |  | A path's stroke as an exact gradient, as `fill_paint`; its stops are `stroke_stops`. |
+| `stroke_stops` | { { position, colour } } |  | The stops of `stroke_paint`, `{ position, colour }`, up to eight. |
 | `combine_with` | string |  | A capsule drawn as one shape with the capsule of this id, as `combine` says: metaballs, a bite out of a shape, a lens. Several ids, separated by spaces, join up to five shapes, each met the same way; a text or a path named is met by its outline. Name them earlier in the tree, or the shape follows them a frame late. |
 | `combine` | "union" \| "subtract" \| "intersect" |  | How a capsule with `combine_with` meets the other: joined to it (both drawn, in this one's fill), with the other cut out, or only where both are. The other lends only its outline; give it no fill of its own unless it should be drawn too. |
 | `blur_radius` | number | yes | The node and everything in it drawn blurred, after depth has turned it: the Gaussian's spread, logical units, as CSS's blur(). 0 (the default) costs nothing; a radius at rest is blurred once and kept, a moving one each frame. |

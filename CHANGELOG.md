@@ -18,6 +18,19 @@ changes what a shell sees.
   much fainter. A path's corner sits on a whole pixel as an image's
   does. Measured against the rasterised paths: the same coverage within
   half a percent on fills.
+- `d` is animatable: with a transition, a path morphs from one outline
+  to the next — point by point when their commands match, otherwise
+  divided until they do (an approximation).
+
+### Added
+
+- Paths: gradients (`fill_bottom`, `fill_stops`, `fill_angle`,
+  `fill_shape`, `fill_across` over the path's box, as on a capsule; or
+  exact ones, `fill_paint` / `stroke_paint` with `fill_stops` /
+  `stroke_stops`: linear, radial with a focal circle, conic, with pad,
+  repeat or reflect, through a matrix from the node's units),
+  `trim_start` / `trim_end` (a line drawn on), `dash_offset` (marching
+  dashes) and `miter_limit`.
 
 ### Added
 
