@@ -4088,6 +4088,25 @@ fn masked(mut own: DrawList, mut mask: DrawList, out: &mut Out) {
     });
 }
 
+/// `inside`, a clipping node's children, kept within its rounded rectangle
+/// `c` (physical pixels, x0, y0, x1, y1) of corners `radius`: as they are
+/// when they paint nowhere near a corner, else shown through the shape as
+/// a mask, which is kept while the shape stays.
+fn rounded_clip(inside: DrawList, c: [f32; 4], radius: f32, out: &mut Out) {
+    let Some([x0, y0, x1, y1]) = inside.paint_bounds() else { return };
+    let r = radius.min((c[2] - c[0]).min(c[3] - c[1]) / 2.0);
+    // The square each corner is rounded in.
+    let (left, right, top, bottom) = (x0 < c[0] + r, x1 > c[2] - r, y0 < c[1] + r, y1 > c[3] - r);
+    let reaches = (left || right) && (top || bottom);
+    if !reaches {
+        out.list.append(inside);
+        return;
+    }
+    let mut shape = DrawList::default();
+    shape.push_rect(flat([c[0], c[1]], [c[2] - c[0], c[3] - c[1]], r, [1.0; 4], out));
+    masked(inside, shape, out);
+}
+
 /// `own`, a subtree's list, as a blurred group: its paint's bounds grown by
 /// three spreads (where the Gaussian has faded out), within the surface,
 /// and keyed by what it draws and how blurred, so one at rest is kept.
@@ -5246,6 +5265,13 @@ fn collect_node(
     if let Some(c) = morph_clip {
         out.clip = [out.clip[0].max(c[0]), out.clip[1].max(c[1]), out.clip[2].min(c[2]), out.clip[3].min(c[3])];
     }
+    // A clip on a rounded shape follows its corners: the children are
+    // gathered apart and shown through the shape (see `rounded_clip`). Not
+    // under depth, where the rectangle is measured before the matrix.
+    let round = (clip && own_radius > 0.0 && out.transform == Rect::IDENTITY).then(|| {
+        let c = [own[0] * scale, own[1] * scale, (own[0] + own[2]) * scale, (own[1] + own[3]) * scale];
+        (c, own_radius * scale, std::mem::take(out.list))
+    });
     let scrolled = (scroll * scale).round() / scale;
     let scrolled_x = (scroll_x * scale).round() / scale;
     for child in tree.children(node).unwrap_or_default() {
@@ -5262,6 +5288,10 @@ fn collect_node(
     }
     out.clip = saved;
     out.fade = saved_fade;
+    if let Some((c, radius, under)) = round {
+        let inside = std::mem::replace(out.list, under);
+        rounded_clip(inside, c, radius, out);
+    }
     out.parent_shape = saved_parent;
     out.transform = saved_transform;
 }
@@ -5799,6 +5829,41 @@ mod tests {
         scene.set(hole, Prop::Mask, Value::Bool(false), None).unwrap();
         let plain = scene.draw_list(1.0);
         assert!(plain.groups.is_empty() && plain.rects.len() == 2);
+    }
+
+    #[test]
+    fn a_clip_on_a_rounded_shape_follows_its_corners() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let card = scene.create(Kind::Capsule, Role::None);
+        let inside = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, card);
+        scene.append(card, inside);
+        for (node, w, h) in [(card, 40.0, 20.0), (inside, 40.0, 20.0)] {
+            scene.set(node, Prop::Width, Value::Number(w), None).unwrap();
+            scene.set(node, Prop::Height, Value::Number(h), None).unwrap();
+            scene.set(node, Prop::Radius, Value::Number(0.0), None).unwrap();
+            scene.set(node, Prop::Fill, Value::Color([1.0, 0.0, 0.0, 1.0]), None).unwrap();
+        }
+        scene.set(card, Prop::Clip, Value::Bool(true), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        assert!(scene.draw_list(1.0).groups.is_empty(), "square corners: the clip is the rectangle");
+        // Rounded, a child reaching the corners is shown through the shape.
+        scene.set(card, Prop::Radius, Value::Number(6.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let list = scene.draw_list(1.0);
+        assert_eq!(list.rects.len(), 1, "the card drawn as it is, its child in a group");
+        assert_eq!(list.groups.len(), 2);
+        assert_eq!(list.groups[1].list.rects[0].radius, 6.0, "the mask is the card's shape");
+        assert_eq!(list.images[0].mask, Some(list.groups[1].key));
+        // Kept off the corners, it is drawn as it is.
+        scene.set(card, Prop::Padding, Value::Number(8.0), None).unwrap();
+        scene.set(inside, Prop::Width, Value::Number(24.0), None).unwrap();
+        scene.set(inside, Prop::Height, Value::Number(4.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let clear = scene.draw_list(1.0);
+        assert!(clear.groups.is_empty() && clear.rects.len() == 2);
     }
 
     #[test]

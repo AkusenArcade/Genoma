@@ -134,7 +134,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `attach` | "center" \| "below" \| "above" \| "below-center" \| "above-center" \| "left" \| "right" \| "corner" |  | Where an overlay sits: centred in its parent; under or over it, left-aligned or centred; beside it, centred; or at its top-left corner, offsets then measured from there. |
 | `growth` | number | yes | 0 to 1: the shape grows from the middle of its parent's edge that faces it (where it is attached) to its own rectangle, its near edge held; content is not scaled. |
 | `reach` | number | yes | 0 to 1: how far down a thread is drawn. |
-| `clip` | boolean |  | Children are drawn only inside this node's rectangle: a well that scrolls. Never on a cell, whose rim it would eat. |
+| `clip` | boolean |  | Children are drawn only inside this node's shape: a well that scrolls. On a capsule (or a box with a `radius`) the clip follows the round corners; what reaches into them is drawn through the shape as a mask, kept while the shape stays. Never on a cell, whose rim it would eat. |
 | `fade_bottom` | number |  | With `clip`: what is inside fades out over this many units above the foot, so a page longer than its well runs to the edge and goes, rather than stopping at a cut. |
 | `scroll_y` | number | yes | How far the children are scrolled up, logical units. |
 | `scroll_x` | number | yes | How far the children are scrolled left, logical units. |

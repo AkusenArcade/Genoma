@@ -17,6 +17,14 @@ changes what a shell sees.
 - `g.svg`'s `width` and `height` may be bindings: the document is fitted
   again as they change.
 
+### Changed
+
+- `clip` follows a rounded node's corners: children of a clipping capsule,
+  or of a box with a `radius`, no longer show past its round corners.
+  What reaches into a corner is drawn through the node's shape as a mask
+  (kept while the shape stays); what stays clear of the corners is drawn
+  as before, at no cost. Under depth the clip is still the rectangle.
+
 ## 0.1.16 — 2026-11-16
 
 ### Changed
