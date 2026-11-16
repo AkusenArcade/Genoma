@@ -5,13 +5,21 @@
 //! Settings: `org.freedesktop.appearance` — the colour scheme, the accent
 //! colour, high contrast and reduced motion — read once and followed on
 //! `SettingChanged`. Nothing polls.
+//!
+//! File chooser: the desktop's own dialog to open or save files, the one
+//! the applications show. Each choice is a request whose `Response` is
+//! subscribed to before it is made (its path follows from the
+//! `handle_token`), and the answer is handed to whoever asked.
 
-use std::collections::HashMap;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+};
 
 use calloop::channel::Sender;
 use futures_util::StreamExt;
 use genoma_core::reactive::{Signal, batch};
-use zbus::zvariant::OwnedVariant;
+use zbus::{OwnedObjectPath, Variant as Value, zvariant::OwnedVariant};
 
 use crate::bus::{self, Bus};
 
@@ -19,6 +27,8 @@ const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const SETTINGS: &str = "org.freedesktop.portal.Settings";
 const APPEARANCE: &str = "org.freedesktop.appearance";
+const CHOOSER: &str = "org.freedesktop.portal.FileChooser";
+const REQUEST: &str = "org.freedesktop.portal.Request";
 
 /// What the desktop prefers, as the portal says it.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,21 +47,168 @@ impl Default for Appearance {
     }
 }
 
+/// A group of files the dialog can be narrowed to: "Images", with glob
+/// patterns ("*.png") and MIME types ("image/png").
+#[derive(Clone, Debug, Default)]
+pub struct Filter {
+    pub name: String,
+    pub patterns: Vec<String>,
+    pub mime: Vec<String>,
+}
+
+/// What a file chooser is asked for.
+#[derive(Clone, Debug, Default)]
+pub struct Ask {
+    /// Save rather than open.
+    pub save: bool,
+    pub title: String,
+    /// The label of the button that accepts, else the dialog's own.
+    pub accept: Option<String>,
+    /// Open: more than one file.
+    pub multiple: bool,
+    /// Open: folders rather than files.
+    pub folders: bool,
+    pub filters: Vec<Filter>,
+    /// The folder it starts in.
+    pub folder: Option<String>,
+    /// Save: the name it proposes.
+    pub name: Option<String>,
+}
+
+/// The paths chosen, none when the dialog was dismissed, or why it failed.
+pub type Chosen = Result<Option<Vec<String>>, String>;
+
+type Waiting = Box<dyn FnOnce(Chosen)>;
+
 pub enum Update {
     Available(bool),
     Setting(String, OwnedVariant),
+    Chosen(u64, Chosen),
 }
 
 pub struct Portal {
     /// Whether a portal answers on the session bus.
     pub available: Signal<bool>,
     pub appearance: Signal<Appearance>,
+    bus: RefCell<Option<(Bus, Sender<Update>)>>,
+    /// Choices asked for and not answered yet, by request number.
+    waiting: RefCell<HashMap<u64, Waiting>>,
+    /// Asked for before the service started (during the load that
+    /// required it), made once it does.
+    queued: RefCell<Vec<(u64, Ask)>>,
+    next: Cell<u64>,
 }
 
 impl Default for Portal {
     fn default() -> Self {
-        Portal { available: Signal::new(false), appearance: Signal::new(Appearance::default()) }
+        Portal {
+            available: Signal::new(false),
+            appearance: Signal::new(Appearance::default()),
+            bus: RefCell::new(None),
+            waiting: RefCell::default(),
+            queued: RefCell::default(),
+            next: Cell::new(1),
+        }
     }
+}
+
+/// A `file://` URI as a path; any other URI is left as it is.
+fn path_of(uri: &str) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else { return uri.to_owned() };
+    // file://host/path: the host, usually empty or localhost, goes.
+    let rest = if rest.starts_with('/') { rest } else { rest.find('/').map_or(rest, |at| &rest[at..]) };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut k = 0;
+    while k < bytes.len() {
+        let hex = bytes.get(k + 1..k + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[k], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                k += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                k += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The request's options, as `OpenFile` and `SaveFile` take them.
+fn options(ask: &Ask, token: &str) -> HashMap<&'static str, Value<'static>> {
+    let mut o: HashMap<&'static str, Value<'static>> = HashMap::new();
+    o.insert("handle_token", Value::from(token.to_owned()));
+    o.insert("modal", Value::from(false));
+    if let Some(label) = &ask.accept {
+        o.insert("accept_label", Value::from(label.clone()));
+    }
+    if !ask.save {
+        o.insert("multiple", Value::from(ask.multiple));
+        o.insert("directory", Value::from(ask.folders));
+    }
+    if !ask.filters.is_empty() {
+        // a(sa(us)): 0 a glob pattern, 1 a MIME type.
+        let filters: Vec<(String, Vec<(u32, String)>)> = ask
+            .filters
+            .iter()
+            .map(|f| (f.name.clone(), f.patterns.iter().map(|p| (0, p.clone())).chain(f.mime.iter().map(|m| (1, m.clone()))).collect()))
+            .collect();
+        o.insert("filters", Value::from(filters));
+    }
+    if let Some(folder) = &ask.folder {
+        // A NUL-terminated byte string.
+        let mut bytes = folder.as_bytes().to_vec();
+        bytes.push(0);
+        o.insert("current_folder", Value::from(bytes));
+    }
+    if let (true, Some(name)) = (ask.save, &ask.name) {
+        o.insert("current_name", Value::from(name.clone()));
+    }
+    o
+}
+
+fn ask_portal(bus: &Bus, post: Sender<Update>, id: u64, ask: Ask) {
+    // Unique among this connection's requests.
+    let token = format!("genoma{id}");
+    bus.spawn("portal file chooser", async move {
+        let chosen = choose(ask, token).await.unwrap_or_else(|e| Err(e.to_string()));
+        let _ = post.send(Update::Chosen(id, chosen));
+        Ok(())
+    });
+}
+
+/// Asks the portal and waits for the answer.
+async fn choose(ask: Ask, token: String) -> zbus::Result<Chosen> {
+    let conn = bus::session().await?;
+    let sender = conn.unique_name().map(|n| n.trim_start_matches(':').replace('.', "_")).unwrap_or_default();
+    let expected = format!("{PATH}/request/{sender}/{token}");
+    // Subscribed before the call, so a quick answer is not missed.
+    let request = zbus::Proxy::new(&conn, PORTAL, expected.clone(), REQUEST).await?;
+    let mut responses = request.receive_signal("Response").await?;
+    let chooser = zbus::Proxy::new(&conn, PORTAL, PATH, CHOOSER).await?;
+    let method = if ask.save { "SaveFile" } else { "OpenFile" };
+    let handle: OwnedObjectPath = match chooser.call(method, &("", ask.title.as_str(), options(&ask, &token))).await {
+        Ok(handle) => handle,
+        Err(e) => return Ok(Err(e.to_string())),
+    };
+    // A portal older than handle_token answers on a path of its own.
+    let message = if handle.as_str() == expected {
+        responses.next().await
+    } else {
+        zbus::Proxy::new(&conn, PORTAL, handle, REQUEST).await?.receive_signal("Response").await?.next().await
+    };
+    let Some(message) = message else { return Ok(Err("the portal went away".into())) };
+    let (code, results): (u32, HashMap<String, OwnedVariant>) = message.body().deserialize()?;
+    Ok(match code {
+        0 => Ok(Some(
+            results.get("uris").and_then(|v| Vec::<String>::try_from(v.clone()).ok()).unwrap_or_default().iter().map(|u| path_of(u)).collect(),
+        )),
+        // 1 cancelled, 2 ended some other way (its window closed): both
+        // are no choice, not a failure.
+        _ => Ok(None),
+    })
 }
 
 /// One `org.freedesktop.appearance` key into the model; others are left.
@@ -90,10 +247,33 @@ impl Portal {
                     self.appearance.set(new);
                 }
             }
+            Update::Chosen(id, chosen) => {
+                let waiting = self.waiting.borrow_mut().remove(&id);
+                if let Some(done) = waiting {
+                    done(chosen);
+                }
+            }
         });
     }
 
+    /// Opens the desktop's file chooser; `done` gets the answer, on the
+    /// main loop, once the dialog closes.
+    pub fn choose(&self, ask: Ask, done: impl FnOnce(Chosen) + 'static) {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        self.waiting.borrow_mut().insert(id, Box::new(done));
+        let started = self.bus.borrow().clone();
+        match started {
+            Some((bus, post)) => ask_portal(&bus, post, id, ask),
+            None => self.queued.borrow_mut().push((id, ask)),
+        }
+    }
+
     pub fn start(&self, bus: &Bus, post: Sender<Update>) {
+        *self.bus.borrow_mut() = Some((bus.clone(), post.clone()));
+        for (id, ask) in self.queued.take() {
+            ask_portal(bus, post.clone(), id, ask);
+        }
         let pause = bus.clone();
         bus.spawn("portal settings", async move {
             let conn = bus::session().await?;
@@ -139,5 +319,34 @@ mod tests {
         set(&mut a, "accent-color", &v((-1.0f64, 0.0f64, 0.0f64).into()));
         set(&mut a, "color-scheme", &v(0u32.into()));
         assert_eq!((a.accent, a.color_scheme), (None, "default"), "outside 0…1 is no accent");
+    }
+
+    #[test]
+    fn uris_as_paths() {
+        assert_eq!(path_of("file:///home/a/My%20Pictures/citt%C3%A0.png"), "/home/a/My Pictures/città.png");
+        assert_eq!(path_of("file://localhost/tmp/x"), "/tmp/x");
+        assert_eq!(path_of("file:///tmp/50%"), "/tmp/50%", "a stray % stays");
+        assert_eq!(path_of("sftp://host/x"), "sftp://host/x");
+    }
+
+    #[test]
+    fn request_options() {
+        let ask = Ask {
+            title: "Pick".into(),
+            multiple: true,
+            filters: vec![Filter { name: "Images".into(), patterns: vec!["*.png".into()], mime: vec!["image/jpeg".into()] }],
+            folder: Some("/tmp".into()),
+            name: Some("ignored on open".into()),
+            ..Ask::default()
+        };
+        let o = options(&ask, "t1");
+        assert_eq!(o["handle_token"], Value::from("t1"));
+        assert_eq!(o["multiple"], Value::from(true));
+        assert_eq!(o["filters"].value_signature().to_string(), "a(sa(us))");
+        assert_eq!(o["current_folder"], Value::from(b"/tmp\0".to_vec()));
+        assert!(!o.contains_key("current_name"));
+        let save = options(&Ask { save: true, name: Some("a.txt".into()), ..Ask::default() }, "t2");
+        assert_eq!(save["current_name"], Value::from("a.txt"));
+        assert!(!save.contains_key("multiple"));
     }
 }

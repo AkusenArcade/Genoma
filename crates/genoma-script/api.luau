@@ -903,6 +903,29 @@ export type Portal = {
     read accent: string?,
     read high_contrast: boolean,
     read reduced_motion: boolean,
+    -- The desktop's own file chooser, the dialog applications show. The
+    -- callback runs once it closes: paths nil when it was dismissed, error
+    -- set when it could not be shown.
+    open_file: (self: Portal, options: ChooserOptions?, on_chosen: (paths: { string }?, error: string?) -> ()) -> (),
+    -- `name` is the name it proposes; `multiple` and `folders` do not apply.
+    save_file: (self: Portal, options: ChooserOptions?, on_chosen: (path: string?, error: string?) -> ()) -> (),
+}
+
+export type ChooserOptions = {
+    -- Defaults to "Open File", "Open Folder" or "Save File".
+    title: string?,
+    -- The label of the button that accepts.
+    accept: string?,
+    -- More than one file.
+    multiple: boolean?,
+    -- Folders rather than files.
+    folders: boolean?,
+    -- The groups it can be narrowed to, the first chosen at the start.
+    filters: { { name: string, patterns: { string }?, mime: { string }? } }?,
+    -- The folder it starts in; "~/" and "$NAME" are expanded.
+    folder: string?,
+    -- Save: the name it proposes.
+    name: string?,
 }
 
 export type User = {

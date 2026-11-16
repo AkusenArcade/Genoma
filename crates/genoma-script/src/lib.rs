@@ -1341,6 +1341,79 @@ impl UserData for PortalRef {
         fields.add_field_method_get("high_contrast", |_, this| Ok(this.0.appearance.get().high_contrast));
         fields.add_field_method_get("reduced_motion", |_, this| Ok(this.0.appearance.get().reduced_motion));
     }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // portal:open_file({ title, accept, multiple, folders, filters,
+        // folder }, function(paths, error) end): the desktop's own dialog;
+        // paths is nil when it was dismissed.
+        methods.add_method("open_file", |_, this, (t, f): (Option<Table>, Function)| {
+            let ask = portal_ask(t, false)?;
+            this.0.choose(ask, move |chosen| portal_answer(&f, chosen.map(|paths| paths.map(LuaChosen::Many))));
+            Ok(())
+        });
+        // portal:save_file({ title, accept, name, folder, filters },
+        // function(path, error) end).
+        methods.add_method("save_file", |_, this, (t, f): (Option<Table>, Function)| {
+            let ask = portal_ask(t, true)?;
+            this.0.choose(ask, move |chosen| portal_answer(&f, chosen.map(|paths| paths.and_then(|p| p.into_iter().next()).map(LuaChosen::One))));
+            Ok(())
+        });
+    }
+}
+
+enum LuaChosen {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// A file chooser's options from Luau; `folder` takes `~/` and `$NAME`.
+fn portal_ask(t: Option<Table>, save: bool) -> mlua::Result<genoma_services::portal::Ask> {
+    use genoma_services::portal::{Ask, Filter};
+    let Some(t) = t else { return Ok(Ask { save, title: if save { "Save File" } else { "Open File" }.into(), ..Ask::default() }) };
+    let mut filters = Vec::new();
+    if let Some(list) = t.get::<Option<Table>>("filters")? {
+        for f in list.sequence_values::<Table>() {
+            let f = f?;
+            filters.push(Filter {
+                name: f.get::<Option<String>>("name")?.unwrap_or_default(),
+                patterns: f.get::<Option<Vec<String>>>("patterns")?.unwrap_or_default(),
+                mime: f.get::<Option<Vec<String>>>("mime")?.unwrap_or_default(),
+            });
+        }
+    }
+    let folders: bool = t.get::<Option<bool>>("folders")?.unwrap_or(false);
+    let default_title = match (save, folders) {
+        (true, _) => "Save File",
+        (false, true) => "Open Folder",
+        (false, false) => "Open File",
+    };
+    Ok(Ask {
+        save,
+        title: t.get::<Option<String>>("title")?.unwrap_or_else(|| default_title.into()),
+        accept: t.get("accept")?,
+        multiple: t.get::<Option<bool>>("multiple")?.unwrap_or(false),
+        folders,
+        filters,
+        folder: t.get::<Option<String>>("folder")?.map(|p| io::expand(&p).to_string_lossy().into_owned()),
+        name: t.get("name")?,
+    })
+}
+
+/// Hands a chooser's answer to its Luau callback, unless the load that
+/// asked has been replaced since.
+fn portal_answer(f: &Function, chosen: Result<Option<LuaChosen>, String>) {
+    let Some(lua) = f.weak_lua().try_upgrade() else { return };
+    let result = (|| -> mlua::Result<()> {
+        let value = match &chosen {
+            Ok(Some(LuaChosen::One(p))) => LuaValue::String(lua.create_string(p)?),
+            Ok(Some(LuaChosen::Many(ps))) => LuaValue::Table(lua.create_sequence_from(ps.iter().map(String::as_str))?),
+            _ => LuaValue::Nil,
+        };
+        f.call::<()>((value, chosen.as_ref().err().cloned()))
+    })();
+    if let Err(e) = result {
+        log::error!("portal file chooser callback: {e}");
+    }
 }
 
 struct AccountsRef(Rc<Accounts>);

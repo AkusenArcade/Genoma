@@ -18,7 +18,13 @@ changes what a shell sees.
   AccountsService `me` comes from `/etc/passwd`.
 - `@genoma/portal`: xdg-desktop-portal's appearance settings,
   `color_scheme` ("dark", "light", "default"), `accent` ("#rrggbb" or
-  nil), `high_contrast`, `reduced_motion`, followed on `SettingChanged`.
+  nil), `high_contrast`, `reduced_motion`, followed on `SettingChanged`;
+  and the desktop's own file chooser, `:open_file(options, on_chosen)`
+  and `:save_file(options, on_chosen)` (title, accept label, multiple,
+  folders, filters by pattern or MIME type, starting folder, proposed
+  name): the callback gets the paths, or nil when the dialog was
+  dismissed. A choice asked for while the interface loads waits for the
+  service to start.
 
 ## 0.1.15 — 2026-11-13
 

@@ -2046,6 +2046,22 @@ read high_contrast: boolean
 read reduced_motion: boolean
 ```
 
+### `portal:open_file`
+
+```luau
+open_file: (self: Portal, options: ChooserOptions?, on_chosen: (paths: { string }?, error: string?) -> ()) -> ()
+```
+
+The desktop's own file chooser, the dialog applications show. The callback runs once it closes: paths nil when it was dismissed, error set when it could not be shown.
+
+### `portal:save_file`
+
+```luau
+save_file: (self: Portal, options: ChooserOptions?, on_chosen: (path: string?, error: string?) -> ()) -> ()
+```
+
+`name` is the name it proposes; `multiple` and `folders` do not apply.
+
 ## Types
 
 ### Signal<T>
@@ -2383,6 +2399,18 @@ An inhibitor this interface holds.
 | `size` | `number` | Bytes. |
 | `mounts` | `{ string }` |  |
 | `free` | `number?` | Bytes left, while mounted. |
+
+### ChooserOptions
+
+| Field | Type | |
+|---|---|---|
+| `title` | `string?` | Defaults to "Open File", "Open Folder" or "Save File". |
+| `accept` | `string?` | The label of the button that accepts. |
+| `multiple` | `boolean?` | More than one file. |
+| `folders` | `boolean?` | Folders rather than files. |
+| `filters` | `{ { name: string, patterns: { string }?, mime: { string }? } }?` | The groups it can be narrowed to, the first chosen at the start. |
+| `folder` | `string?` | The folder it starts in; "~/" and "$NAME" are expanded. |
+| `name` | `string?` | Save: the name it proposes. |
 
 ### User
 
