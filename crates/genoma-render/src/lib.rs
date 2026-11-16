@@ -795,6 +795,64 @@ impl DrawList {
         self.over = other.over;
     }
 
+    /// Where what was pushed after `mark` leaves paint, as `paint_bounds`
+    /// gives it for the whole list.
+    pub fn paint_bounds_since(&self, mark: Layer) -> Option<[f32; 4]> {
+        let from = [mark.rects, mark.paths, mark.images, mark.shaders, mark.emitters, mark.texts];
+        self.paint.iter().zip(from).flat_map(|(p, n)| p.get(n..).unwrap_or_default()).fold(None, |acc: Option<[f32; 4]>, b| {
+            if b[2] <= b[0] || b[3] <= b[1] {
+                return acc;
+            }
+            Some(match acc {
+                Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+                None => *b,
+            })
+        })
+    }
+
+    /// What was pushed after `mark`, taken out as a list of its own in the
+    /// same order; this one is left as it was at the mark, its layer
+    /// ended. The groups stay here: they are drawn before everything.
+    pub fn split_off(&mut self, mark: Layer) -> DrawList {
+        let mut tail = DrawList::default();
+        for b in self.breaks.iter().filter(|b| b.total() > mark.total()) {
+            tail.breaks.push(Layer {
+                rects: b.rects - mark.rects,
+                paths: b.paths - mark.paths,
+                images: b.images - mark.images,
+                shaders: b.shaders - mark.shaders,
+                emitters: b.emitters - mark.emitters,
+                texts: b.texts - mark.texts,
+            });
+        }
+        self.breaks.retain(|b| b.total() <= mark.total());
+        let mut rects = self.rects.split_off(mark.rects);
+        // A shape that names a field by its place names it by its place there.
+        for r in &mut rects {
+            for i in 0..4 {
+                let entry = &mut r.shapes[i * 2 + 1];
+                if entry[1] > 1.5
+                    && let Some(field) = self.fields.get(entry[2] as usize)
+                {
+                    entry[2] = tail.push_field(field.clone()) as f32;
+                }
+            }
+        }
+        tail.rects = rects;
+        tail.paths = self.paths.split_off(mark.paths);
+        tail.images = self.images.split_off(mark.images);
+        tail.shaders = self.shaders.split_off(mark.shaders);
+        tail.emitters = self.emitters.split_off(mark.emitters);
+        tail.texts = self.texts.split_off(mark.texts);
+        let from = [mark.rects, mark.paths, mark.images, mark.shaders, mark.emitters, mark.texts];
+        for ((mine, theirs), n) in self.paint.iter_mut().zip(&mut tail.paint).zip(from) {
+            *theirs = mine.split_off(n.min(mine.len()));
+        }
+        self.over.clear();
+        self.split();
+        tail
+    }
+
     /// Each layer's start and end, in drawing order.
     pub fn layers(&self) -> impl Iterator<Item = (Layer, Layer)> + '_ {
         let ends = self.breaks.iter().copied().chain(std::iter::once(self.mark()));

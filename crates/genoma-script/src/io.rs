@@ -106,12 +106,31 @@ pub(crate) struct Stop {
     pub(crate) owner: Option<usize>,
 }
 
+thread_local! {
+    /// The load under way or last finished: who owns what is made where
+    /// nothing else does.
+    static LOAD_OWNER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Names the load's owner (see [`Stop::new`]).
+pub(crate) fn set_load_owner(owner: Option<usize>) {
+    LOAD_OWNER.with(|l| l.set(owner));
+}
+
 impl Stop {
     pub(crate) fn new(host: &HostRef) -> Rc<Stop> {
-        let stop = Rc::new(Stop { host: host.clone(), tokens: RefCell::default(), also: RefCell::default(), owner: current_owner() });
+        // Made where nothing owns it (a g.watch's handler, a click, an IPC
+        // verb), it is the load's: a file watched or a timer started there
+        // was never stopped, and every reload left its sources open.
+        let owner = current_owner().or_else(|| LOAD_OWNER.with(|l| l.get()));
+        let stop = Rc::new(Stop { host: host.clone(), tokens: RefCell::default(), also: RefCell::default(), owner });
         // Owned by the load: the next one stops it.
         let s = stop.clone();
-        on_cleanup(move || s.stop());
+        if current_owner().is_some() {
+            on_cleanup(move || s.stop());
+        } else {
+            genoma_core::reactive::owned_by(owner, || on_cleanup(move || s.stop()));
+        }
         stop
     }
 

@@ -25,6 +25,16 @@ changes what a shell sees.
   (kept while the shape stays); what stays clear of the corners is drawn
   as before, at no cost. Under depth the clip is still the rectangle.
 
+### Fixed
+
+- What is started where nothing owns it (a `g.watch` handler, a click, an
+  IPC verb) belongs to the load and stops with it: a `g.file`, a timer or
+  a process started there was never stopped, and every reload left its
+  sources open (an inotify instance for each file, growing with each
+  reload).
+- A child that reads what is under it (a backdrop, an overlay blend)
+  still finds it inside a node whose clip follows round corners.
+
 ## 0.1.16 — 2026-11-16
 
 ### Changed

@@ -4088,20 +4088,21 @@ fn masked(mut own: DrawList, mut mask: DrawList, out: &mut Out) {
     });
 }
 
-/// `inside`, a clipping node's children, kept within its rounded rectangle
-/// `c` (physical pixels, x0, y0, x1, y1) of corners `radius`: as they are
-/// when they paint nowhere near a corner, else shown through the shape as
-/// a mask, which is kept while the shape stays.
-fn rounded_clip(inside: DrawList, c: [f32; 4], radius: f32, out: &mut Out) {
-    let Some([x0, y0, x1, y1]) = inside.paint_bounds() else { return };
+/// What a clipping node's children drew (everything after `mark`), kept
+/// within its rounded rectangle `c` (physical pixels, x0, y0, x1, y1) of
+/// corners `radius`: left as it is when it paints nowhere near a corner,
+/// at no cost; else taken out and shown through the shape as a mask, which
+/// is kept while the shape stays. The children are gathered in the list
+/// itself, so one that reads what is under it still finds it.
+fn rounded_clip(mark: genoma_render::Layer, c: [f32; 4], radius: f32, out: &mut Out) {
+    let Some([x0, y0, x1, y1]) = out.list.paint_bounds_since(mark) else { return };
     let r = radius.min((c[2] - c[0]).min(c[3] - c[1]) / 2.0);
     // The square each corner is rounded in.
     let (left, right, top, bottom) = (x0 < c[0] + r, x1 > c[2] - r, y0 < c[1] + r, y1 > c[3] - r);
-    let reaches = (left || right) && (top || bottom);
-    if !reaches {
-        out.list.append(inside);
+    if !((left || right) && (top || bottom)) {
         return;
     }
+    let inside = out.list.split_off(mark);
     let mut shape = DrawList::default();
     shape.push_rect(flat([c[0], c[1]], [c[2] - c[0], c[3] - c[1]], r, [1.0; 4], out));
     masked(inside, shape, out);
@@ -5265,12 +5266,13 @@ fn collect_node(
     if let Some(c) = morph_clip {
         out.clip = [out.clip[0].max(c[0]), out.clip[1].max(c[1]), out.clip[2].min(c[2]), out.clip[3].min(c[3])];
     }
-    // A clip on a rounded shape follows its corners: the children are
-    // gathered apart and shown through the shape (see `rounded_clip`). Not
-    // under depth, where the rectangle is measured before the matrix.
+    // A clip on a rounded shape follows its corners: what the children
+    // draw is marked, and shown through the shape when it reaches a corner
+    // (see `rounded_clip`). Not under depth, where the rectangle is
+    // measured before the matrix.
     let round = (clip && own_radius > 0.0 && out.transform == Rect::IDENTITY).then(|| {
         let c = [own[0] * scale, own[1] * scale, (own[0] + own[2]) * scale, (own[1] + own[3]) * scale];
-        (c, own_radius * scale, std::mem::take(out.list))
+        (c, own_radius * scale, out.list.mark())
     });
     let scrolled = (scroll * scale).round() / scale;
     let scrolled_x = (scroll_x * scale).round() / scale;
@@ -5288,9 +5290,8 @@ fn collect_node(
     }
     out.clip = saved;
     out.fade = saved_fade;
-    if let Some((c, radius, under)) = round {
-        let inside = std::mem::replace(out.list, under);
-        rounded_clip(inside, c, radius, out);
+    if let Some((c, radius, mark)) = round {
+        rounded_clip(mark, c, radius, out);
     }
     out.parent_shape = saved_parent;
     out.transform = saved_transform;

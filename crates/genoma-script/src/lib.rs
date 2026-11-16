@@ -2434,6 +2434,7 @@ impl Script {
         let module_owner = self.module_owner.clone();
         let (scope, result) = Scope::new(|| -> Result<(Vec<Table>, Vec<SurfaceSpec>), String> {
             module_owner.set(current_owner());
+            io::set_load_owner(current_owner());
             let returned: Table =
                 lua.load(&source).set_name(format!("@{}", path.display())).eval().map_err(|e| e.to_string())?;
             let is_surface = |t: &Table| t.get::<Option<bool>>("__surface").ok().flatten() == Some(true);
@@ -2781,10 +2782,13 @@ impl Script {
         // g.watch(source, handler): handler(value) now and whenever what
         // source read changes — QML's onXChanged. Only the source is
         // tracked; the handler runs untracked, and what it starts (a
-        // g.after) is not the watch's, so the next change does not stop it.
+        // g.after) is not the watch's, so the next change does not stop it:
+        // it is the load's, which the next load stops.
+        let watch_owner = self.module_owner.clone();
         g.set(
             "watch",
-            lua.create_function(|_, (source, handler): (Function, Function)| {
+            lua.create_function(move |_, (source, handler): (Function, Function)| {
+                let watch_owner = watch_owner.clone();
                 Effect::new(move || {
                     let value = match profile::timed("watch", &source, || source.call::<LuaValue>(())) {
                         Ok(v) => v,
@@ -2794,12 +2798,10 @@ impl Script {
                         }
                     };
                     let handler = handler.clone();
-                    genoma_core::reactive::untracked(|| {
-                        detached(|| {
-                            if let Err(e) = handler.call::<()>(value) {
-                                log::error!("g.watch: {e}");
-                            }
-                        })
+                    owned_by(watch_owner.get(), || {
+                        if let Err(e) = handler.call::<()>(value) {
+                            log::error!("g.watch: {e}");
+                        }
                     });
                 });
                 Ok(())
