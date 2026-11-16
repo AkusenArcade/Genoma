@@ -6,6 +6,15 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `g.svg` takes `gradient_top` and `gradient_bottom` (values or bindings):
+  currentColor becomes `g.icon`'s 165° gradient across the whole
+  document, so an icon drawn by parts looks as the same file drawn by
+  `g.icon`.
+
 ## 0.1.16 — 2026-11-16
 
 ### Changed

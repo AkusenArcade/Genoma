@@ -7,7 +7,9 @@
 //!
 //! `currentColor` follows the node's `color`: the document is read with a
 //! colour nobody uses as its current one, and whatever comes back in that
-//! colour takes `color` instead, a value or a binding.
+//! colour takes `color` instead, a value or a binding. With
+//! `gradient_top` and `gradient_bottom` it takes `g.icon`'s 165° gradient
+//! across the whole document instead, from one to the other.
 
 use std::{
     path::Path,
@@ -92,6 +94,50 @@ fn current_at(lua: &Lua, current: &LuaValue, alpha: f32) -> mlua::Result<LuaValu
     })
 }
 
+/// `gradient_top` and `gradient_bottom`: what currentColor becomes, as
+/// `g.icon` paints a glyph — a 165° line across the whole document, in the
+/// document's own units.
+struct Tint {
+    top: LuaValue,
+    bottom: LuaValue,
+    /// x1, y1, x2, y2 in the document's space.
+    line: [f32; 4],
+}
+
+impl Tint {
+    fn new(top: LuaValue, bottom: LuaValue, size: [f32; 2]) -> Self {
+        let r = 165f32.to_radians();
+        let (dx, dy) = (r.sin() / 2.0, -r.cos() / 2.0);
+        let [w, h] = size;
+        Tint { top, bottom, line: [(0.5 - dx) * w, (0.5 - dy) * h, (0.5 + dx) * w, (0.5 + dy) * h] }
+    }
+
+    /// The two stops at `alpha`: a table, or a binding when either end is.
+    fn stops(&self, lua: &Lua, alpha: f32) -> mlua::Result<LuaValue> {
+        let top = current_at(lua, &self.top, alpha)?;
+        let bottom = current_at(lua, &self.bottom, alpha)?;
+        fn table(lua: &Lua, top: LuaValue, bottom: LuaValue) -> mlua::Result<Table> {
+            let first = lua.create_table()?;
+            first.set(1, 0.0)?;
+            first.set(2, top)?;
+            let last = lua.create_table()?;
+            last.set(1, 1.0)?;
+            last.set(2, bottom)?;
+            lua.create_sequence_from([first, last])
+        }
+        if !top.is_function() && !bottom.is_function() {
+            return Ok(LuaValue::Table(table(lua, top, bottom)?));
+        }
+        let read = |v: &LuaValue| -> mlua::Result<LuaValue> {
+            match v {
+                LuaValue::Function(f) => f.call(()),
+                other => Ok(other.clone()),
+            }
+        };
+        Ok(LuaValue::Function(lua.create_function(move |lua, ()| table(lua, read(&top)?, read(&bottom)?))?))
+    }
+}
+
 fn luminance(c: usvg::Color, alpha: f32) -> String {
     let l = (0.2125 * c.red as f32 + 0.7154 * c.green as f32 + 0.0721 * c.blue as f32) / 255.0;
     hex(usvg::Color::white(), l * alpha)
@@ -99,7 +145,20 @@ fn luminance(c: usvg::Color, alpha: f32) -> String {
 
 /// What a paint sets on a path node, under `which` ("fill" or "stroke"):
 /// a colour, or an exact gradient and its stops.
-fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32, current: &LuaValue, mode: Mode) -> mlua::Result<()> {
+/// `place` takes the path's own units to the document's, where a tint's
+/// line is drawn.
+#[allow(clippy::too_many_arguments)]
+fn paint(
+    lua: &Lua,
+    node: &Table,
+    which: &str,
+    paint: &usvg::Paint,
+    opacity: f32,
+    current: &LuaValue,
+    tint: Option<&Tint>,
+    place: usvg::Transform,
+    mode: Mode,
+) -> mlua::Result<()> {
     let colour_key = if which == "fill" { "fill" } else { "color" };
     if mode == Mode::Clip {
         return node.set(colour_key, "#ffffffff");
@@ -127,8 +186,18 @@ fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32
         // The paint is the gradient's; the colour must not hide it.
         node.set(colour_key, "#00000000")
     };
+    let marked = |c: &usvg::Color| (c.red, c.green, c.blue) == CURRENT && mode == Mode::Paint;
     match paint {
-        usvg::Paint::Color(c) if (c.red, c.green, c.blue) == CURRENT && !current.is_nil() && mode == Mode::Paint => {
+        usvg::Paint::Color(c) if marked(c) && tint.is_some() => {
+            let tint = tint.expect("checked");
+            let mut numbers = vec![1.0, 0.0, place.sx, place.ky, place.kx, place.sy, place.tx, place.ty];
+            numbers.extend_from_slice(&tint.line);
+            numbers.extend_from_slice(&[0.0, 0.0]);
+            node.set(format!("{which}_paint"), numbers)?;
+            node.set(format!("{which}_stops"), tint.stops(lua, opacity)?)?;
+            node.set(colour_key, "#00000000")
+        }
+        usvg::Paint::Color(c) if marked(c) && !current.is_nil() => {
             node.set(colour_key, current_at(lua, current, opacity)?)
         }
         usvg::Paint::Color(c) => node.set(colour_key, colour(*c, opacity)),
@@ -179,6 +248,7 @@ struct Build<'a> {
     lua: &'a Lua,
     size: [f32; 2],
     current: LuaValue,
+    tint: Option<Tint>,
     parts: Option<Table>,
     warned: std::cell::Cell<bool>,
     /// Pixels a document unit for what resvg draws in Genoma's place.
@@ -388,14 +458,14 @@ impl Build<'_> {
         node.set("d", data(p.data()))?;
         node.set("fill", "#00000000")?;
         if let Some(fill) = p.fill() {
-            paint(self.lua, &node, "fill", fill.paint(), fill.opacity().get(), &self.current, mode)?;
+            paint(self.lua, &node, "fill", fill.paint(), fill.opacity().get(), &self.current, self.tint.as_ref(), p.abs_transform(), mode)?;
             if fill.rule() == usvg::FillRule::EvenOdd {
                 node.set("even_odd", true)?;
             }
         }
         // A clip is its shapes' interiors, not their strokes.
         if let Some(stroke) = p.stroke().filter(|_| mode != Mode::Clip) {
-            paint(self.lua, &node, "stroke", stroke.paint(), stroke.opacity().get(), &self.current, mode)?;
+            paint(self.lua, &node, "stroke", stroke.paint(), stroke.opacity().get(), &self.current, self.tint.as_ref(), p.abs_transform(), mode)?;
             node.set("stroke", stroke.width().get())?;
             node.set(
                 "cap",
@@ -440,8 +510,10 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
         (None, None) => return Err(mlua::Error::runtime("g.svg needs src or source")),
     };
     let current: LuaValue = t.get("color")?;
+    let (top, bottom): (LuaValue, LuaValue) = (t.get("gradient_top")?, t.get("gradient_bottom")?);
+    let tinted = !top.is_nil() && !bottom.is_nil();
     // currentColor read as the colour nobody uses, to be found again.
-    let marked = if current.is_nil() {
+    let marked = if current.is_nil() && !tinted {
         source.clone()
     } else {
         match source.find("<svg") {
@@ -471,6 +543,7 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
         lua,
         size,
         current: current.clone(),
+        tint: tinted.then(|| Tint::new(top, bottom, size)),
         parts: t.get("parts")?,
         warned: std::cell::Cell::new(false),
         resolution: (k * 2.0).max(1.0),
@@ -490,7 +563,7 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
     for pair in t.pairs::<LuaValue, LuaValue>() {
         let (k, v) = pair?;
         if let LuaValue::String(s) = &k
-            && matches!(s.to_str()?.as_ref(), "src" | "source" | "parts" | "color" | "__kind")
+            && matches!(s.to_str()?.as_ref(), "src" | "source" | "parts" | "color" | "gradient_top" | "gradient_bottom" | "__kind")
         {
             continue;
         }
@@ -541,6 +614,35 @@ mod tests {
         assert_eq!(dot.get::<f32>("opacity").unwrap(), 0.25, "parts are laid over");
         assert!(dot.get::<String>("d").unwrap().starts_with('M'));
         assert!(hand.get::<bool>("isolate").unwrap(), "group opacity, as SVG has it");
+    }
+
+    #[test]
+    fn a_tint_is_the_icons_gradient_across_the_document() {
+        let lua = Lua::new();
+        let t: Table = lua
+            .load(format!("return {{ source = [==[{DOC}]==], gradient_top = '#ffffff', gradient_bottom = function() return '#000000' end }}"))
+            .eval()
+            .unwrap();
+        let root = svg(&lua, t, Path::new(".")).unwrap();
+        assert!(root.get::<LuaValue>("gradient_top").unwrap().is_nil(), "the tint is not the root box's");
+        let arm = find(&root, "arm").expect("arm");
+        assert_eq!(arm.get::<String>("color").unwrap(), "#00000000", "the gradient paints the stroke");
+        let paint: Vec<f32> = arm.get("stroke_paint").unwrap();
+        // Linear, padded; the arm's own units to the document's (its group
+        // moved it by 4, 2 in the document's 48 units, shown at 24); then
+        // the 165° line across the document's 24 × 24.
+        assert_eq!(&paint[..2], &[1.0, 0.0]);
+        assert!((paint[6] - 2.0).abs() < 1e-4 && (paint[7] - 1.0).abs() < 1e-4, "{paint:?}");
+        assert!((paint[8] - 8.894).abs() < 0.01 && (paint[11] - 23.59).abs() < 0.01, "{paint:?}");
+        // A binding at either end makes the stops a binding (the group's
+        // opacity stays the group's box's).
+        let stops: mlua::Function = arm.get("stroke_stops").unwrap();
+        let stops: Vec<Table> = stops.call(()).unwrap();
+        let stops: Vec<(f32, String)> = stops.iter().map(|s| (s.get(1).unwrap(), s.get(2).unwrap())).collect();
+        assert_eq!(stops, vec![(0.0, "#ffffff".to_owned()), (1.0, "#000000".to_owned())]);
+        // A colour of the document's own keeps it.
+        let dot = find(&root, "dot").expect("dot");
+        assert!(dot.get::<LuaValue>("fill_paint").unwrap().is_nil());
     }
 
     #[test]
