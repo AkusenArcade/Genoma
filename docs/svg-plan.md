@@ -189,3 +189,10 @@ What differs from the plan:
   groups and dashes within 0.2%, clip, luminance mask and group opacity
   within 0.2%, a plain blur within 0.3% (the largest difference 6/255).
   The structure `g.svg` builds is tested without a GPU.
+
+**What an animated icon costs** (a 24-unit bell at scale 2, release
+build, main thread; `cargo test --release -p genoma-scene frame_costs --
+--ignored --nocapture`): a recolour, an alpha or a move 0.08 µs a frame
+(the mesh is kept); a morph 64 µs (fill and stroke tessellated again); an
+animated trim 25 µs. Ten icons morphing at once stay under a tenth of a
+144 Hz frame.

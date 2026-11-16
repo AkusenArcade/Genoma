@@ -653,3 +653,53 @@ mod tests {
         assert!(two[1].curves.iter().all(|c| c[4] == 20.0 && c[5] == 20.0));
     }
 }
+
+#[cfg(test)]
+mod cost {
+    use super::*;
+
+    /// Run with --release --ignored --nocapture: what one frame of each kind
+    /// of animation costs the main thread for an icon.
+    #[test]
+    #[ignore]
+    fn frame_costs() {
+        let bell = "M6 10 a6 6 0 0 1 12 0 v4 l2 3 H4 l2-3 Z";
+        let shape = |d: &'static str, trim: f32| Shape {
+            outline: Some(d),
+            points: &[],
+            even_odd: false,
+            stroke: Some(1.5),
+            join: "round",
+            cap: "round",
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            miter_limit: 4.0,
+            trim: [0.0, trim],
+        };
+        let n = 2000;
+        let mut meshes = Meshes::default();
+        let s = shape(bell, 1.0);
+        meshes.get(&s, Part::Stroke, 2.0);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            meshes.get(&s, Part::Stroke, 2.0);
+        }
+        eprintln!("recolour (kept mesh): {:.2} µs a frame", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+        let circle = "M12 2 A10 10 0 1 1 11.9 2 Z";
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let d = morph(bell, circle, i as f32 / n as f32);
+            let leaked: &'static str = Box::leak(d.into_boxed_str());
+            let mut m = Meshes::default();
+            m.get(&shape(leaked, 1.0), Part::Fill, 2.0);
+            m.get(&shape(leaked, 1.0), Part::Stroke, 2.0);
+        }
+        eprintln!("morph (new fill + stroke): {:.2} µs a frame", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let mut m = Meshes::default();
+            m.get(&shape(bell, 0.05 + 0.95 * i as f32 / n as f32), Part::Stroke, 2.0);
+        }
+        eprintln!("trim (new stroke): {:.2} µs a frame", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+    }
+}
