@@ -1933,8 +1933,10 @@ impl UserData for NotificationsRef {
         // notifications.list → { { id, app_name, app_icon, summary, body,
         // actions = { { key, label }, … }, urgency (0 low, 1 normal, 2
         // critical), expire_timeout, desktop_entry, category, image_path,
-        // has_image, resident, transient, value, sound_name, sound_file,
-        // suppress_sound, replaced }, … }, in arrival order.
+        // image (the sender's pixels as a PNG, or nil), has_image, resident,
+        // transient, value, sound_name, sound_file, suppress_sound,
+        // replaced, can_reply, reply_placeholder, at }, … }, in arrival
+        // order.
         fields.add_field_method_get("list", |lua, this| {
             let list = lua.create_table()?;
             for (i, n) in this.0.list.get().into_iter().enumerate() {
@@ -1957,7 +1959,8 @@ impl UserData for NotificationsRef {
                 t.set("desktop_entry", n.desktop_entry)?;
                 t.set("category", n.category)?;
                 t.set("image_path", n.image_path)?;
-                t.set("has_image", n.image.is_some())?;
+                t.set("has_image", !n.image.is_empty())?;
+                t.set("image", (!n.image.is_empty()).then_some(n.image))?;
                 t.set("resident", n.resident)?;
                 t.set("transient", n.transient)?;
                 t.set("value", n.value)?;
@@ -1965,6 +1968,31 @@ impl UserData for NotificationsRef {
                 t.set("sound_file", n.sound_file)?;
                 t.set("suppress_sound", n.suppress_sound)?;
                 t.set("replaced", n.replaced)?;
+                t.set("can_reply", n.can_reply)?;
+                t.set("reply_placeholder", n.reply_placeholder)?;
+                t.set("at", n.at)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // notifications.history → { { key, id, app_name, app_icon,
+        // desktop_entry, summary, body, image_path, image, urgency, at }, … },
+        // newest first, once notifications:keep has asked for it.
+        fields.add_field_method_get("history", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, k) in this.0.history.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("key", k.key)?;
+                t.set("id", k.id)?;
+                t.set("app_name", k.app_name)?;
+                t.set("app_icon", k.app_icon)?;
+                t.set("desktop_entry", k.desktop_entry)?;
+                t.set("summary", k.summary)?;
+                t.set("body", k.body)?;
+                t.set("image_path", k.image_path)?;
+                t.set("image", (!k.image.is_empty()).then_some(k.image))?;
+                t.set("urgency", k.urgency)?;
+                t.set("at", k.at)?;
                 list.set(i + 1, t)?;
             }
             Ok(list)
@@ -1977,10 +2005,45 @@ impl UserData for NotificationsRef {
             this.0.close(id, reason.as_deref().unwrap_or("dismissed"));
             Ok(())
         });
-        // notifications:invoke(id, key): the action; then dismissed unless
-        // the notification is resident.
-        methods.add_method("invoke", |_, this, (id, key): (u32, String)| {
-            this.0.invoke(id, key);
+        // notifications:invoke(id, key, token?): the action; then dismissed
+        // unless the notification is resident. A token from
+        // g.activation_token lets the sender's window take the focus.
+        methods.add_method("invoke", |_, this, (id, key, token): (u32, String, Option<String>)| {
+            this.0.invoke(id, key, token);
+            Ok(())
+        });
+        // notifications:reply(id, text): the typed answer to one that
+        // can_reply; then dismissed unless resident.
+        methods.add_method("reply", |_, this, (id, text): (u32, String)| this.0.reply(id, text).map_err(err));
+        // notifications:rules({ { app, mute, silent, urgency, timeout }, … }):
+        // by application name or desktop entry, the first that matches.
+        methods.add_method("rules", |_, this, list: Table| {
+            let mut rules = Vec::new();
+            for r in list.sequence_values::<Table>() {
+                let r = r?;
+                rules.push(genoma_services::notifications::Rule {
+                    app: r.get::<Option<String>>("app")?.ok_or_else(|| err("notifications:rules: each rule needs app"))?,
+                    mute: r.get::<Option<bool>>("mute")?.unwrap_or(false),
+                    silent: r.get::<Option<bool>>("silent")?.unwrap_or(false),
+                    urgency: r.get("urgency")?,
+                    timeout: r.get("timeout")?,
+                });
+            }
+            this.0.set_rules(rules);
+            Ok(())
+        });
+        // notifications:keep({ limit = 100, path = "~/.local/state/…" }): a
+        // history, on disk when a path is given.
+        methods.add_method("keep", |_, this, t: Option<Table>| {
+            let (limit, path) = match t {
+                Some(t) => (t.get::<Option<usize>>("limit")?.unwrap_or(100), t.get::<Option<String>>("path")?),
+                None => (100, None),
+            };
+            this.0.keep(limit, path.map(|p| io::expand(&p))).map_err(err)
+        });
+        // notifications:forget(key?): one history entry, or all.
+        methods.add_method("forget", |_, this, key: Option<String>| {
+            this.0.forget(key.as_deref());
             Ok(())
         });
     }

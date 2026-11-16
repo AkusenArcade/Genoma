@@ -1555,6 +1555,16 @@ Why it does not, or "".
 read list: { { [string]: any } }
 ```
 
+What is open, in arrival order. Each has id, app_name, app_icon, summary, body, actions ({ key, label }; an inline reply is not among them), urgency (0 low, 1 normal, 2 critical), expire_timeout, desktop_entry, category, image_path, image (the sender's pixels as a PNG, or nil), resident, transient, value, sound_name, sound_file, suppress_sound, replaced, can_reply, reply_placeholder, at (Unix seconds).
+
+### `notifications.history`
+
+```luau
+read history: { NotificationKept }
+```
+
+What has been said, newest first, once `keep` asks for it.
+
 ### `notifications:close`
 
 ```luau
@@ -1566,10 +1576,42 @@ notifications:close(id, "expired" | "dismissed")
 ### `notifications:invoke`
 
 ```luau
-invoke: (self: Notifications, id: number, key: string) -> ()
+invoke: (self: Notifications, id: number, key: string, token: string?) -> ()
 ```
 
-The action; then dismissed unless the notification is resident.
+The action; then dismissed unless the notification is resident. A token from g.activation_token lets the sender's window take the focus.
+
+### `notifications:reply`
+
+```luau
+reply: (self: Notifications, id: number, text: string) -> ()
+```
+
+The typed answer to one that can_reply (KDE's inline reply); then dismissed unless resident.
+
+### `notifications:rules`
+
+```luau
+rules: (self: Notifications, rules: { { app: string, mute: boolean?, silent: boolean?, urgency: number?, timeout: number? } }) -> ()
+```
+
+Rules by application name or desktop entry (case aside), the first that matches: mute (closed as it comes, not kept), silent (no sound), urgency, timeout (milliseconds). They apply from now on.
+
+### `notifications:keep`
+
+```luau
+keep: (self: Notifications, options: { limit: number?, path: string? }?) -> ()
+```
+
+Keeps a history of up to `limit` (100), transient ones left out; with a path ("~/" expanded), on disk, read back now, its pictures copied beside the file.
+
+### `notifications:forget`
+
+```luau
+forget: (self: Notifications, key: string?) -> ()
+```
+
+One history entry by key, or all of them.
 
 ## Clipboard
 
@@ -2397,6 +2439,22 @@ A colour ramp: Kelvin (1000…10000, 6500 changes nothing), brightness (0.1…1)
 | `temperature` | `number` |  |
 | `brightness` | `number` |  |
 | `gamma` | `number` |  |
+
+### NotificationKept
+
+| Field | Type | |
+|---|---|---|
+| `key` | `string` | Unique across runs, unlike id. |
+| `id` | `number` |  |
+| `app_name` | `string` |  |
+| `app_icon` | `string` |  |
+| `desktop_entry` | `string` |  |
+| `summary` | `string` |  |
+| `body` | `string` |  |
+| `image_path` | `string` |  |
+| `image` | `string?` |  |
+| `urgency` | `number` |  |
+| `at` | `number` |  |
 
 ### AppAction
 

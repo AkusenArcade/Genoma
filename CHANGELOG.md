@@ -26,6 +26,16 @@ changes what a shell sees.
   dismissed. A choice asked for while the interface loads waits for the
   service to start. `:screenshot({ interactive })` takes a picture
   through the portal, for compositors without wlr-screencopy.
+- `@genoma/notifications`: an image a sender gives only as pixels
+  (`image-data`) is written as a PNG and given as `image`, so it can be
+  drawn; inline replies (`can_reply`, `reply_placeholder`,
+  `:reply(id, text)`, KDE's `NotificationReplied`, capability
+  `inline-reply`); `:invoke(id, key, token)` sends specification 1.2's
+  `ActivationToken` first, so the sender's window takes the focus;
+  `:rules{…}` by application (mute, silent, urgency, timeout); a history
+  on request, `:keep{ limit, path }` in memory or on disk with its
+  pictures beside the file, `history` and `:forget(key?)`. `at` gives
+  each notification's arrival.
 - `@genoma/capture`: screenshots through wlr-screencopy, without `grim`.
   `:screenshot({ path, output | area, cursor }, on_taken)` writes a PNG
   of every output, one output, or a logical area across outputs (joined

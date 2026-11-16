@@ -760,11 +760,50 @@ export type Notifications = {
     read serving: boolean,
     -- Why it does not, or "".
     read error: string,
+    -- What is open, in arrival order. Each has id, app_name, app_icon,
+    -- summary, body, actions ({ key, label }; an inline reply is not among
+    -- them), urgency (0 low, 1 normal, 2 critical), expire_timeout,
+    -- desktop_entry, category, image_path, image (the sender's pixels as a
+    -- PNG, or nil), resident, transient, value, sound_name, sound_file,
+    -- suppress_sound, replaced, can_reply, reply_placeholder, at (Unix
+    -- seconds).
     read list: { { [string]: any } },
+    -- What has been said, newest first, once `keep` asks for it.
+    read history: { NotificationKept },
     -- notifications:close(id, "expired" | "dismissed")
     close: (self: Notifications, id: number, reason: string?) -> (),
-    -- The action; then dismissed unless the notification is resident.
-    invoke: (self: Notifications, id: number, key: string) -> (),
+    -- The action; then dismissed unless the notification is resident. A
+    -- token from g.activation_token lets the sender's window take the
+    -- focus.
+    invoke: (self: Notifications, id: number, key: string, token: string?) -> (),
+    -- The typed answer to one that can_reply (KDE's inline reply); then
+    -- dismissed unless resident.
+    reply: (self: Notifications, id: number, text: string) -> (),
+    -- Rules by application name or desktop entry (case aside), the first
+    -- that matches: mute (closed as it comes, not kept), silent (no
+    -- sound), urgency, timeout (milliseconds). They apply from now on.
+    rules: (self: Notifications, rules: { { app: string, mute: boolean?, silent: boolean?, urgency: number?, timeout: number? } }) -> (),
+    -- Keeps a history of up to `limit` (100), transient ones left out; with
+    -- a path ("~/" expanded), on disk, read back now, its pictures copied
+    -- beside the file.
+    keep: (self: Notifications, options: { limit: number?, path: string? }?) -> (),
+    -- One history entry by key, or all of them.
+    forget: (self: Notifications, key: string?) -> (),
+}
+
+export type NotificationKept = {
+    -- Unique across runs, unlike id.
+    key: string,
+    id: number,
+    app_name: string,
+    app_icon: string,
+    desktop_entry: string,
+    summary: string,
+    body: string,
+    image_path: string,
+    image: string?,
+    urgency: number,
+    at: number,
 }
 
 export type AppAction = { id: string, name: string, icon: string }
