@@ -38,8 +38,13 @@ changes what a shell sees.
   with their transform and opacity, shapes as paths with their fills,
   strokes and gradients, text as outlines — every element with an id a
   part that `parts` gives props, bindings and transitions;
-  `currentColor` follows `color`. Patterns, clip paths, masks, filters
-  and embedded images are not drawn yet (said in the log).
+  `currentColor` follows `color`. Clip paths and masks (alpha and
+  luminance) become mask children, a group's opacity is laid on it as
+  one picture (`isolate`); patterns and embedded images are drawn by
+  resvg into a picture in their place (a little softer than the rest);
+  filters are not drawn yet (said in the log).
+- `isolate`: a node's opacity laid on its subtree as one picture, so its
+  children do not show through each other where they overlap.
 - Nodes: `affine` (a 2D matrix of what a subtree draws), `rotate`
   (degrees about the pivot, animatable), `pivot_at` (the pivot in
   logical units), and `dash_array` on paths (stroke-dasharray of any

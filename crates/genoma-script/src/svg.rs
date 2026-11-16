@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use genoma_scene::usvg;
+use genoma_scene::{resvg, usvg};
 use mlua::{Lua, Table, Value as LuaValue};
 
 /// The colour `currentColor` is read as, to be found again.
@@ -47,10 +47,29 @@ fn inverse(t: usvg::Transform) -> Option<[f32; 6]> {
     Some([a, b, c, d, -(a * t.tx + c * t.ty), -(b * t.tx + d * t.ty)])
 }
 
+/// How a part's paints are taken: as they are, as a clip's shape (opaque,
+/// whatever its colour), or as a luminance mask's content (its brightness
+/// becomes its alpha, as the mask is read by alpha).
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Paint,
+    Clip,
+    Luminance,
+}
+
+fn luminance(c: usvg::Color, alpha: f32) -> String {
+    let l = (0.2125 * c.red as f32 + 0.7154 * c.green as f32 + 0.0721 * c.blue as f32) / 255.0;
+    hex(usvg::Color::white(), l * alpha)
+}
+
 /// What a paint sets on a path node, under `which` ("fill" or "stroke"):
 /// a colour, or an exact gradient and its stops.
-fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32, current: &LuaValue) -> mlua::Result<()> {
+fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32, current: &LuaValue, mode: Mode) -> mlua::Result<()> {
     let colour_key = if which == "fill" { "fill" } else { "color" };
+    if mode == Mode::Clip {
+        return node.set(colour_key, "#ffffffff");
+    }
+    let colour = |c: usvg::Color, a: f32| if mode == Mode::Luminance { luminance(c, a) } else { hex(c, a) };
     let gradient = |kind: f32, base: &usvg::BaseGradient, params: [f32; 6]| -> mlua::Result<()> {
         let Some(m) = inverse(base.transform()) else { return Ok(()) };
         let spread = match base.spread_method() {
@@ -66,7 +85,7 @@ fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32
         for (i, s) in base.stops().iter().take(8).enumerate() {
             let stop = lua.create_table()?;
             stop.set(1, s.offset().get())?;
-            stop.set(2, hex(s.color(), s.opacity().get() * opacity))?;
+            stop.set(2, colour(s.color(), s.opacity().get() * opacity))?;
             stops.set(i + 1, stop)?;
         }
         node.set(format!("{which}_stops"), stops)?;
@@ -74,14 +93,12 @@ fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32
         node.set(colour_key, "#00000000")
     };
     match paint {
-        usvg::Paint::Color(c) if (c.red, c.green, c.blue) == CURRENT && !current.is_nil() => node.set(colour_key, current.clone()),
-        usvg::Paint::Color(c) => node.set(colour_key, hex(*c, opacity)),
+        usvg::Paint::Color(c) if (c.red, c.green, c.blue) == CURRENT && !current.is_nil() && mode == Mode::Paint => node.set(colour_key, current.clone()),
+        usvg::Paint::Color(c) => node.set(colour_key, colour(*c, opacity)),
         usvg::Paint::LinearGradient(l) => gradient(1.0, l, [l.x1(), l.y1(), l.x2(), l.y2(), 0.0, 0.0]),
         usvg::Paint::RadialGradient(r) => gradient(2.0, r, [r.cx(), r.cy(), r.r().get(), r.fx(), r.fy(), r.fr().get()]),
-        usvg::Paint::Pattern(_) => {
-            log::info!("g.svg: a pattern is not drawn yet; that part is left out");
-            Ok(())
-        }
+        // Drawn by resvg instead (`Build::raster`), never reaching here.
+        usvg::Paint::Pattern(_) => Ok(()),
     }
 }
 
@@ -127,6 +144,15 @@ struct Build<'a> {
     current: LuaValue,
     parts: Option<Table>,
     warned: std::cell::Cell<bool>,
+    /// Pixels a document unit for what resvg draws in Genoma's place.
+    resolution: f32,
+    /// The document's, naming the pictures resvg draws.
+    key: u64,
+    drawn: std::cell::Cell<u32>,
+}
+
+fn is_pattern(p: &usvg::Path) -> bool {
+    matches!(p.fill().map(|f| f.paint()), Some(usvg::Paint::Pattern(_))) || matches!(p.stroke().map(|s| s.paint()), Some(usvg::Paint::Pattern(_)))
 }
 
 impl Build<'_> {
@@ -144,27 +170,28 @@ impl Build<'_> {
         Ok(())
     }
 
-    fn group(&self, g: &usvg::Group) -> mlua::Result<Table> {
+    fn group(&self, g: &usvg::Group, mode: Mode) -> mlua::Result<Table> {
         let node = layer(self.lua, "box", g.id(), self.size)?;
         if let Some(m) = affine(g.transform()) {
             node.set("affine", m.to_vec())?;
         }
         if g.opacity().get() < 1.0 {
             node.set("opacity", g.opacity().get())?;
+            // As SVG has it: its children do not show through each other.
+            node.set("isolate", true)?;
         }
-        if (g.clip_path().is_some() || g.mask().is_some() || !g.filters().is_empty()) && !self.warned.replace(true) {
-            log::info!("g.svg: clip paths, masks and filters are not drawn yet; their groups are drawn without them");
+        if !g.filters().is_empty() && !self.warned.replace(true) {
+            log::info!("g.svg: filters are not drawn yet; their groups are drawn without them");
         }
         let mut i = 1;
         for child in g.children() {
             let made = match child {
-                usvg::Node::Group(g) => Some(self.group(g)?),
-                usvg::Node::Path(p) => self.path(p)?,
-                usvg::Node::Text(t) => Some(self.group(t.flattened())?),
-                usvg::Node::Image(_) => {
-                    log::info!("g.svg: an embedded image is not drawn yet; it is left out");
-                    None
-                }
+                usvg::Node::Group(inner) => Some(self.group(inner, mode)?),
+                usvg::Node::Path(p) if is_pattern(p) && mode == Mode::Paint => self.raster(child, g.abs_transform())?,
+                usvg::Node::Path(p) => self.path(p, mode)?,
+                usvg::Node::Text(t) => Some(self.group(t.flattened(), mode)?),
+                usvg::Node::Image(_) if mode == Mode::Paint => self.raster(child, g.abs_transform())?,
+                usvg::Node::Image(_) => None,
             };
             if let Some(made) = made {
                 node.set(i, made)?;
@@ -172,10 +199,110 @@ impl Build<'_> {
             }
         }
         self.with_parts(&node, g.id())?;
+        // A clip and a mask each multiply what shows: with both, the clip
+        // cuts an inner box and the mask the outer.
+        let clip = g.clip_path().map(|c| self.clip(c)).transpose()?;
+        let mask = g.mask().map(|m| self.mask(m)).transpose()?;
+        let node = match (clip, mask) {
+            (None, None) => node,
+            (Some(cut), None) | (None, Some(cut)) => {
+                node.set(node.raw_len() + 1, cut)?;
+                node
+            }
+            (Some(cut), Some(mask)) => {
+                let inner = layer(self.lua, "box", "", self.size)?;
+                for pair in node.clone().sequence_values::<Table>() {
+                    inner.set(inner.raw_len() + 1, pair?)?;
+                }
+                for k in 1..=node.raw_len() {
+                    node.raw_set(k, LuaValue::Nil)?;
+                }
+                inner.set(inner.raw_len() + 1, cut)?;
+                node.set(1, inner)?;
+                node.set(2, mask)?;
+                node
+            }
+        };
         Ok(node)
     }
 
-    fn path(&self, p: &usvg::Path) -> mlua::Result<Option<Table>> {
+    /// A clip path as a mask child: its shapes, opaque.
+    fn clip(&self, c: &usvg::ClipPath) -> mlua::Result<Table> {
+        let mask = layer(self.lua, "box", "", self.size)?;
+        mask.set("mask", true)?;
+        if let Some(m) = affine(c.transform()) {
+            mask.set("affine", m.to_vec())?;
+        }
+        mask.set(1, self.group(c.root(), Mode::Clip)?)?;
+        if c.clip_path().is_some() {
+            log::info!("g.svg: a clip path's own clip path is not drawn yet");
+        }
+        Ok(mask)
+    }
+
+    /// A mask as a mask child: read by alpha, or by luminance turned into
+    /// alpha.
+    fn mask(&self, m: &usvg::Mask) -> mlua::Result<Table> {
+        let mask = layer(self.lua, "box", "", self.size)?;
+        mask.set("mask", true)?;
+        let mode = if m.kind() == usvg::MaskType::Luminance { Mode::Luminance } else { Mode::Paint };
+        mask.set(1, self.group(m.root(), mode)?)?;
+        if m.mask().is_some() {
+            log::info!("g.svg: a mask's own mask is not drawn yet");
+        }
+        Ok(mask)
+    }
+
+    /// What Genoma does not draw itself (a pattern, an embedded image),
+    /// drawn by resvg into a picture at the document's resolution and laid
+    /// where it was, in its place among its siblings.
+    fn raster(&self, node: &usvg::Node, parent: usvg::Transform) -> mlua::Result<Option<Table>> {
+        let Some(bbox) = node.abs_layer_bounding_box() else { return Ok(None) };
+        let k = self.resolution;
+        let (w, h) = ((bbox.width() * k).ceil().max(1.0) as u32, (bbox.height() * k).ceil().max(1.0) as u32);
+        let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(w, h) else { return Ok(None) };
+        // render_node moves the node by its absolute box's corner but draws
+        // it in its own space: the ancestors' transform goes in between.
+        let (bx, by) = (bbox.x(), bbox.y());
+        let transform = resvg::tiny_skia::Transform::from_scale(k, k).pre_translate(-bx, -by).pre_concat(parent).pre_translate(bx, by);
+        resvg::render_node(node, transform, &mut pixmap.as_mut());
+        let n = self.drawn.get();
+        self.drawn.set(n + 1);
+        let folder = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("genoma").join("svg");
+        let file = folder.join(format!("{:016x}-{n}-{w}x{h}.png", self.key));
+        if !file.exists() {
+            let saved = std::fs::create_dir_all(&folder).map_err(|e| e.to_string()).and_then(|()| pixmap.save_png(&file).map_err(|e| e.to_string()));
+            if let Err(e) = saved {
+                log::warn!("g.svg: {}: {e}", file.display());
+                return Ok(None);
+            }
+        }
+        // In the document's own space: the ancestors' transform undone.
+        let undo = layer(self.lua, "box", "", self.size)?;
+        if let Some(inverse) = inverse(parent)
+            && inverse != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        {
+            undo.set("affine", inverse.to_vec())?;
+        }
+        let image = self.lua.create_table()?;
+        image.set("__kind", "image")?;
+        image.set("overlay", true)?;
+        image.set("attach", "corner")?;
+        image.set("offset_x", bbox.x())?;
+        image.set("offset_y", bbox.y())?;
+        image.set("width", bbox.width())?;
+        image.set("height", bbox.height())?;
+        image.set("src", file.to_string_lossy().as_ref())?;
+        if !node.id().is_empty() {
+            image.set("id", node.id())?;
+        }
+        self.with_parts(&image, node.id())?;
+        undo.set(1, image)?;
+        log::debug!("g.svg: {} drawn by resvg, {w}×{h}", if node.id().is_empty() { "an element" } else { node.id() });
+        Ok(Some(undo))
+    }
+
+    fn path(&self, p: &usvg::Path, mode: Mode) -> mlua::Result<Option<Table>> {
         if !p.is_visible() || (p.fill().is_none() && p.stroke().is_none()) {
             return Ok(None);
         }
@@ -183,13 +310,14 @@ impl Build<'_> {
         node.set("d", data(p.data()))?;
         node.set("fill", "#00000000")?;
         if let Some(fill) = p.fill() {
-            paint(self.lua, &node, "fill", fill.paint(), fill.opacity().get(), &self.current)?;
+            paint(self.lua, &node, "fill", fill.paint(), fill.opacity().get(), &self.current, mode)?;
             if fill.rule() == usvg::FillRule::EvenOdd {
                 node.set("even_odd", true)?;
             }
         }
-        if let Some(stroke) = p.stroke() {
-            paint(self.lua, &node, "stroke", stroke.paint(), stroke.opacity().get(), &self.current)?;
+        // A clip is its shapes' interiors, not their strokes.
+        if let Some(stroke) = p.stroke().filter(|_| mode != Mode::Clip) {
+            paint(self.lua, &node, "stroke", stroke.paint(), stroke.opacity().get(), &self.current, mode)?;
             node.set("stroke", stroke.width().get())?;
             node.set(
                 "cap",
@@ -251,10 +379,27 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
     let size = [tree.size().width(), tree.size().height()];
     let width: f32 = t.get::<Option<f32>>("width")?.unwrap_or(size[0]);
     let height: f32 = t.get::<Option<f32>>("height")?.unwrap_or(size[1]);
-    let build = Build { lua, size, current: current.clone(), parts: t.get("parts")?, warned: std::cell::Cell::new(false) };
-    let canvas = build.group(tree.root())?;
     // Fitted, centred, the aspect kept, as preserveAspectRatio's default.
     let k = (width / size[0].max(1e-6)).min(height / size[1].max(1e-6));
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        marked.hash(&mut h);
+        h.finish()
+    };
+    // What resvg draws, at twice the size the document is shown: sharp on
+    // a doubled screen too.
+    let build = Build {
+        lua,
+        size,
+        current: current.clone(),
+        parts: t.get("parts")?,
+        warned: std::cell::Cell::new(false),
+        resolution: (k * 2.0).max(1.0),
+        key,
+        drawn: std::cell::Cell::new(0),
+    };
+    let canvas = build.group(tree.root(), Mode::Paint)?;
     let fit = [k, 0.0, 0.0, k, (width - size[0] * k) * 0.5, (height - size[1] * k) * 0.5];
     let inner = layer(lua, "box", "", size)?;
     if fit != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
@@ -316,5 +461,39 @@ mod tests {
         assert_eq!(dot.get::<String>("fill").unwrap(), "#ff000080");
         assert_eq!(dot.get::<f32>("opacity").unwrap(), 0.25, "parts are laid over");
         assert!(dot.get::<String>("d").unwrap().starts_with('M'));
+        assert!(hand.get::<bool>("isolate").unwrap(), "group opacity, as SVG has it");
+    }
+
+    #[test]
+    fn clips_and_masks_become_mask_children() {
+        let lua = Lua::new();
+        let doc = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+            <clipPath id="c"><circle cx="10" cy="10" r="5" fill="red" stroke="blue"/></clipPath>
+            <mask id="m"><rect width="20" height="20" fill="#808080"/></mask>
+            <g id="both" clip-path="url(#c)" mask="url(#m)"><rect id="r" width="20" height="20" fill="green"/></g>
+        </svg>"##;
+        let t: Table = lua.load(format!("return {{ source = [==[{doc}]==] }}")).eval().unwrap();
+        let root = svg(&lua, t, Path::new("/")).unwrap();
+        let both = find(&root, "both").unwrap();
+        let children: Vec<Table> = both.sequence_values::<Table>().map(Result::unwrap).collect();
+        assert_eq!(children.len(), 2, "the content with its clip inside, the mask outside");
+        assert!(children[1].get::<bool>("mask").unwrap());
+        let inner: Vec<Table> = children[0].sequence_values::<Table>().map(Result::unwrap).collect();
+        assert!(inner.iter().any(|c| c.get::<Option<bool>>("mask").unwrap() == Some(true)));
+        let mut shapes = Vec::new();
+        fn paths(t: &Table, out: &mut Vec<Table>) {
+            if t.get::<Option<String>>("__kind").unwrap().as_deref() == Some("path") {
+                out.push(t.clone());
+            }
+            for c in t.sequence_values::<Table>() {
+                paths(&c.unwrap(), out);
+            }
+        }
+        paths(&children[0], &mut shapes);
+        let clip_shape = shapes.iter().find(|p| p.get::<String>("fill").unwrap() == "#ffffffff").expect("the clip's circle, opaque");
+        assert!(clip_shape.get::<Option<f32>>("stroke").unwrap().is_none(), "a clip has no stroke");
+        let mut masked = Vec::new();
+        paths(&children[1], &mut masked);
+        assert_eq!(masked[0].get::<String>("fill").unwrap(), "#ffffff80", "grey luminance as half alpha");
     }
 }

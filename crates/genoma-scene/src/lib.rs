@@ -16,7 +16,7 @@ mod schema;
 mod vector;
 
 /// usvg, as `g.svg` reads documents with it.
-pub use resvg::usvg;
+pub use resvg::{self, usvg};
 
 use std::{
     sync::Arc,
@@ -226,6 +226,8 @@ pub struct Node {
     pass: bool,
     /// Drawn into a picture of its own and kept (`cache`).
     cache: bool,
+    /// Its opacity laid on the subtree drawn as one picture.
+    isolate: bool,
     /// How it meets what is under: `genoma_render::Image::blend`.
     blend: u8,
     /// An image's colours: saturation, contrast, brightness, then a tint
@@ -456,6 +458,7 @@ impl Node {
             mask: false,
             pass: false,
             cache: false,
+            isolate: false,
             blend: 0,
             filter: genoma_render::Image::NO_FILTER,
             growth: 1.0,
@@ -1983,6 +1986,7 @@ impl Scene {
             Prop::Playing => n.playing = take!(flag),
             Prop::Mask => n.mask = take!(flag),
             Prop::Cache => n.cache = take!(flag),
+            Prop::Isolate => n.isolate = take!(flag),
             Prop::Morph => n.morph_name = Some(take!(text)).filter(|t| !t.is_empty()),
             Prop::MorphTiming => n.morph_timing = Some(take!(text)).filter(|t| !t.is_empty()),
             Prop::Pass => {
@@ -3675,14 +3679,22 @@ fn collect(
     let present = tree.get_node_context(node).is_some_and(|n| n.present);
     let is_mask = present && out.mask.is_some() && tree.get_node_context(node).is_some_and(|n| n.mask);
     let blend = if present && !is_mask { tree.get_node_context(node).map_or(0, |n| n.blend) } else { 0 };
-    if blend != 0 {
+    // Isolated: the subtree drawn whole, then its opacity (and what the
+    // ancestors' leave) laid on the picture.
+    let isolated = tree.get_node_context(node).filter(|n| present && !is_mask && n.isolate && n.opacity < 1.0).map(|n| n.opacity);
+    if blend != 0 || isolated.is_some() {
         // Blended: the node and its subtree (masked, blurred) drawn into a
         // list of their own, laid as one image meeting what is under it.
+        let opacity = isolated.unwrap_or(1.0);
+        if alpha * opacity <= 0.0 {
+            return;
+        }
+        let inner = if isolated.is_some() { 1.0 / opacity } else { alpha };
         let mut own = DrawList::default();
         std::mem::swap(out.list, &mut own);
-        masked_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out, false, true);
+        masked_or_not(tree, fonts, node, parent, parent_exact, inner, scale, out, false, true);
         std::mem::swap(out.list, &mut own);
-        blended(own, blend, out);
+        blended(own, blend, if isolated.is_some() { alpha * opacity } else { 1.0 }, out);
     } else {
         masked_or_not(tree, fonts, node, parent, parent_exact, alpha, scale, out, is_mask, present);
     }
@@ -3735,7 +3747,7 @@ fn masked_or_not(
 /// `own` laid as one image meeting what is under it as `blend` asks
 /// (`genoma_render::Image::blend`); for overlay, what `out` holds under it
 /// so far is drawn into a second texture over the same rectangle.
-fn blended(mut own: DrawList, blend: u8, out: &mut Out) {
+fn blended(mut own: DrawList, blend: u8, alpha: f32, out: &mut Out) {
     let Some([x0, y0, x1, y1]) = own.paint_bounds() else { return };
     let bounds = [x0.max(0.0).floor(), y0.max(0.0).floor(), x1.min(out.viewport[0]).ceil(), y1.min(out.viewport[1]).ceil()];
     if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
@@ -3773,7 +3785,7 @@ fn blended(mut own: DrawList, blend: u8, out: &mut Out) {
         size,
         uv: [0.0, 0.0, 1.0, 1.0],
         radius: 0.0,
-        alpha: 1.0,
+        alpha,
         clip: out.clip,
         fade: out.fade_of(),
         transform: Rect::IDENTITY,
