@@ -253,8 +253,16 @@ export type G = {
     shader: (t: Node) -> Node,
     -- A line of text to type into.
     field: (t: Node) -> Node,
-    -- Any outline: `d` (SVG path data) or `points`.
+    -- Any outline: `d` (SVG path data) or `points`, drawn on the GPU.
     path: (t: Node) -> Node,
+    -- An SVG document as nodes: `src` (a file, relative to the interface)
+    -- or `source` (the text), fitted into `width` × `height` (its own size
+    -- by default) with its aspect kept; `color` is what currentColor
+    -- becomes (a value or a binding); `parts` gives the elements with
+    -- those ids props of their own (values, bindings, `transition`).
+    -- Groups are boxes with `affine` and `opacity`, shapes `path` nodes.
+    -- Other keys are the root box's.
+    svg: (t: Node & { src: string?, source: string?, parts: { [string]: Node }? }) -> Node,
     -- A row per item, kept by key.
     each: <T>(t: Each<T>) -> Node,
     -- A keyed list that scrolls, mounting only the rows in view.

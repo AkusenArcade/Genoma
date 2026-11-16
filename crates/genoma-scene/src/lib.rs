@@ -15,6 +15,9 @@ mod images;
 mod schema;
 mod vector;
 
+/// usvg, as `g.svg` reads documents with it.
+pub use resvg::usvg;
+
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -269,6 +272,8 @@ pub struct Node {
     turn: [f32; 3],
     perspective: f32,
     pivot: [f32; 2],
+    /// The pivot in logical units from the corner, when given.
+    pivot_at: Option<[f32; 2]>,
     /// Where the node was last drawn, logical units: x, y, width, height.
     bounds: [f32; 4],
     /// Half the node's width as last laid out: how far the arc's end is from
@@ -339,6 +344,12 @@ pub struct Node {
     fill_paint: Vec<f32>,
     stroke_paint: Vec<f32>,
     stroke_stops: Vec<(f32, [f32; 4])>,
+    /// A 2D transform of what it draws, logical units from its corner.
+    affine: Option<[f32; 6]>,
+    /// Degrees clockwise about the pivot.
+    rotate: f32,
+    /// A dash pattern of any length, in place of `dash` and `dash_gap`.
+    dash_array: Vec<f32>,
     /// Drawn as one shape with the capsule of this id: union (0), subtract
     /// (1) or intersect (2), this soft.
     combine_with: Option<String>,
@@ -475,6 +486,7 @@ impl Node {
             turn: [0.0; 3],
             perspective: 800.0,
             pivot: [0.5, 0.5],
+            pivot_at: None,
             bounds: [0.0; 4],
             arc_radius: 0.0,
             wave: 0.0,
@@ -522,6 +534,9 @@ impl Node {
             fill_paint: Vec::new(),
             stroke_paint: Vec::new(),
             stroke_stops: Vec::new(),
+            affine: None,
+            rotate: 0.0,
+            dash_array: Vec::new(),
             combine_with: None,
             combine: 0,
             combine_soft: 0.0,
@@ -1781,6 +1796,7 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::TrimStart => Value::Number(n.trim[0]),
             Prop::TrimEnd => Value::Number(n.trim[1]),
             Prop::DashOffset => Value::Number(n.dash_offset),
+            Prop::Rotate => Value::Number(n.rotate),
             Prop::D => Value::Text(n.outline.clone()?),
             Prop::RimTop => Value::Color(n.rim_top),
             Prop::RimBottom => Value::Color(n.rim_bottom),
@@ -2049,6 +2065,10 @@ impl Scene {
             Prop::Perspective => n.perspective = take!(number).max(1.0),
             Prop::PivotX => n.pivot[0] = take!(number),
             Prop::PivotY => n.pivot[1] = take!(number),
+            Prop::PivotAt => {
+                let at = take!(numbers);
+                n.pivot_at = (at.len() >= 2).then(|| [at[0], at[1]]);
+            }
             Prop::OffsetX => n.offset[0] = take!(number),
             Prop::OffsetY => n.offset[1] = take!(number),
             Prop::PaddingLeft => (style.padding.left, restyle) = (LengthPercentage::length(take!(number)), true),
@@ -2290,6 +2310,12 @@ impl Scene {
             Prop::FillPaint => n.fill_paint = take!(numbers),
             Prop::StrokePaint => n.stroke_paint = take!(numbers),
             Prop::StrokeStops => n.stroke_stops = take!(stops),
+            Prop::Affine => {
+                let m = take!(numbers);
+                n.affine = (m.len() >= 6 && m[..6] != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]).then(|| [m[0], m[1], m[2], m[3], m[4], m[5]]);
+            }
+            Prop::Rotate => n.rotate = take!(number),
+            Prop::DashArray => n.dash_array = take!(numbers).into_iter().map(|v| v.max(0.0)).collect(),
             Prop::CombineWith => n.combine_with = Some(take!(text)).filter(|id| !id.is_empty()),
             Prop::Combine => {
                 n.combine = match take!(text).as_str() {
@@ -3375,6 +3401,19 @@ fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     m
 }
 
+/// A 2D matrix (a, b, c, d, e, f as SVG writes it, its translation in
+/// logical units) about the point `at`, physical pixels, as a depth matrix
+/// by rows: what is at `at` stays there before the translation.
+fn affine_about([a, b, c, d, e, f]: [f32; 6], at: [f32; 2], scale: f32) -> [[f32; 4]; 4] {
+    let [x, y] = at;
+    [
+        [a, c, 0.0, e * scale + x - (a * x + c * y)],
+        [b, d, 0.0, f * scale + y - (b * x + d * y)],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
 /// A turn about (px, py): rotations about x then y in degrees, z toward the
 /// viewer, then the perspective of an eye `eye` pixels away, all by rows.
 fn turn_about(px: f32, py: f32, turn: [f32; 3], eye: f32) -> [[f32; 4]; 4] {
@@ -4103,10 +4142,20 @@ fn collect_node(
     // composed with what its ancestors already turned.
     let saved_transform = out.transform;
     if let Some(n) = tree.get_node_context(node) {
+        let pivot = n.pivot_at.unwrap_or([own[2] * n.pivot[0], own[3] * n.pivot[1]]);
         if n.turn != [0.0; 3] {
-            let px = (own[0] + own[2] * n.pivot[0]) * scale;
-            let py = (own[1] + own[3] * n.pivot[1]) * scale;
+            let px = (own[0] + pivot[0]) * scale;
+            let py = (own[1] + pivot[1]) * scale;
             out.transform = mul(out.transform, turn_about(px, py, n.turn, n.perspective * scale));
+        }
+        if n.rotate != 0.0 {
+            let px = (own[0] + pivot[0]) * scale;
+            let py = (own[1] + pivot[1]) * scale;
+            let (sin, cos) = n.rotate.to_radians().sin_cos();
+            out.transform = mul(out.transform, affine_about([cos, sin, -sin, cos, 0.0, 0.0], [px, py], 1.0));
+        }
+        if let Some(m) = n.affine {
+            out.transform = mul(out.transform, affine_about(m, [own[0] * scale, own[1] * scale], scale));
         }
     }
     let declared_width = tree
@@ -5060,12 +5109,22 @@ fn collect_node(
                 let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
                 out.distance.place(&id, key, &data, w, h, corner, OUTLINE_SPREAD * scale);
             }
-            // On the GPU, inside its own box as the outline's units say, its
-            // corner on a whole pixel: an icon's straight lines stay on the
-            // pixel grid it was drawn for.
+            // On the GPU, its corner on a whole pixel: an icon's straight
+            // lines stay on the pixel grid it was drawn for. What reaches
+            // past its box is drawn, as CSS's overflow is.
             let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
-            let own = [corner[0], corner[1], corner[0] + layout.size.width * scale, corner[1] + layout.size.height * scale];
-            let clip = [out.clip[0].max(own[0]), out.clip[1].max(own[1]), out.clip[2].min(own[2]), out.clip[3].min(own[3])];
+            let clip = out.clip;
+            // Tessellated at the size it is seen: under a transform that
+            // enlarges it (an SVG's viewBox fitted to its box) the mesh is
+            // made that much finer and the matrix takes it back, so the
+            // edge stays one screen pixel wide.
+            let m = out.transform;
+            let enlarged = ((m[0][0] * m[1][1] - m[0][1] * m[1][0]).abs().sqrt() / m[3][3].abs().max(1e-6)).clamp(0.01, 64.0);
+            let (fine, transform) = if (enlarged - 1.0).abs() < 1e-3 {
+                (scale, out.transform)
+            } else {
+                (scale * enlarged, mul(out.transform, affine_about([1.0 / enlarged, 0.0, 0.0, 1.0 / enlarged, 0.0, 0.0], corner, 1.0)))
+            };
             let shape = vector::Shape {
                 outline: n.outline.as_deref(),
                 points: &n.points,
@@ -5073,22 +5132,22 @@ fn collect_node(
                 stroke: n.stroke,
                 join: n.join,
                 cap: n.cap,
-                dash: n.dash,
+                dash: if n.dash_array.is_empty() { if n.dash[0] > 0.0 { vec![n.dash[0], n.dash[1].max(0.0)] } else { Vec::new() } } else { n.dash_array.clone() },
                 dash_offset: n.dash_offset,
                 miter_limit: n.miter_limit,
                 trim: n.trim,
             };
-            let size = [layout.size.width * scale, layout.size.height * scale];
-            let fill_gradient = vector::gradient(&n.fill_paint, &n.fill_stops, scale)
+            let size = [layout.size.width * fine, layout.size.height * fine];
+            let fill_gradient = vector::gradient(&n.fill_paint, &n.fill_stops, fine)
                 .or_else(|| vector::box_gradient(n.fill, n.fill_bottom, &n.fill_stops, n.fill_angle, n.fill_shape, n.fill_across, size));
-            let stroke_gradient = vector::gradient(&n.stroke_paint, &n.stroke_stops, scale);
+            let stroke_gradient = vector::gradient(&n.stroke_paint, &n.stroke_stops, fine);
             let parts = [(vector::Part::Fill, n.fill, fill_gradient), (vector::Part::Stroke, n.color, stroke_gradient)];
             for (part, color, gradient) in parts {
                 let visible = color[3] > 0.0 || gradient.as_ref().is_some_and(|g| g.stops.iter().any(|(_, c)| c[3] > 0.0));
                 if !visible || matches!(part, vector::Part::Stroke) && n.stroke.is_none_or(|s| s <= 0.0) {
                     continue;
                 }
-                if let Some((key, mesh, faint)) = out.icons.meshes.get(&shape, part, scale) {
+                if let Some((key, mesh, faint)) = out.icons.meshes.get(&shape, part, fine) {
                     out.list.push_path(genoma_render::Path {
                         key,
                         mesh,
@@ -5098,7 +5157,7 @@ fn collect_node(
                         alpha: alpha * faint,
                         clip,
                         fade: out.fade_of(),
-                        transform: out.transform,
+                        transform,
                     });
                 }
             }

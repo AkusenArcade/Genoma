@@ -16,7 +16,9 @@ changes what a shell sees.
   a move redraws without rasterising. Edges are antialiased across one
   pixel; a stroke thinner than a pixel is drawn a pixel wide and that
   much fainter. A path's corner sits on a whole pixel as an image's
-  does. Measured against the rasterised paths: the same coverage within
+  does, and what reaches past its box is drawn (no longer cut there);
+  under a transform that enlarges it, it is tessellated at the size it
+  is seen. Measured against the rasterised paths: the same coverage within
   half a percent on fills.
 - `d` is animatable: with a transition, a path morphs from one outline
   to the next — point by point when their commands match, otherwise
@@ -31,6 +33,17 @@ changes what a shell sees.
   repeat or reflect, through a matrix from the node's units),
   `trim_start` / `trim_end` (a line drawn on), `dash_offset` (marching
   dashes) and `miter_limit`.
+- `g.svg { src | source, width, height, color, parts }`: an SVG document
+  read by usvg as a subtree of nodes drawn on the GPU — groups as boxes
+  with their transform and opacity, shapes as paths with their fills,
+  strokes and gradients, text as outlines — every element with an id a
+  part that `parts` gives props, bindings and transitions;
+  `currentColor` follows `color`. Patterns, clip paths, masks, filters
+  and embedded images are not drawn yet (said in the log).
+- Nodes: `affine` (a 2D matrix of what a subtree draws), `rotate`
+  (degrees about the pivot, animatable), `pivot_at` (the pivot in
+  logical units), and `dash_array` on paths (stroke-dasharray of any
+  length).
 
 ### Added
 

@@ -275,6 +275,14 @@ return g.surface {
   `async.activation_token` wait for their answer as if it came at once,
   and `async.all { … }` waits for several side by side; nothing else stops
   meanwhile. A coroutine underneath; its source is in [`kit/async.luau`](kit/async.luau).
+- **Vector graphics:** `g.path` draws any outline on the GPU, tessellated
+  once and kept, so colour, alpha and movement cost no rasterising: fills
+  and strokes (joins, caps, dashes, `trim_start`/`trim_end` to draw a
+  line on, `dash_offset`), gradients, and `d` that morphs under a
+  transition. `g.svg { src = "icon.svg", parts = { needle = { rotate =
+  …, pivot_at = { 12, 18 } } } }` makes a document of nodes, each element
+  with an id a part to bind and animate, `currentColor` following
+  `color`. See `docs/svg-plan.md` for what is drawn and what is not yet.
 - **Screen recording:** `require("@genoma/kit/record")` runs
   wl-screenrec (else wf-recorder) for an output or a logical area:
   `record.start { path, output | area, fps, audio, cursor, on_end }`,

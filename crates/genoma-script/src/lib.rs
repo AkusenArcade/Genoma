@@ -22,6 +22,7 @@ mod greetd;
 mod list;
 mod values;
 pub mod io;
+mod svg;
 
 use genoma_core::{
     reactive::{Effect, Scope, Signal, current_owner, detached, on_cleanup, owned_by},
@@ -3028,6 +3029,10 @@ impl Script {
                 Ok(t)
             })?,
         )?;
+        // g.svg { src = "…svg", width, height, color, parts = { id = { … } } }:
+        // a document as nodes, each part by its id.
+        let svg_dir = self.dir.clone();
+        g.set("svg", lua.create_function(move |lua, t: Table| svg::svg(lua, t, &svg_dir))?)?;
         // g.popup { anchor = "clock", side = "bottom", … }: a surface that
         // opens beside a node of another one, over everything, for as long
         // as its `present` says.

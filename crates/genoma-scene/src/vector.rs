@@ -26,8 +26,8 @@ pub struct Shape<'a> {
     pub stroke: Option<f32>,
     pub join: &'a str,
     pub cap: &'a str,
-    /// Dash and gap, logical units; a dash of 0 is a solid line.
-    pub dash: [f32; 2],
+    /// Dashes and gaps in turn, logical units; none is a solid line.
+    pub dash: Vec<f32>,
     pub dash_offset: f32,
     pub miter_limit: f32,
     /// The stroke's part drawn, 0…1 of each outline's length.
@@ -209,7 +209,7 @@ pub struct Style<'a> {
     pub width: f32,
     pub join: &'a str,
     pub cap: &'a str,
-    pub dash: [f32; 2],
+    pub dash: &'a [f32],
     pub dash_offset: f32,
     pub miter_limit: f32,
     pub trim: [f32; 2],
@@ -223,8 +223,10 @@ pub fn stroke(path: &tiny_skia::Path, style: &Style, scale: f32) -> Option<(Mesh
     let (drawn, alpha) = if physical_width < 1.0 { (1.0 / scale, physical_width.max(0.0)) } else { (style.width, 1.0) };
     let cut = trimmed(path, style.trim, scale)?;
     let dashed;
-    let path = if style.dash[0] > 0.0 {
-        let pattern = StrokeDash::new(vec![style.dash[0], style.dash[1].max(0.0)], style.dash_offset)?;
+    // An odd count repeats, as SVG reads it.
+    let pattern: Vec<f32> = if style.dash.len() % 2 == 1 { style.dash.repeat(2) } else { style.dash.to_vec() };
+    let path = if pattern.iter().any(|d| *d > 0.0) {
+        let pattern = StrokeDash::new(pattern, style.dash_offset)?;
         dashed = cut.dash(&pattern, scale)?;
         &dashed
     } else {
@@ -503,7 +505,7 @@ impl Meshes {
             Part::Fill => shape.even_odd.hash(&mut h),
             Part::Stroke => {
                 shape.stroke.map(f32::to_bits).hash(&mut h);
-                (shape.join, shape.cap, shape.dash.map(f32::to_bits)).hash(&mut h);
+                (shape.join, shape.cap, shape.dash.iter().map(|v| v.to_bits()).collect::<Vec<_>>()).hash(&mut h);
                 (shape.dash_offset.to_bits(), shape.miter_limit.to_bits(), shape.trim.map(f32::to_bits)).hash(&mut h);
             }
         }
@@ -521,7 +523,7 @@ impl Meshes {
                     width,
                     join: shape.join,
                     cap: shape.cap,
-                    dash: shape.dash,
+                    dash: &shape.dash,
                     dash_offset: shape.dash_offset,
                     miter_limit: shape.miter_limit,
                     trim: shape.trim,
@@ -561,7 +563,7 @@ mod tests {
             stroke: Some(2.0),
             join: "miter",
             cap: "butt",
-            dash: [0.0; 2],
+            dash: Vec::new(),
             dash_offset: 0.0,
             miter_limit: 4.0,
             trim: [0.0, 1.0],
@@ -595,6 +597,7 @@ mod tests {
     }
 
     fn style(width: f32, dash: [f32; 2], trim: [f32; 2]) -> Style<'static> {
+        let dash: &'static [f32] = if dash[0] > 0.0 { Box::leak(Box::new(dash)) } else { &[] };
         Style { width, join: "miter", cap: "butt", dash, dash_offset: 0.0, miter_limit: 4.0, trim }
     }
 
