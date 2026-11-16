@@ -25,12 +25,14 @@ use raw_window_handle::{
 mod blur;
 mod gpu;
 mod image;
+pub mod path;
 pub mod particles;
 mod rect;
 pub mod shader;
 pub mod sim;
 
 pub use particles::{Emitter, EmitterParams};
+pub use path::{Path, PathVertex};
 pub use rect::Rect;
 pub use shader::Shader;
 pub use image::resident;
@@ -155,6 +157,8 @@ pub struct DrawList {
     /// Where each layer but the last ends.
     pub breaks: Vec<Layer>,
     pub rects: Vec<Rect>,
+    /// Vector outlines, drawn over a layer's rects and under its images.
+    pub paths: Vec<Path>,
     pub images: Vec<Image>,
     pub shaders: Vec<Shader>,
     pub texts: Vec<Text>,
@@ -165,7 +169,7 @@ pub struct DrawList {
     /// Where each item can leave paint, physical pixels, x0, y0, x1, y1, by
     /// kind as `order`'s ranks: what a frame that redraws only what changed
     /// has to clear and draw again (see [`DrawList::damage`]).
-    paint: [Vec<[f32; 4]>; 5],
+    paint: [Vec<[f32; 4]>; 6],
 }
 
 /// A subtree drawn blurred: its own list drawn into a texture over
@@ -215,6 +219,7 @@ pub type SurfaceId = u32;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Layer {
     pub rects: usize,
+    pub paths: usize,
     pub images: usize,
     pub shaders: usize,
     pub emitters: usize,
@@ -223,7 +228,7 @@ pub struct Layer {
 
 impl Layer {
     fn total(&self) -> usize {
-        self.rects + self.images + self.shaders + self.emitters + self.texts
+        self.rects + self.paths + self.images + self.shaders + self.emitters + self.texts
     }
 }
 
@@ -235,6 +240,16 @@ fn meets(a: &[f32; 4], b: &[f32; 4]) -> bool {
 /// Whether two items of the same kind draw the same pixels.
 fn same_rect(a: &Rect, b: &Rect) -> bool {
     bytemuck::bytes_of(a) == bytemuck::bytes_of(b)
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.key == b.key
+        && a.origin == b.origin
+        && a.color == b.color
+        && a.alpha == b.alpha
+        && a.clip == b.clip
+        && a.fade == b.fade
+        && a.transform == b.transform
 }
 
 fn same_image(a: &Image, b: &Image) -> bool {
@@ -295,6 +310,7 @@ impl DrawList {
     pub fn mark(&self) -> Layer {
         Layer {
             rects: self.rects.len(),
+            paths: self.paths.len(),
             images: self.images.len(),
             shaders: self.shaders.len(),
             emitters: self.emitters.len(),
@@ -316,8 +332,8 @@ impl DrawList {
         self.over.clear();
     }
 
-    /// Where an item of kind `rank` (rects 0, images 1, shaders 2, particles
-    /// 3, text 4) covering `bounds` goes: a new layer when the current one
+    /// Where an item of kind `rank` (rects 0, paths 1, images 2, shaders 3,
+    /// particles 4, text 5) covering `bounds` goes: a new layer when the current one
     /// already holds something of a later kind under it.
     fn order(&mut self, rank: u8, bounds: [f32; 4]) {
         let under = |b: &[f32; 4]| b[0] < bounds[2] && bounds[0] < b[2] && b[1] < bounds[3] && bounds[1] < b[3];
@@ -370,11 +386,22 @@ impl DrawList {
         self.rects.push(r);
     }
 
+    pub fn push_path(&mut self, p: Path) {
+        let tilted = p.transform != Rect::IDENTITY;
+        let b = p.mesh.bounds;
+        let origin = [p.origin[0] + b[0], p.origin[1] + b[1]];
+        let size = [b[2] - b[0], b[3] - b[1]];
+        let painted = bounds(origin, size, p.clip, tilted);
+        self.order(1, painted);
+        self.paint[1].push(bounds([origin[0] - 1.0, origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], p.clip, tilted));
+        self.paths.push(p);
+    }
+
     pub fn push_image(&mut self, i: Image) {
         let tilted = i.transform != Rect::IDENTITY;
         let painted = bounds(i.origin, i.size, i.clip, tilted);
-        self.order(1, painted);
-        self.paint[1].push(bounds([i.origin[0] - 1.0, i.origin[1] - 1.0], [i.size[0] + 2.0, i.size[1] + 2.0], i.clip, tilted));
+        self.order(2, painted);
+        self.paint[2].push(bounds([i.origin[0] - 1.0, i.origin[1] - 1.0], [i.size[0] + 2.0, i.size[1] + 2.0], i.clip, tilted));
         self.images.push(i);
     }
 
@@ -382,8 +409,8 @@ impl DrawList {
         let size = [s.size[0] * s.scale, s.size[1] * s.scale];
         let tilted = s.transform != Rect::IDENTITY;
         let painted = bounds(s.origin, size, s.clip, tilted);
-        self.order(2, painted);
-        self.paint[2].push(bounds([s.origin[0] - 1.0, s.origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], s.clip, tilted));
+        self.order(3, painted);
+        self.paint[3].push(bounds([s.origin[0] - 1.0, s.origin[1] - 1.0], [size[0] + 2.0, size[1] + 2.0], s.clip, tilted));
         self.shaders.push(s);
     }
 
@@ -391,8 +418,8 @@ impl DrawList {
     /// covering all of their clip.
     pub fn push_emitter(&mut self, e: Emitter) {
         let painted = bounds([0.0; 2], [0.0; 2], e.params.clip, true);
-        self.order(3, painted);
-        self.paint[3].push(painted);
+        self.order(4, painted);
+        self.paint[4].push(painted);
         self.emitters.push(e);
     }
 
@@ -403,8 +430,8 @@ impl DrawList {
         let origin = [t.origin[0] - slack, t.origin[1] - slack];
         let size = [size[0] + slack * 2.0, size[1] + slack * 2.0];
         let painted = bounds(origin, size, t.clip, false);
-        self.order(4, painted);
-        self.paint[4].push(painted);
+        self.order(5, painted);
+        self.paint[5].push(painted);
         self.texts.push(t);
     }
 
@@ -414,12 +441,12 @@ impl DrawList {
     /// count of anything, is the whole surface; so is a change over more
     /// than half of it, which a whole frame draws as cheaply.
     pub fn damage(&self, before: &DrawList, viewport: [u32; 2]) -> Damage {
-        let counts = |l: &DrawList| [l.rects.len(), l.images.len(), l.shaders.len(), l.emitters.len(), l.texts.len()];
+        let counts = |l: &DrawList| [l.rects.len(), l.paths.len(), l.images.len(), l.shaders.len(), l.emitters.len(), l.texts.len()];
         if counts(self) != counts(before) || self.breaks.len() != before.breaks.len() {
             return Damage::Whole;
         }
         let same_breaks = self.breaks.iter().zip(&before.breaks).all(|(a, b)| {
-            a.rects == b.rects && a.images == b.images && a.shaders == b.shaders && a.emitters == b.emitters && a.texts == b.texts
+            a.rects == b.rects && a.paths == b.paths && a.images == b.images && a.shaders == b.shaders && a.emitters == b.emitters && a.texts == b.texts
         });
         if !same_breaks {
             return Damage::Whole;
@@ -443,24 +470,29 @@ impl DrawList {
                 changed(0, i);
             }
         }
+        for i in 0..self.paths.len() {
+            if !same_path(&self.paths[i], &before.paths[i]) {
+                changed(1, i);
+            }
+        }
         for i in 0..self.images.len() {
             if !same_image(&self.images[i], &before.images[i]) {
-                changed(1, i);
+                changed(2, i);
             }
         }
         for i in 0..self.shaders.len() {
             if !same_shader(&self.shaders[i], &before.shaders[i]) {
-                changed(2, i);
+                changed(3, i);
             }
         }
         for i in 0..self.emitters.len() {
             if !same_emitter(&self.emitters[i], &before.emitters[i]) {
-                changed(3, i);
+                changed(4, i);
             }
         }
         for i in 0..self.texts.len() {
             if !same_text(&self.texts[i], &before.texts[i]) {
-                changed(4, i);
+                changed(5, i);
             }
         }
         let Some(a) = area else { return Damage::None };
@@ -492,28 +524,34 @@ impl DrawList {
                     out.paint[0].push(self.paint[0][i]);
                 }
             }
-            for i in from.images..to.images {
+            for i in from.paths..to.paths {
                 if meets(&self.paint[1][i], &r) {
-                    out.images.push(self.images[i].clone());
+                    out.paths.push(self.paths[i].clone());
                     out.paint[1].push(self.paint[1][i]);
                 }
             }
-            for i in from.shaders..to.shaders {
+            for i in from.images..to.images {
                 if meets(&self.paint[2][i], &r) {
-                    out.shaders.push(self.shaders[i].clone());
+                    out.images.push(self.images[i].clone());
                     out.paint[2].push(self.paint[2][i]);
                 }
             }
-            for i in from.emitters..to.emitters {
+            for i in from.shaders..to.shaders {
                 if meets(&self.paint[3][i], &r) {
-                    out.emitters.push(self.emitters[i].clone());
+                    out.shaders.push(self.shaders[i].clone());
                     out.paint[3].push(self.paint[3][i]);
                 }
             }
-            for i in from.texts..to.texts {
+            for i in from.emitters..to.emitters {
                 if meets(&self.paint[4][i], &r) {
-                    out.texts.push(self.texts[i].clone());
+                    out.emitters.push(self.emitters[i].clone());
                     out.paint[4].push(self.paint[4][i]);
+                }
+            }
+            for i in from.texts..to.texts {
+                if meets(&self.paint[5][i], &r) {
+                    out.texts.push(self.texts[i].clone());
+                    out.paint[5].push(self.paint[5][i]);
                 }
             }
             let mark = out.mark();
@@ -548,13 +586,20 @@ impl DrawList {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for b in &self.breaks {
-            (b.rects, b.images, b.shaders, b.emitters, b.texts).hash(&mut h);
+            (b.rects, b.paths, b.images, b.shaders, b.emitters, b.texts).hash(&mut h);
         }
         for r in &self.rects {
             bytemuck::bytes_of(r).hash(&mut h);
         }
         for f in &self.fields {
             f.key.hash(&mut h);
+        }
+        for p in &self.paths {
+            p.key.hash(&mut h);
+            for v in p.origin.iter().chain(&p.color).chain(&p.clip).chain(&p.fade).chain(p.transform.iter().flatten()) {
+                v.to_bits().hash(&mut h);
+            }
+            p.alpha.to_bits().hash(&mut h);
         }
         for i in &self.images {
             i.key.hash(&mut h);
@@ -613,6 +658,12 @@ impl DrawList {
             r.origin[1] -= dy;
             clip(&mut r.clip);
             r.fade[0] -= dy;
+        }
+        for p in &mut self.paths {
+            p.origin[0] -= dx;
+            p.origin[1] -= dy;
+            clip(&mut p.clip);
+            p.fade[0] -= dy;
         }
         for i in &mut self.images {
             i.origin[0] -= dx;
@@ -675,6 +726,12 @@ impl DrawList {
                 after(&mut r.transform);
             }
         }
+        for p in &mut self.paths {
+            if p.transform != Rect::IDENTITY {
+                before(&mut p.transform);
+                after(&mut p.transform);
+            }
+        }
         for i in &mut self.images {
             if i.transform != Rect::IDENTITY {
                 before(&mut i.transform);
@@ -704,6 +761,7 @@ impl DrawList {
         for b in other.breaks {
             self.breaks.push(Layer {
                 rects: base.rects + b.rects,
+                paths: base.paths + b.paths,
                 images: base.images + b.images,
                 shaders: base.shaders + b.shaders,
                 emitters: base.emitters + b.emitters,
@@ -722,6 +780,7 @@ impl DrawList {
             }
             r
         }));
+        self.paths.extend(other.paths);
         self.images.extend(other.images);
         self.shaders.extend(other.shaders);
         self.emitters.extend(other.emitters);
@@ -910,6 +969,7 @@ mod tests {
         for (name, source) in [
             ("rect", crate::rect::SHADER),
             ("image", crate::image::SHADER),
+            ("path", crate::path::SHADER),
             ("particles", &crate::particles::draw_source()),
             ("particles step", &crate::particles::step_source()),
             ("shader agents", &crate::shader::agents_source()),

@@ -8,6 +8,17 @@ changes what a shell sees.
 
 ## Unreleased
 
+### Changed
+
+- `path` nodes are drawn on the GPU: the outline is tessellated once
+  (lyon), a stroke turned into the outline it covers (joins, caps,
+  dashes), and the mesh kept by what shapes it, so a colour, an alpha or
+  a move redraws without rasterising. Edges are antialiased across one
+  pixel; a stroke thinner than a pixel is drawn a pixel wide and that
+  much fainter. A path's corner sits on a whole pixel as an image's
+  does. Measured against the rasterised paths: the same coverage within
+  half a percent on fills.
+
 ### Added
 
 - `@genoma/accounts`: AccountsService. `me` (uid, login, name, a

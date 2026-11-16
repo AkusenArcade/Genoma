@@ -13,6 +13,7 @@ mod glyphs;
 mod icons;
 mod images;
 mod schema;
+mod vector;
 
 use std::{
     sync::Arc,
@@ -5019,33 +5020,50 @@ fn collect_node(
         Kind::Path => {
             let w = (layout.size.width * scale).round() as u32;
             let h = (layout.size.height * scale).round() as u32;
+            // A shape another is combined with is met by its outline as a
+            // distance field, made from the rasterised path.
             if w > 0
                 && h > 0
+                && out.distance.wants(n.id.as_deref())
                 && let Some(svg) = path_svg(n, [layout.size.width, layout.size.height], [w, h])
                 && let Some((key, data)) = out.icons.vector(&svg, w, h)
             {
-                if out.distance.wants(n.id.as_deref()) {
-                    let id = n.id.clone().unwrap_or_default();
-                    let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
-                    out.distance.place(&id, key, &data, w, h, corner, OUTLINE_SPREAD * scale);
+                let id = n.id.clone().unwrap_or_default();
+                let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
+                out.distance.place(&id, key, &data, w, h, corner, OUTLINE_SPREAD * scale);
+            }
+            // On the GPU, inside its own box as the outline's units say, its
+            // corner on a whole pixel: an icon's straight lines stay on the
+            // pixel grid it was drawn for.
+            let corner = [(origin[0] * scale).round(), (origin[1] * scale).round()];
+            let own = [corner[0], corner[1], corner[0] + layout.size.width * scale, corner[1] + layout.size.height * scale];
+            let clip = [out.clip[0].max(own[0]), out.clip[1].max(own[1]), out.clip[2].min(own[2]), out.clip[3].min(own[3])];
+            let shape = vector::Shape {
+                outline: n.outline.as_deref(),
+                points: &n.points,
+                even_odd: n.even_odd,
+                stroke: n.stroke,
+                join: n.join,
+                cap: n.cap,
+                dash: n.dash,
+            };
+            let parts = [(vector::Part::Fill, n.fill), (vector::Part::Stroke, n.color)];
+            for (part, color) in parts {
+                if color[3] <= 0.0 || matches!(part, vector::Part::Stroke) && n.stroke.is_none_or(|s| s <= 0.0) {
+                    continue;
                 }
-                out.list.push_image(genoma_render::Image {
-                    key,
-                    pixels: data,
-                    width: w,
-                    height: h,
-                    origin: [(origin[0] * scale).round(), (origin[1] * scale).round()],
-                    size: [w as f32, h as f32],
-                    uv: [0.0, 0.0, 1.0, 1.0],
-                    radius: 0.0,
-                    alpha,
-                    clip: out.clip,
-                    fade: out.fade_of(),
-                    transform: out.transform,
-                    filter: genoma_render::Image::NO_FILTER,
-                    mask: None,
-                    blend: 0,
-                });
+                if let Some((key, mesh, faint)) = out.icons.meshes.get(&shape, part, scale) {
+                    out.list.push_path(genoma_render::Path {
+                        key,
+                        mesh,
+                        origin: corner,
+                        color,
+                        alpha: alpha * faint,
+                        clip,
+                        fade: out.fade_of(),
+                        transform: out.transform,
+                    });
+                }
             }
         }
         Kind::Box => {}

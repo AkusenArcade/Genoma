@@ -18,6 +18,8 @@ pub struct Icons {
     /// Paths drawn, by their document: kept few, since a path that moves
     /// is a new document every frame.
     vectors: HashMap<u64, Option<Arc<Vec<u8>>>>,
+    /// Path nodes' meshes, drawn on the GPU.
+    pub(crate) meshes: crate::vector::Meshes,
 }
 
 /// The paths kept drawn at most; past it the cache starts again.

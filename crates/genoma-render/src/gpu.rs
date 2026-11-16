@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
-use crate::{Damage, DrawList, Error, Fonts, Layer, SurfaceId, blur, image, particles, raw_handles, rect, shader};
+use crate::{Damage, DrawList, Error, Fonts, Layer, SurfaceId, blur, image, particles, path, raw_handles, rect, shader};
 
 pub(crate) struct Gpu {
     instance: wgpu::Instance,
@@ -11,6 +11,7 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     fonts: Fonts,
     rects: Option<rect::Pipeline>,
+    paths: Option<path::Pipeline>,
     images: Option<image::Pipeline>,
     particles: Option<particles::Pipeline>,
     shaders: Option<shader::Pipeline>,
@@ -117,6 +118,7 @@ impl Gpu {
             queue,
             fonts,
             rects: None,
+            paths: None,
             images: None,
             particles: None,
             shaders: None,
@@ -584,6 +586,8 @@ impl Gpu {
         let [width, height] = size;
         let rects = self.rects.get_or_insert_with(|| rect::Pipeline::new(&self.device, format));
         rects.upload(&self.device, &self.queue, [width as f32, height as f32], &list.rects, &list.fields);
+        let paths = self.paths.get_or_insert_with(|| path::Pipeline::new(&self.device, format));
+        paths.upload(&self.device, &self.queue, [width as f32, height as f32], &list.paths);
         let images = self.images.get_or_insert_with(|| image::Pipeline::new(&self.device, &self.queue, format));
         images.upload(id, &self.device, &self.queue, [width as f32, height as f32], &list.images);
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
@@ -680,6 +684,7 @@ impl Gpu {
         let mut used = 0;
         for (from, to) in &layers {
             rects.draw(&mut pass, from.rects as u32..to.rects as u32);
+            paths.draw(&mut pass, from.paths..to.paths);
             images.draw(&mut pass, from.images..to.images);
             shaders.draw(&mut pass, from.shaders..to.shaders);
             particles.draw(&mut pass, from.emitters..to.emitters, images);
