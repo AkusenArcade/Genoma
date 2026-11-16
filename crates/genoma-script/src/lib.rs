@@ -3231,7 +3231,12 @@ impl Script {
                     let source = kit_source(part).ok_or_else(|| err(format!("no module {kit}")))?;
                     owned_by(module_owner.get(), || lua.load(&source).set_name(kit).eval())?
                 }
-                other if other.starts_with('@') => return Err(err(format!("no module {other}"))),
+                other if other.starts_with("@genoma") => return Err(err(format!("no module {other}"))),
+                other if other.starts_with('@') => {
+                    let path = find_module(&dir, other).map_err(err)?;
+                    let source = std::fs::read_to_string(&path).map_err(|e| err(format!("{}: {e}", path.display())))?;
+                    owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
+                }
                 relative => {
                     if relative.contains("..") {
                         return Err(err(format!("{relative}: modules live inside the interface directory")));
@@ -3261,6 +3266,46 @@ impl Script {
         lua.sandbox(true)?;
         Ok(())
     }
+}
+
+/// Where shared modules are looked for, in order: the interface's own
+/// `modules/` (what `genoma module` installs, pinned in `modules.json`),
+/// then the user's and the system's `genoma/modules` under the XDG data
+/// folders.
+pub fn module_roots(dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![dir.join("modules")];
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
+    roots.push(data_home.join("genoma/modules"));
+    let data_dirs = std::env::var("XDG_DATA_DIRS").ok().filter(|d| !d.is_empty()).unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    roots.extend(data_dirs.split(':').map(PathBuf::from).filter(|p| p.is_absolute()).map(|p| p.join("genoma/modules")));
+    roots
+}
+
+/// A shared module's file: `@name` is `name/init.luau`, `@name/part` is
+/// `name/part.luau` or `name/part/init.luau`, in the first root that has
+/// the module. A module requires its own parts the same way, by its name.
+pub fn find_module(dir: &Path, required: &str) -> Result<PathBuf, String> {
+    let name = required.strip_prefix('@').unwrap_or(required);
+    let (package, part) = name.split_once('/').map_or((name, None), |(p, rest)| (p, Some(rest)));
+    let plain = |s: &str| !s.is_empty() && s.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+    if !plain(package) || package.contains('/') || part.is_some_and(|p| !plain(p)) {
+        return Err(format!("{required}: not a module name"));
+    }
+    for root in module_roots(dir) {
+        let base = root.join(package);
+        if !base.is_dir() {
+            continue;
+        }
+        let candidates = match part {
+            None => vec![base.join("init.luau")],
+            Some(p) => vec![base.join(format!("{p}.luau")), base.join(p).join("init.luau")],
+        };
+        // The first root with the module is the one used, whole: parts of
+        // one version are never mixed with another's.
+        return candidates.into_iter().find(|c| c.is_file()).ok_or_else(|| format!("no module {required} in {}", base.display()));
+    }
+    Err(format!("no module {required}"))
 }
 
 /// Genoma's Luau API as types: what `genoma types` prints after the nodes'
@@ -3998,6 +4043,24 @@ mod tests {
         let root = scene.borrow().root();
         let (scope, node) = Scope::new(|| mount(&scene, &handlers, 0, &t, root));
         Ok((scene, handlers, node?, scope))
+    }
+
+    #[test]
+    fn shared_modules_are_found_by_name() {
+        let dir = std::env::temp_dir().join(format!("genoma-test-modules-{}", std::process::id()));
+        let module = dir.join("modules/widgets");
+        std::fs::create_dir_all(module.join("dial")).unwrap();
+        for f in ["init.luau", "button.luau", "dial/init.luau"] {
+            std::fs::write(module.join(f), "return {}").unwrap();
+        }
+        assert_eq!(find_module(&dir, "@widgets"), Ok(module.join("init.luau")));
+        assert_eq!(find_module(&dir, "@widgets/button"), Ok(module.join("button.luau")));
+        assert_eq!(find_module(&dir, "@widgets/dial"), Ok(module.join("dial/init.luau")));
+        assert!(find_module(&dir, "@widgets/none").unwrap_err().contains("in "), "the module found, the part not");
+        for bad in ["@", "@../x", "@widgets/../../etc", "@widgets//button", "@/abs"] {
+            assert!(find_module(&dir, bad).unwrap_err().contains("not a module name"), "{bad}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

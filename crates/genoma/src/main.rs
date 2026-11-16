@@ -19,6 +19,7 @@ mod new;
 mod snapshot;
 mod docs;
 mod ipc;
+mod modules;
 mod wayland;
 
 use std::{
@@ -75,6 +76,7 @@ fn main() {
         Some("pam") => pam_check(std::env::args().nth(2), std::env::args().nth(3)),
         Some("polkit-test") => polkit_test(),
         Some("ipc") => ipc::call(std::env::args().skip(2).collect()),
+        Some("module") => std::process::exit(modules::run(std::env::args().skip(2).collect())),
         other => run(PathBuf::from(other.unwrap_or("examples/clock")), std::env::args().nth(2)),
     }
 }

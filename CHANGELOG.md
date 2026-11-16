@@ -26,6 +26,10 @@ changes what a shell sees.
   dismissed. A choice asked for while the interface loads waits for the
   service to start. `:screenshot({ interactive })` takes a picture
   through the portal, for compositors without wlr-screencopy.
+- Shared modules: `require("@name")` and `require("@name/part")` look in
+  the interface's `modules/`, then the user's and the system's
+  `genoma/modules`. `genoma module add|install|list|remove` fetches them
+  from git and pins each to a commit in `modules.json`.
 - `@genoma/notifications`: an image a sender gives only as pixels
   (`image-data`) is written as a PNG and given as `image`, so it can be
   drawn; inline replies (`can_reply`, `reply_placeholder`,

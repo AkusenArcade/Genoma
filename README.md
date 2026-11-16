@@ -275,6 +275,15 @@ return g.surface {
   `async.activation_token` wait for their answer as if it came at once,
   and `async.all { … }` waits for several side by side; nothing else stops
   meanwhile. A coroutine underneath; its source is in [`kit/async.luau`](kit/async.luau).
+- **Modules shared between shells:** `require("@name")` loads
+  `name/init.luau` and `require("@name/part")` `name/part.luau` (or
+  `name/part/init.luau`) from the interface's `modules/`, then
+  `$XDG_DATA_HOME/genoma/modules`, then each `$XDG_DATA_DIRS`'
+  `genoma/modules` (where a package installs them); the first that has
+  the module is used whole. A module requires its own parts by its name.
+  `genoma module add <name> <git-url> [rev]` checks one out under
+  `modules/` and pins its commit in `modules.json`, which a shell
+  commits; `genoma module install` brings every module back to its pin.
 - **Keyboard:** a node with `navigate = true` is walked by the keyboard
   once its surface has the keys: Tab and Shift+Tab, or the arrows, move
   the focus among its buttons and sliders, ringed in `focus_color`; a
@@ -365,6 +374,7 @@ Anything else is built from `g.process`, `g.dbus`, `g.socket`, `g.file` and
 | `genoma ipc genoma profile on` | the profiling overlay over every surface: a line each (size, frames a second, time on the main thread and on the GPU, the wait for a buffer over 1 ms, how much the last frame drew again), the textures kept and their memory, and an outline round what was drawn again; `… profile off`. `GENOMA_OVERLAY=1` starts with it on, `GENOMA_PROFILE=1` logs where the time in Luau goes |
 | `genoma pam <service> [dir]` | one PAM authentication, from the terminal |
 | `genoma polkit-test` | the polkit agent against one process of its own |
+| `genoma module add <name> <git-url> [rev]` | a shared module from git, at a tag, branch or commit, under `modules/`; its commit pinned in `modules.json` and its alias added to `.luaurc`. `install` brings every module to its pin, `list` shows each and whether it is at it, `remove <name>`; `--dir` for an interface other than the current directory |
 
 Environment: `GENOMA_OUTPUT` picks the output for a test run,
 `GENOMA_IPC` names the IPC socket, and `GENOMA_LOG=info,genoma=debug` logs
