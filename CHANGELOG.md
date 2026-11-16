@@ -26,6 +26,10 @@ changes what a shell sees.
   dismissed. A choice asked for while the interface loads waits for the
   service to start. `:screenshot({ interactive })` takes a picture
   through the portal, for compositors without wlr-screencopy.
+- `@genoma/kit/record`: screen recording through wl-screenrec, else
+  wf-recorder, for an output or a logical area; `start`, `stop`
+  (SIGINT, so the file is finished), `recording()`, `elapsed()`, and
+  `on_end` with the path or why it failed.
 - Shared modules: `require("@name")` and `require("@name/part")` look in
   the interface's `modules/`, then the user's and the system's
   `genoma/modules`. `genoma module add|install|list|remove` fetches them

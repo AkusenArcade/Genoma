@@ -275,6 +275,11 @@ return g.surface {
   `async.activation_token` wait for their answer as if it came at once,
   and `async.all { … }` waits for several side by side; nothing else stops
   meanwhile. A coroutine underneath; its source is in [`kit/async.luau`](kit/async.luau).
+- **Screen recording:** `require("@genoma/kit/record")` runs
+  wl-screenrec (else wf-recorder) for an output or a logical area:
+  `record.start { path, output | area, fps, audio, cursor, on_end }`,
+  `record.recording()`, `record.elapsed()` in seconds, `record.stop()`,
+  which lets the recorder finish the file. Genoma encodes nothing itself.
 - **Modules shared between shells:** `require("@name")` loads
   `name/init.luau` and `require("@name/part")` `name/part.luau` (or
   `name/part/init.luau`) from the interface's `modules/`, then
