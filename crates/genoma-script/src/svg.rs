@@ -17,7 +17,7 @@ use std::{
 };
 
 use genoma_scene::{resvg, usvg};
-use mlua::{Lua, Table, Value as LuaValue};
+use mlua::{FromLua, Lua, Table, Value as LuaValue};
 
 /// The colour `currentColor` is read as, to be found again.
 const CURRENT: (u8, u8, u8) = (0xfe, 0x01, 0xfd);
@@ -527,10 +527,25 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
     }
     let tree = usvg::Tree::from_str(&marked, &options).map_err(|e| mlua::Error::runtime(format!("g.svg: {e}")))?;
     let size = [tree.size().width(), tree.size().height()];
-    let width: f32 = t.get::<Option<f32>>("width")?.unwrap_or(size[0]);
-    let height: f32 = t.get::<Option<f32>>("height")?.unwrap_or(size[1]);
+    // A side is a number or a binding; a binding is read once, untracked,
+    // for what is drawn at a fixed resolution, and followed by the fit.
+    let side = |key: &str, own: f32| -> mlua::Result<(f32, LuaValue)> {
+        let v: LuaValue = t.get(key)?;
+        let n = match &v {
+            LuaValue::Nil => return Ok((own, LuaValue::Number(own as f64))),
+            LuaValue::Function(f) => genoma_core::reactive::untracked(|| f.call::<f32>(()))?,
+            other => f32::from_lua(other.clone(), lua)?,
+        };
+        Ok((n, v))
+    };
+    let (width, width_value) = side("width", size[0])?;
+    let (height, height_value) = side("height", size[1])?;
     // Fitted, centred, the aspect kept, as preserveAspectRatio's default.
-    let k = (width / size[0].max(1e-6)).min(height / size[1].max(1e-6));
+    let fitted = move |width: f32, height: f32| -> [f32; 6] {
+        let k = (width / size[0].max(1e-6)).min(height / size[1].max(1e-6));
+        [k, 0.0, 0.0, k, (width - size[0] * k) * 0.5, (height - size[1] * k) * 0.5]
+    };
+    let k = fitted(width, height)[0];
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -552,10 +567,22 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
         drawn: std::cell::Cell::new(0),
     };
     let canvas = build.group(tree.root(), Mode::Paint)?;
-    let fit = [k, 0.0, 0.0, k, (width - size[0] * k) * 0.5, (height - size[1] * k) * 0.5];
     let inner = layer(lua, "box", "", size)?;
-    if fit != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
-        inner.set("affine", fit.to_vec())?;
+    if width_value.is_function() || height_value.is_function() {
+        let (w, h) = (width_value.clone(), height_value.clone());
+        let read = |v: &LuaValue, lua: &Lua| -> mlua::Result<f32> {
+            match v {
+                LuaValue::Function(f) => f.call(()),
+                other => f32::from_lua(other.clone(), lua),
+            }
+        };
+        let affine = lua.create_function(move |lua, ()| Ok(fitted(read(&w, lua)?, read(&h, lua)?).to_vec()))?;
+        inner.set("affine", affine)?;
+    } else {
+        let fit = fitted(width, height);
+        if fit != [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] {
+            inner.set("affine", fit.to_vec())?;
+        }
     }
     inner.set(1, canvas)?;
     // The root: the caller's keys, but those that made the document.
@@ -570,8 +597,8 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
         root.set(k, v)?;
     }
     root.set("__kind", "box")?;
-    root.set("width", width)?;
-    root.set("height", height)?;
+    root.set("width", width_value)?;
+    root.set("height", height_value)?;
     root.set(root.raw_len() + 1, inner)?;
     Ok(root)
 }
@@ -643,6 +670,23 @@ mod tests {
         // A colour of the document's own keeps it.
         let dot = find(&root, "dot").expect("dot");
         assert!(dot.get::<LuaValue>("fill_paint").unwrap().is_nil());
+    }
+
+    #[test]
+    fn a_side_given_as_a_binding_is_followed_by_the_fit() {
+        let lua = Lua::new();
+        let t: Table = lua
+            .load(format!("side = 24 return {{ source = [==[{DOC}]==], width = function() return side end, height = 48 }}"))
+            .eval()
+            .unwrap();
+        let root = svg(&lua, t, Path::new(".")).unwrap();
+        assert!(root.get::<LuaValue>("width").unwrap().is_function(), "the root's width stays the binding");
+        let inner: Table = root.get(1).unwrap();
+        let affine: mlua::Function = inner.get("affine").unwrap();
+        // 24 × 24 into 24 × 48: as it is, centred down.
+        assert_eq!(affine.call::<Vec<f32>>(()).unwrap(), vec![1.0, 0.0, 0.0, 1.0, 0.0, 12.0]);
+        lua.globals().set("side", 48).unwrap();
+        assert_eq!(affine.call::<Vec<f32>>(()).unwrap(), vec![2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     }
 
     #[test]

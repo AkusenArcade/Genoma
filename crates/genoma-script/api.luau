@@ -257,7 +257,7 @@ export type G = {
     path: (t: Node) -> Node,
     -- An SVG document as nodes: `src` (a file, relative to the interface)
     -- or `source` (the text), fitted into `width` × `height` (its own size
-    -- by default) with its aspect kept; `color` is what currentColor
+    -- by default; numbers or bindings) with its aspect kept; `color` is what currentColor
     -- becomes (a value or a binding), or with `gradient_top` and
     -- `gradient_bottom` the 165° gradient `g.icon` paints, across the whole
     -- document; `parts` gives the elements with those ids props of their

@@ -14,6 +14,8 @@ changes what a shell sees.
   currentColor becomes `g.icon`'s 165° gradient across the whole
   document, so an icon drawn by parts looks as the same file drawn by
   `g.icon`.
+- `g.svg`'s `width` and `height` may be bindings: the document is fitted
+  again as they change.
 
 ## 0.1.16 — 2026-11-16
 
