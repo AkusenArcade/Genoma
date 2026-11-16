@@ -367,6 +367,7 @@ mod tests {
             ("ToplevelsRef", "Toplevels"),
             ("DisplaysRef", "Displays"),
             ("GammaRef", "Gamma"),
+            ("CaptureRef", "Capture"),
             ("IdleRef", "Idle"),
             ("LockRef", "Lock"),
             ("TrayRef", "Tray"),

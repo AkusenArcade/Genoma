@@ -15,6 +15,7 @@ pub mod audio;
 pub mod bluetooth;
 pub mod brightness;
 pub mod bus;
+pub mod capture;
 pub mod clipboard;
 pub mod clock;
 pub mod compositor;

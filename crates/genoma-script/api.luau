@@ -892,6 +892,25 @@ export type Drives = {
     include_loops: (self: Drives, on: boolean) -> (),
 }
 
+-- @genoma/capture: screenshots through wlr-screencopy, taken on the
+-- compositor's side and written apart from the loop. Areas are in the
+-- compositor's logical coordinates, the space outputs are laid out in.
+export type Capture = {
+    -- Whether the compositor offers wlr-screencopy.
+    read available: boolean,
+    -- A PNG at `path` ("~/" and "$NAME" expanded, its folder made): every
+    -- output as laid out, one `output` by name, or a logical `area` across
+    -- outputs, at the finest scale among them; what no output covers is
+    -- transparent. The callback gets the path, or nil and why.
+    screenshot: (
+        self: Capture,
+        options: { path: string, output: string?, area: { x: number, y: number, w: number, h: number }?, cursor: boolean? },
+        on_taken: (path: string?, error: string?) -> ()
+    ) -> (),
+    -- The colour on screen at a logical point, "#rrggbb": a colour picker.
+    colour: (self: Capture, x: number, y: number, on_taken: (hex: string?, error: string?) -> ()) -> (),
+}
+
 -- @genoma/portal: xdg-desktop-portal, what the desktop asks of every
 -- application, followed as it changes.
 export type Portal = {
@@ -909,6 +928,12 @@ export type Portal = {
     open_file: (self: Portal, options: ChooserOptions?, on_chosen: (paths: { string }?, error: string?) -> ()) -> (),
     -- `name` is the name it proposes; `multiple` and `folders` do not apply.
     save_file: (self: Portal, options: ChooserOptions?, on_chosen: (path: string?, error: string?) -> ()) -> (),
+    -- A picture of the screen, saved by the desktop where it keeps them;
+    -- `interactive` lets the person choose what. For a compositor without
+    -- wlr-screencopy (@genoma/capture); nil when it was dismissed. A
+    -- backend that fails without answering leaves the callback uncalled:
+    -- xdg-desktop-portal-gnome on niri with more than one output does.
+    screenshot: (self: Portal, options: { interactive: boolean? }?, on_taken: (path: string?, error: string?) -> ()) -> (),
 }
 
 export type ChooserOptions = {

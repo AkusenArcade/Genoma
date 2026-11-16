@@ -426,6 +426,8 @@ pub struct App {
     dm: Option<displays::Dm>,
     /// `@genoma/gamma` through wlr-gamma-control.
     gm: Option<gamma::Gm>,
+    /// `@genoma/capture` through wlr-screencopy.
+    cm: Option<capture::Cm>,
     /// `ext-idle-notify`, bound once an interface requires `@genoma/idle`;
     /// the service it sets, and the notification asked for with its seconds.
     idle_notifier: Option<ExtIdleNotifierV1>,
@@ -536,6 +538,7 @@ impl App {
             wm: None,
             dm: None,
             gm: None,
+            cm: None,
             idle_notifier: None,
             idle: None,
             idle_notifications: std::collections::HashMap::new(),
@@ -3615,6 +3618,7 @@ impl ProvidesRegistryState for App {
 
 delegate_registry!(App);
 
+mod capture;
 mod displays;
 mod gamma;
 mod gesture;

@@ -24,7 +24,15 @@ changes what a shell sees.
   folders, filters by pattern or MIME type, starting folder, proposed
   name): the callback gets the paths, or nil when the dialog was
   dismissed. A choice asked for while the interface loads waits for the
-  service to start.
+  service to start. `:screenshot({ interactive })` takes a picture
+  through the portal, for compositors without wlr-screencopy.
+- `@genoma/capture`: screenshots through wlr-screencopy, without `grim`.
+  `:screenshot({ path, output | area, cursor }, on_taken)` writes a PNG
+  of every output, one output, or a logical area across outputs (joined
+  at the finest scale among them, uncovered space transparent, output
+  transforms undone); `:colour(x, y, on_taken)` reads the colour at a
+  logical point. Frames are copied on the loop, encoded on a thread of
+  their own.
 
 ## 0.1.15 — 2026-11-13
 

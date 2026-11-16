@@ -51,6 +51,7 @@ use genoma_services::{
     power::Power,
     toplevels::Toplevels,
     displays::{Change, Displays, Head},
+    capture::{Area, Capture, Keep, Of, Shot},
     gamma::{Gamma, Held, Setting},
     tray::{MenuEntry, Tray},
     vitals::Vitals,
@@ -412,6 +413,8 @@ pub struct Services {
     pub displays: Rc<Displays>,
     /// wlr-gamma-control: colour temperature and brightness.
     pub gamma: Rc<Gamma>,
+    /// wlr-screencopy: screenshots and the colour under a point.
+    pub capture: Rc<Capture>,
     pub idle: Rc<Idle>,
     pub lock: Rc<Lock>,
     pub tray: Rc<Tray>,
@@ -1351,6 +1354,17 @@ impl UserData for PortalRef {
             this.0.choose(ask, move |chosen| portal_answer(&f, chosen.map(|paths| paths.map(LuaChosen::Many))));
             Ok(())
         });
+        // portal:screenshot({ interactive }, function(path, error) end): a
+        // picture of the screen through the desktop's portal, for a
+        // compositor without wlr-screencopy.
+        methods.add_method("screenshot", |_, this, (t, f): (Option<Table>, Function)| {
+            let interactive = match t {
+                Some(t) => t.get::<Option<bool>>("interactive")?.unwrap_or(false),
+                None => false,
+            };
+            this.0.screenshot(interactive, move |chosen| portal_answer(&f, chosen.map(|paths| paths.and_then(|p| p.into_iter().next()).map(LuaChosen::One))));
+            Ok(())
+        });
         // portal:save_file({ title, accept, name, folder, filters },
         // function(path, error) end).
         methods.add_method("save_file", |_, this, (t, f): (Option<Table>, Function)| {
@@ -1669,6 +1683,57 @@ impl UserData for DisplaysRef {
         methods.add_method("apply", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, false).map_err(err));
         // displays:test(changes) → id: only asks whether it would work.
         methods.add_method("test", |_, this, changes: Table| this.0.configure(changes_arg(changes)?, true).map_err(err));
+    }
+}
+
+struct CaptureRef(Rc<Capture>);
+
+/// Hands a capture's answer to its Luau callback, unless the load that
+/// asked has been replaced since.
+fn capture_answer(f: &Function, taken: Result<String, String>) {
+    if f.weak_lua().try_upgrade().is_none() {
+        return;
+    }
+    let (value, error) = match taken {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
+    };
+    if let Err(e) = f.call::<()>((value, error)) {
+        log::error!("capture callback: {e}");
+    }
+}
+
+impl UserData for CaptureRef {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // Whether the compositor offers wlr-screencopy.
+        fields.add_field_method_get("available", |_, this| Ok(this.0.available.get()));
+    }
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // capture:screenshot({ path, output, area = { x, y, w, h }, cursor },
+        // function(path, error) end): a PNG of every output, of one, or of a
+        // logical area across them.
+        methods.add_method("screenshot", |_, this, (t, f): (Table, Function)| {
+            let path: String = t.get::<Option<String>>("path")?.ok_or_else(|| err("capture:screenshot needs path"))?;
+            let output: Option<String> = t.get("output")?;
+            let area: Option<Table> = t.get("area")?;
+            let of = match (output, area) {
+                (Some(_), Some(_)) => return Err(err("capture:screenshot takes output or area, not both")),
+                (Some(name), None) => Of::Output(name),
+                (None, Some(a)) => Of::Area(Area { x: a.get("x")?, y: a.get("y")?, w: a.get("w")?, h: a.get("h")? }),
+                (None, None) => Of::Everything,
+            };
+            let cursor = t.get::<Option<bool>>("cursor")?.unwrap_or(false);
+            this.0.take(Shot { of, keep: Keep::File(io::expand(&path)), cursor }, move |taken| capture_answer(&f, taken));
+            Ok(())
+        });
+        // capture:colour(x, y, function(hex, error) end): the colour on
+        // screen at a logical point, "#rrggbb".
+        methods.add_method("colour", |_, this, (x, y, f): (f64, f64, Function)| {
+            let shot = Shot { of: Of::Area(Area { x, y, w: 1.0, h: 1.0 }), keep: Keep::Colour, cursor: false };
+            this.0.take(shot, move |taken| capture_answer(&f, taken));
+            Ok(())
+        });
     }
 }
 
@@ -3018,7 +3083,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" | "@genoma/portal" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/capture" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" | "@genoma/portal" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -3032,6 +3097,7 @@ impl Script {
                         "toplevels" => "toplevels",
                         "displays" => "displays",
                         "gamma" => "gamma",
+                        "capture" => "capture",
                         "idle" => "idle",
                         "lock" => "lock",
                         "tray" => "tray",
@@ -3068,6 +3134,7 @@ impl Script {
                         "toplevels" => lua.create_userdata(ToplevelsRef(services.toplevels.clone()))?,
                         "displays" => lua.create_userdata(DisplaysRef(services.displays.clone()))?,
                         "gamma" => lua.create_userdata(GammaRef(services.gamma.clone()))?,
+                        "capture" => lua.create_userdata(CaptureRef(services.capture.clone()))?,
                         "idle" => lua.create_userdata(IdleRef(services.idle.clone()))?,
                         "lock" => lua.create_userdata(LockRef(services.lock.clone()))?,
                         "tray" => lua.create_userdata(TrayRef(services.tray.clone()))?,
@@ -3151,6 +3218,7 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("toplevels", "Toplevels"),
     ("displays", "Displays"),
     ("gamma", "Gamma"),
+    ("capture", "Capture"),
     ("idle", "Idle"),
     ("lock", "Lock"),
     ("tray", "Tray"),

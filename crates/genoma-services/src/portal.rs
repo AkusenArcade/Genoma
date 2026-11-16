@@ -28,6 +28,7 @@ const PATH: &str = "/org/freedesktop/portal/desktop";
 const SETTINGS: &str = "org.freedesktop.portal.Settings";
 const APPEARANCE: &str = "org.freedesktop.appearance";
 const CHOOSER: &str = "org.freedesktop.portal.FileChooser";
+const SCREENSHOT: &str = "org.freedesktop.portal.Screenshot";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 
 /// What the desktop prefers, as the portal says it.
@@ -75,6 +76,13 @@ pub struct Ask {
     pub name: Option<String>,
 }
 
+/// A request to the portal that answers with files.
+enum Asked {
+    File(Ask),
+    /// A picture of the screen; interactive lets the person pick what.
+    Screenshot(bool),
+}
+
 /// The paths chosen, none when the dialog was dismissed, or why it failed.
 pub type Chosen = Result<Option<Vec<String>>, String>;
 
@@ -95,7 +103,7 @@ pub struct Portal {
     waiting: RefCell<HashMap<u64, Waiting>>,
     /// Asked for before the service started (during the load that
     /// required it), made once it does.
-    queued: RefCell<Vec<(u64, Ask)>>,
+    queued: RefCell<Vec<(u64, Asked)>>,
     next: Cell<u64>,
 }
 
@@ -169,10 +177,10 @@ fn options(ask: &Ask, token: &str) -> HashMap<&'static str, Value<'static>> {
     o
 }
 
-fn ask_portal(bus: &Bus, post: Sender<Update>, id: u64, ask: Ask) {
+fn ask_portal(bus: &Bus, post: Sender<Update>, id: u64, ask: Asked) {
     // Unique among this connection's requests.
     let token = format!("genoma{id}");
-    bus.spawn("portal file chooser", async move {
+    bus.spawn("portal request", async move {
         let chosen = choose(ask, token).await.unwrap_or_else(|e| Err(e.to_string()));
         let _ = post.send(Update::Chosen(id, chosen));
         Ok(())
@@ -180,16 +188,27 @@ fn ask_portal(bus: &Bus, post: Sender<Update>, id: u64, ask: Ask) {
 }
 
 /// Asks the portal and waits for the answer.
-async fn choose(ask: Ask, token: String) -> zbus::Result<Chosen> {
+async fn choose(ask: Asked, token: String) -> zbus::Result<Chosen> {
     let conn = bus::session().await?;
     let sender = conn.unique_name().map(|n| n.trim_start_matches(':').replace('.', "_")).unwrap_or_default();
     let expected = format!("{PATH}/request/{sender}/{token}");
     // Subscribed before the call, so a quick answer is not missed.
     let request = zbus::Proxy::new(&conn, PORTAL, expected.clone(), REQUEST).await?;
     let mut responses = request.receive_signal("Response").await?;
-    let chooser = zbus::Proxy::new(&conn, PORTAL, PATH, CHOOSER).await?;
-    let method = if ask.save { "SaveFile" } else { "OpenFile" };
-    let handle: OwnedObjectPath = match chooser.call(method, &("", ask.title.as_str(), options(&ask, &token))).await {
+    let call = match &ask {
+        Asked::File(ask) => {
+            let chooser = zbus::Proxy::new(&conn, PORTAL, PATH, CHOOSER).await?;
+            let method = if ask.save { "SaveFile" } else { "OpenFile" };
+            chooser.call(method, &("", ask.title.as_str(), options(ask, &token))).await
+        }
+        Asked::Screenshot(interactive) => {
+            let screenshot = zbus::Proxy::new(&conn, PORTAL, PATH, SCREENSHOT).await?;
+            let options: HashMap<&str, Value<'_>> =
+                HashMap::from([("handle_token", Value::from(token.as_str())), ("interactive", Value::from(*interactive)), ("modal", Value::from(false))]);
+            screenshot.call("Screenshot", &("", options)).await
+        }
+    };
+    let handle: OwnedObjectPath = match call {
         Ok(handle) => handle,
         Err(e) => return Ok(Err(e.to_string())),
     };
@@ -202,9 +221,13 @@ async fn choose(ask: Ask, token: String) -> zbus::Result<Chosen> {
     let Some(message) = message else { return Ok(Err("the portal went away".into())) };
     let (code, results): (u32, HashMap<String, OwnedVariant>) = message.body().deserialize()?;
     Ok(match code {
-        0 => Ok(Some(
-            results.get("uris").and_then(|v| Vec::<String>::try_from(v.clone()).ok()).unwrap_or_default().iter().map(|u| path_of(u)).collect(),
-        )),
+        0 => Ok(Some(match ask {
+            Asked::File(_) => results.get("uris").and_then(|v| Vec::<String>::try_from(v.clone()).ok()).unwrap_or_default(),
+            Asked::Screenshot(_) => results.get("uri").and_then(|v| String::try_from(v.clone()).ok()).into_iter().collect(),
+        }
+        .iter()
+        .map(|u| path_of(u))
+        .collect())),
         // 1 cancelled, 2 ended some other way (its window closed): both
         // are no choice, not a failure.
         _ => Ok(None),
@@ -259,6 +282,17 @@ impl Portal {
     /// Opens the desktop's file chooser; `done` gets the answer, on the
     /// main loop, once the dialog closes.
     pub fn choose(&self, ask: Ask, done: impl FnOnce(Chosen) + 'static) {
+        self.ask(Asked::File(ask), done);
+    }
+
+    /// A picture of the screen through the portal, which saves it where
+    /// the desktop keeps screenshots; `interactive` lets the person choose
+    /// what. `done` gets its path.
+    pub fn screenshot(&self, interactive: bool, done: impl FnOnce(Chosen) + 'static) {
+        self.ask(Asked::Screenshot(interactive), done);
+    }
+
+    fn ask(&self, ask: Asked, done: impl FnOnce(Chosen) + 'static) {
         let id = self.next.get();
         self.next.set(id + 1);
         self.waiting.borrow_mut().insert(id, Box::new(done));
