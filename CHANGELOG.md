@@ -41,8 +41,11 @@ changes what a shell sees.
   `currentColor` follows `color`. Clip paths and masks (alpha and
   luminance) become mask children, a group's opacity is laid on it as
   one picture (`isolate`); patterns and embedded images are drawn by
-  resvg into a picture in their place (a little softer than the rest);
-  filters are not drawn yet (said in the log).
+  resvg into a picture in their place, aligned to the pixel grid; a
+  plain Gaussian blur of a group is drawn as `blur_radius`, any other
+  filter by resvg with its group as one picture (said in the log).
+  `examples/svg`: a gauge whose needle follows the processor and whose
+  arc is drawn on as far as the memory in use.
 - `isolate`: a node's opacity laid on its subtree as one picture, so its
   children do not show through each other where they overlap.
 - Nodes: `affine` (a 2D matrix of what a subtree draws), `rotate`

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <defs>
+    <linearGradient id="dial" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a3be8c"/>
+      <stop offset="0.6" stop-color="#ebcb8b"/>
+      <stop offset="1" stop-color="#bf616a"/>
+    </linearGradient>
+  </defs>
+  <path id="track" d="M 20 100 A 60 60 0 0 1 140 100" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="10" stroke-linecap="round"/>
+  <path id="level" d="M 20 100 A 60 60 0 0 1 140 100" fill="none" stroke="url(#dial)" stroke-width="10" stroke-linecap="round"/>
+  <g id="needle">
+    <path d="M 78 100 L 80 46 L 82 100 Z" fill="currentColor"/>
+    <circle cx="80" cy="100" r="7" fill="currentColor"/>
+  </g>
+</svg>

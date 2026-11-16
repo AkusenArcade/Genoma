@@ -57,6 +57,41 @@ enum Mode {
     Luminance,
 }
 
+/// `colour` ("#rgb", "#rrggbb" or "#rrggbbaa") with its alpha multiplied by
+/// `alpha`; anything else as it is.
+fn faded(colour: &str, alpha: f32) -> String {
+    let Some(hex) = colour.strip_prefix('#').filter(|h| h.chars().all(|c| c.is_ascii_hexdigit())) else { return colour.to_owned() };
+    let full: String = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).chain("ff".chars()).collect(),
+        6 => format!("{hex}ff"),
+        8 => hex.to_owned(),
+        _ => return colour.to_owned(),
+    };
+    let Ok(a) = u8::from_str_radix(&full[6..8], 16) else { return colour.to_owned() };
+    format!("#{}{:02x}", &full[..6], (a as f32 * alpha.clamp(0.0, 1.0)).round() as u8)
+}
+
+/// The node's colour for currentColor, at `alpha`: a value faded, or a
+/// binding that fades what it returns.
+fn current_at(lua: &Lua, current: &LuaValue, alpha: f32) -> mlua::Result<LuaValue> {
+    if alpha >= 1.0 {
+        return Ok(current.clone());
+    }
+    Ok(match current {
+        LuaValue::String(s) => LuaValue::String(lua.create_string(faded(&s.to_str()?, alpha))?),
+        LuaValue::Function(f) => {
+            let f = f.clone();
+            LuaValue::Function(lua.create_function(move |lua, ()| {
+                Ok(match f.call::<LuaValue>(())? {
+                    LuaValue::String(s) => LuaValue::String(lua.create_string(faded(&s.to_str()?, alpha))?),
+                    other => other,
+                })
+            })?)
+        }
+        other => other.clone(),
+    })
+}
+
 fn luminance(c: usvg::Color, alpha: f32) -> String {
     let l = (0.2125 * c.red as f32 + 0.7154 * c.green as f32 + 0.0721 * c.blue as f32) / 255.0;
     hex(usvg::Color::white(), l * alpha)
@@ -93,7 +128,9 @@ fn paint(lua: &Lua, node: &Table, which: &str, paint: &usvg::Paint, opacity: f32
         node.set(colour_key, "#00000000")
     };
     match paint {
-        usvg::Paint::Color(c) if (c.red, c.green, c.blue) == CURRENT && !current.is_nil() && mode == Mode::Paint => node.set(colour_key, current.clone()),
+        usvg::Paint::Color(c) if (c.red, c.green, c.blue) == CURRENT && !current.is_nil() && mode == Mode::Paint => {
+            node.set(colour_key, current_at(lua, current, opacity)?)
+        }
         usvg::Paint::Color(c) => node.set(colour_key, colour(*c, opacity)),
         usvg::Paint::LinearGradient(l) => gradient(1.0, l, [l.x1(), l.y1(), l.x2(), l.y2(), 0.0, 0.0]),
         usvg::Paint::RadialGradient(r) => gradient(2.0, r, [r.cx(), r.cy(), r.r().get(), r.fx(), r.fy(), r.fr().get()]),
@@ -146,9 +183,29 @@ struct Build<'a> {
     warned: std::cell::Cell<bool>,
     /// Pixels a document unit for what resvg draws in Genoma's place.
     resolution: f32,
+    /// Logical units a document unit, as the document is fitted.
+    fit: f32,
     /// The document's, naming the pictures resvg draws.
     key: u64,
     drawn: std::cell::Cell<u32>,
+}
+
+/// A filter Genoma draws itself: one Gaussian blur of the group as it is,
+/// the same both ways — its standard deviation, in the group's units.
+fn plain_blur(g: &usvg::Group) -> Option<f32> {
+    let [filter] = g.filters() else { return None };
+    let [primitive] = filter.primitives() else { return None };
+    match primitive.kind() {
+        usvg::filter::Kind::GaussianBlur(b) if *b.input() == usvg::filter::Input::SourceGraphic && b.std_dev_x() == b.std_dev_y() => {
+            Some(b.std_dev_x().get())
+        }
+        _ => None,
+    }
+}
+
+/// A filter resvg draws in Genoma's place.
+fn other_filter(g: &usvg::Group) -> bool {
+    !g.filters().is_empty() && plain_blur(g).is_none()
 }
 
 fn is_pattern(p: &usvg::Path) -> bool {
@@ -180,12 +237,22 @@ impl Build<'_> {
             // As SVG has it: its children do not show through each other.
             node.set("isolate", true)?;
         }
-        if !g.filters().is_empty() && !self.warned.replace(true) {
-            log::info!("g.svg: filters are not drawn yet; their groups are drawn without them");
+        if let Some(deviation) = plain_blur(g) {
+            // blur_radius is the deviation in logical units: the group's
+            // own scaled by everything above it and by the fit.
+            let t = g.abs_transform();
+            let enlarged = (t.sx * t.sy - t.kx * t.ky).abs().sqrt();
+            node.set("blur_radius", deviation * enlarged * self.fit)?;
         }
         let mut i = 1;
         for child in g.children() {
             let made = match child {
+                usvg::Node::Group(inner) if other_filter(inner) && mode == Mode::Paint => {
+                    if !self.warned.replace(true) {
+                        log::info!("g.svg: a filter other than a plain blur is drawn by resvg, its group as one picture");
+                    }
+                    self.raster(child, g.abs_transform())?
+                }
                 usvg::Node::Group(inner) => Some(self.group(inner, mode)?),
                 usvg::Node::Path(p) if is_pattern(p) && mode == Mode::Paint => self.raster(child, g.abs_transform())?,
                 usvg::Node::Path(p) => self.path(p, mode)?,
@@ -258,13 +325,22 @@ impl Build<'_> {
     /// where it was, in its place among its siblings.
     fn raster(&self, node: &usvg::Node, parent: usvg::Transform) -> mlua::Result<Option<Table>> {
         let Some(bbox) = node.abs_layer_bounding_box() else { return Ok(None) };
+        // A shape's layer box leaves its stroke out: the picture takes both.
+        let stroke = node.abs_stroke_bounding_box();
+        let (left, top) = (bbox.x().min(stroke.x()), bbox.y().min(stroke.y()));
+        let (right, bottom) = (bbox.right().max(stroke.right()), bbox.bottom().max(stroke.bottom()));
         let k = self.resolution;
-        let (w, h) = ((bbox.width() * k).ceil().max(1.0) as u32, (bbox.height() * k).ceil().max(1.0) as u32);
+        // Out to whole pixels of the document as shown: the picture lands
+        // on the pixel grid and halves exactly, with no blur from either.
+        let grid = self.fit.max(1e-3);
+        let (x0, y0) = ((left * grid).floor() / grid, (top * grid).floor() / grid);
+        let (x1, y1) = ((right * grid).ceil() / grid, (bottom * grid).ceil() / grid);
+        let (w, h) = (((x1 - x0) * k).round().max(1.0) as u32, ((y1 - y0) * k).round().max(1.0) as u32);
         let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(w, h) else { return Ok(None) };
         // render_node moves the node by its absolute box's corner but draws
         // it in its own space: the ancestors' transform goes in between.
         let (bx, by) = (bbox.x(), bbox.y());
-        let transform = resvg::tiny_skia::Transform::from_scale(k, k).pre_translate(-bx, -by).pre_concat(parent).pre_translate(bx, by);
+        let transform = resvg::tiny_skia::Transform::from_scale(k, k).pre_translate(-x0, -y0).pre_concat(parent).pre_translate(bx, by);
         resvg::render_node(node, transform, &mut pixmap.as_mut());
         let n = self.drawn.get();
         self.drawn.set(n + 1);
@@ -288,11 +364,13 @@ impl Build<'_> {
         image.set("__kind", "image")?;
         image.set("overlay", true)?;
         image.set("attach", "corner")?;
-        image.set("offset_x", bbox.x())?;
-        image.set("offset_y", bbox.y())?;
-        image.set("width", bbox.width())?;
-        image.set("height", bbox.height())?;
+        image.set("offset_x", x0)?;
+        image.set("offset_y", y0)?;
+        image.set("width", x1 - x0)?;
+        image.set("height", y1 - y0)?;
         image.set("src", file.to_string_lossy().as_ref())?;
+        // Exactly over its box: the picture is the box's shape already.
+        image.set("fit", "fill")?;
         if !node.id().is_empty() {
             image.set("id", node.id())?;
         }
@@ -396,6 +474,7 @@ pub fn svg(lua: &Lua, t: Table, dir: &Path) -> mlua::Result<Table> {
         parts: t.get("parts")?,
         warned: std::cell::Cell::new(false),
         resolution: (k * 2.0).max(1.0),
+        fit: k,
         key,
         drawn: std::cell::Cell::new(0),
     };
@@ -462,6 +541,14 @@ mod tests {
         assert_eq!(dot.get::<f32>("opacity").unwrap(), 0.25, "parts are laid over");
         assert!(dot.get::<String>("d").unwrap().starts_with('M'));
         assert!(hand.get::<bool>("isolate").unwrap(), "group opacity, as SVG has it");
+    }
+
+    #[test]
+    fn current_colour_keeps_its_opacity() {
+        assert_eq!(faded("#ffffff", 0.25), "#ffffff40");
+        assert_eq!(faded("#abc", 1.0), "#aabbccff");
+        assert_eq!(faded("#00000080", 0.5), "#00000040");
+        assert_eq!(faded("red", 0.5), "red");
     }
 
     #[test]

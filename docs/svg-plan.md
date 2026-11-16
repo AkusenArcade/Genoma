@@ -153,3 +153,39 @@ Bioma's icons can move by part where a live value drives them (the Wi-Fi
 arcs by strength, the battery's fill, the volume's waves, a fan by fan
 speed) — a showcase of Genoma as decided on 2026-11-12, each use chosen
 with Akusen and held to Bioma's rule that movement encodes a live value.
+
+## Status (2026-11-16)
+
+All five phases are in, each its own commit:
+
+1. `path` nodes on the GPU — lyon fills, tiny-skia's stroker for strokes
+   (joins, caps, dashes), a one-pixel fringe for antialiasing whose
+   boundary edges are confirmed by probing just outside them (a
+   stroke's inner loops leave T-junctions), meshes kept by what shapes
+   them, tessellated at the size they are seen under an enlarging
+   transform.
+2. Gradients (linear, two-circle radial, conic; pad, repeat, reflect; 8
+   stops) from a storage buffer of paints; `trim_start`/`trim_end`,
+   `dash_offset`, `miter_limit`, `dash_array`; `d` morphs.
+3. `g.svg`: usvg's tree as boxes (`affine`, `opacity`) and paths, ids and
+   `parts`, `currentColor` following `color` (its opacity kept), text as
+   outlines; `rotate` and `pivot_at` on any node.
+4. Clip paths and masks (alpha and luminance) as mask children; group
+   opacity through `isolate`.
+5. A plain Gaussian blur of a group as `blur_radius`; `examples/svg`.
+
+What differs from the plan:
+
+- **Filters other than a plain blur** (drop shadows, colour matrices,
+  chains), **patterns** and **embedded images** are drawn by resvg into a
+  picture laid in their place, aligned to the document's pixel grid, at
+  twice the size shown. They are pictures: their insides are not parts.
+  Native colour-matrix, offset, flood and merge passes were not built;
+  they are worth doing only when a shell needs one to move.
+- **The parity corpus is not run by `cargo test`**: drawing needs a GPU,
+  which the tests do not have. Parity was measured with `genoma snapshot`
+  against resvg (the same document through `g.image`), premultiplied,
+  per region: Bioma's icons within about 2% of the same ink, gradients,
+  groups and dashes within 0.2%, clip, luminance mask and group opacity
+  within 0.2%, a plain blur within 0.3% (the largest difference 6/255).
+  The structure `g.svg` builds is tested without a GPU.
