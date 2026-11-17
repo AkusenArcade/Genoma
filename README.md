@@ -68,6 +68,17 @@ file beside it), [`prompt`](examples/prompt/shell.luau) and
 [`theme`](examples/theme/shell.luau), [`layout`](examples/layout/shell.luau), [`gestures`](examples/gestures/shell.luau), [`components`](examples/components/shell.luau), [`effects`](examples/effects/shell.luau), [`passes`](examples/passes/shell.luau), [`particles`](examples/particles/shell.luau), [`simulations`](examples/simulations/shell.luau), [`morph`](examples/morph/shell.luau), [`blur`](examples/blur/shell.luau),
 [`charts`](examples/charts/shell.luau) and [`inspector`](examples/inspector/shell.luau) show the toolkit itself.
 
+To see most of it at once, [`showcase`](examples/showcase/shell.luau) is a
+presentation of the toolkit drawn by the toolkit: eighteen slides, from
+shapes and gradients to depth, glass, shaders, particles, live charts and
+every service, each with the Luau that draws it (press C). → or a click
+for the next slide, A to play them by themselves, Escape to leave. It
+opens as a window; the compositor's fullscreen gives it the screen.
+
+```sh
+genoma examples/showcase
+```
+
 An interface is a directory with a `shell.luau` that returns one or more
 surfaces:
 

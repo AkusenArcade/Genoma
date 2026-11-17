@@ -8,6 +8,14 @@ changes what a shell sees.
 
 ## Unreleased
 
+### Added
+
+- `examples/showcase`: the toolkit presented by itself, eighteen slides
+  from shapes to services, each with the Luau that draws it (C), playing
+  by itself (A), opening on a START. A window, so the compositor's
+  fullscreen gives it the screen; drawn for 1920 × 1080, scaled to any
+  size.
+
 ### Fixed
 
 - A node turned (`rotate`, `rotate_x`/`rotate_y`, `affine`) inside a
