@@ -5,14 +5,17 @@
 //!
 //!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME] [--wait SECONDS]
 //!                         [--entry FILE] [--mock @genoma/NAME=FILE]…
-//!                         [--ipc "TARGET FUNCTION ARGS…" | --click ID | --sleep SECONDS]…
+//!                         [--ipc "TARGET FUNCTION ARGS…" | --click ID | --wheel "ID DX DY"
+//!                          | --sleep SECONDS]…
 //!
 //! The interface gets one screen of that size and name (1920×1080, "SNAP"
 //! unless told), its services as they are on this machine, and `--wait`
 //! seconds (1 by default) for its timers and animations. After the load, in
 //! the order written, each `--ipc` is a call as `genoma ipc` makes it
 //! (`--ipc "cell toggle clock"`), each `--click` a press and release on the
-//! node of that id, each `--sleep` time going by. A `--mock` gives a module
+//! node of that id, each `--wheel` a touchpad's movement over it (logical
+//! units, down and right positive, as a finger dragged up and left moves a
+//! list), each `--sleep` time going by. A `--mock` gives a module
 //! of the test's own for a service (`--mock @genoma/vitals=busy.luau`, a
 //! table with the readings a cell is to be seen with). Into `--out`
 //! (`snapshot/` by default) go `<n>-<namespace>.png` for each surface
@@ -48,6 +51,7 @@ struct Options {
 enum Step {
     Ipc(Vec<String>),
     Click(String),
+    Wheel(String, f64, f64),
     Sleep(f64),
 }
 
@@ -78,6 +82,13 @@ fn options(args: Vec<String>) -> Result<Options, String> {
             "--entry" => o.entry = Some(value("--entry")?),
             "--ipc" => o.steps.push(Step::Ipc(value("--ipc")?.split_whitespace().map(str::to_owned).collect())),
             "--click" => o.steps.push(Step::Click(value("--click")?)),
+            "--wheel" => {
+                let v = value("--wheel")?;
+                let w: Vec<&str> = v.split_whitespace().collect();
+                let number = |s: &str| s.parse::<f64>().map_err(|_| "--wheel is \"ID DX DY\"".to_owned());
+                let [id, dx, dy] = w.as_slice() else { return Err("--wheel is \"ID DX DY\"".into()) };
+                o.steps.push(Step::Wheel((*id).to_owned(), number(dx)?, number(dy)?));
+            }
             "--sleep" => o.steps.push(Step::Sleep(value("--sleep")?.parse().map_err(|_| "--sleep: seconds")?)),
             "--mock" => {
                 let v = value("--mock")?;
@@ -200,13 +211,16 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
                 log::info!("ipc {target} {function}: {said}");
             }
             Step::Click(id) => {
-                let found = targets.iter().enumerate().find_map(|(t, (_, _, scene, _))| scene.borrow().find(id).map(|n| (t, n)));
-                let (t, node) = found.ok_or_else(|| format!("--click {id}: no node with that id is shown"))?;
+                let (t, node) = shown(&targets, id).ok_or_else(|| format!("--click {id}: no node with that id is shown"))?;
                 let [_, _, w, h] = targets[t].2.borrow().extent(node).unwrap_or([0.0; 4]);
                 let (x, y) = (w / 2.0, h / 2.0);
                 for input in [genoma_script::Input::Press(0x110, x, y), genoma_script::Input::Release(0x110, x, y), genoma_script::Input::Click(0x110, x, y)] {
                     script.borrow().dispatch(t, node, input);
                 }
+            }
+            Step::Wheel(id, dx, dy) => {
+                let (t, node) = shown(&targets, id).ok_or_else(|| format!("--wheel {id}: no node with that id is shown"))?;
+                script.borrow().dispatch(t, node, genoma_script::Input::Wheel(*dx, *dy, false));
             }
             Step::Sleep(seconds) => pass(*seconds)?,
         }
@@ -255,6 +269,21 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
     Ok(drawn)
 }
 
+/// The node of that id a hand could reach: in the first tree where it is
+/// laid out with a size (a cell has a node on every surface it could be on),
+/// else the first found.
+type Target = (usize, Option<String>, Rc<RefCell<Scene>>, Option<(u32, u32)>);
+
+fn shown(targets: &[Target], id: &str) -> Option<(usize, genoma_scene::NodeId)> {
+    let found: Vec<(usize, genoma_scene::NodeId)> =
+        targets.iter().enumerate().filter_map(|(t, (_, _, scene, _))| scene.borrow().find(id).map(|n| (t, n))).collect();
+    found
+        .iter()
+        .find(|(t, n)| targets[*t].2.borrow().extent(*n).is_some_and(|[_, _, w, h]| w > 0.0 && h > 0.0))
+        .or(found.first())
+        .copied()
+}
+
 fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
@@ -301,8 +330,8 @@ mod tests {
         let o = options(["shell", "--size", "800x600", "--ipc", "cell toggle clock", "--wait", "0.5"].map(String::from).to_vec()).unwrap();
         assert_eq!((o.dir, o.size, o.wait), (PathBuf::from("shell"), (800, 600), 0.5));
         assert_eq!(o.steps, vec![Step::Ipc(vec!["cell".to_owned(), "toggle".into(), "clock".into()])]);
-        let o = options(["s", "--click", "ok", "--sleep", "1", "--mock", "@genoma/vitals=v.luau"].map(String::from).to_vec()).unwrap();
-        assert_eq!(o.steps, vec![Step::Click("ok".into()), Step::Sleep(1.0)]);
+        let o = options(["s", "--click", "ok", "--wheel", "list 0 120", "--sleep", "1", "--mock", "@genoma/vitals=v.luau"].map(String::from).to_vec()).unwrap();
+        assert_eq!(o.steps, vec![Step::Click("ok".into()), Step::Wheel("list".into(), 0.0, 120.0), Step::Sleep(1.0)]);
         assert_eq!(o.mocks, vec![("@genoma/vitals".to_owned(), PathBuf::from("v.luau"))]);
         assert!(options(vec!["--size".into()]).is_err());
         assert!(options(vec![]).unwrap_err().contains("the interface"));

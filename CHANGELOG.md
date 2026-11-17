@@ -29,6 +29,9 @@ changes what a shell sees.
 - `g.desktop_entries()` gives each entry its `actions` (`Actions=`): id,
   name, icon and its own `exec`, so a shell can start a new window or a
   private one the way it starts the application.
+- `genoma snapshot --wheel "ID DX DY"`: a touchpad's movement over a node,
+  to see a list scrolled. `--click` and `--wheel` take the node of that id
+  that is laid out, where a cell has one on every surface.
 
 ### Changed
 
