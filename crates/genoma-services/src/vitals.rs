@@ -8,6 +8,12 @@
 //! fans and power draw, whole degrees, revolutions and watts for the same
 //! reason. Which files there are is read once; each sample reads only the
 //! values.
+//!
+//! The reading itself is a `Sampler`'s, made to be moved to a thread of its
+//! own: a disk's or a radio's sensor can take tens of milliseconds to
+//! answer (an NVMe drive here, 40 ms), and read on the event loop every two
+//! seconds it stalled whatever was moving. The loop only applies a
+//! `Reading` to the signals.
 
 use std::{fs, path::PathBuf, time::Duration};
 
@@ -61,14 +67,33 @@ pub struct Vitals {
     pub cpu_temp: Signal<Option<f64>>,
     /// The temperature of the card `gpu` reads, °C: its `edge`.
     pub gpu_temp: Signal<Option<f64>>,
+    /// Reads the sources; taken by whoever samples them on a thread.
+    sampler: std::cell::RefCell<Option<Sampler>>,
+}
+
+/// Where every reading is, and what the next one is measured against: plain
+/// data, sent to the thread that samples.
+pub struct Sampler {
     sources: Vec<Source>,
     /// Indexes into `sources`.
     cpu_source: Option<usize>,
     gpu_source: Option<usize>,
-    clock_samples: std::cell::RefCell<Vec<f64>>,
+    clock_samples: Vec<f64>,
     cpu_range: Option<(f64, f64)>,
-    last_cpu: std::cell::Cell<Option<(u64, u64)>>,
+    last_cpu: Option<(u64, u64)>,
     gpu_path: Option<PathBuf>,
+}
+
+/// One sample of everything, ready for the signals.
+pub struct Reading {
+    cpu: Option<f64>,
+    ram: Option<f64>,
+    gpu: Option<f64>,
+    gpu_clock: Option<f64>,
+    cpu_clock: Option<f64>,
+    sensors: Vec<Sensor>,
+    cpu_temp: Option<f64>,
+    gpu_temp: Option<f64>,
 }
 
 fn percent(v: f64) -> f64 {
@@ -202,6 +227,16 @@ impl Vitals {
             on_card.iter().copied().find(|i| found[*i].0.label == "edge").or(on_card.first().copied())
         });
         let sources: Vec<Source> = found.into_iter().map(|(s, _)| s).collect();
+        let mut sampler = Sampler {
+            cpu_source: cpu_source(&sources),
+            gpu_source,
+            sources,
+            clock_samples: Vec::new(),
+            cpu_range: cpu_range(),
+            last_cpu: cpu_times(),
+            gpu_path,
+        };
+        let first = sampler.read();
         let v = Vitals {
             cpu: Signal::new(0.0),
             ram: Signal::new(0.0),
@@ -211,26 +246,65 @@ impl Vitals {
             sensors: Signal::new(Vec::new()),
             cpu_temp: Signal::new(None),
             gpu_temp: Signal::new(None),
-            cpu_source: cpu_source(&sources),
-            gpu_source,
-            sources,
-            clock_samples: Default::default(),
-            cpu_range: cpu_range(),
-            last_cpu: std::cell::Cell::new(cpu_times()),
-            gpu_path,
+            sampler: std::cell::RefCell::new(Some(sampler)),
         };
-        v.sample();
+        v.apply(first);
         v
     }
 
-    /// Reads every source once; called by the event loop at `INTERVAL`.
+    /// The sampler, for a thread to read with at `INTERVAL` and send each
+    /// `Reading` back to `apply`; none once taken.
+    pub fn take_sampler(&self) -> Option<Sampler> {
+        self.sampler.borrow_mut().take()
+    }
+
+    /// Reads every source once, here: where no thread samples (a test).
     pub fn sample(&self) {
+        let reading = self.sampler.borrow_mut().as_mut().map(Sampler::read);
+        if let Some(r) = reading {
+            self.apply(r);
+        }
+    }
+
+    /// A sample, into the signals, each set only when it changed.
+    pub fn apply(&self, r: Reading) {
+        let Reading { cpu, ram, gpu, gpu_clock: clock, cpu_clock, sensors, cpu_temp, gpu_temp } = r;
+        batch(|| {
+            if self.sensors.get_untracked().as_ref() != Some(&sensors) {
+                self.sensors.set(sensors);
+            }
+            if self.cpu_temp.get_untracked() != Some(cpu_temp) {
+                self.cpu_temp.set(cpu_temp);
+            }
+            if self.gpu_temp.get_untracked() != Some(gpu_temp) {
+                self.gpu_temp.set(gpu_temp);
+            }
+            if let Some(clock) = cpu_clock {
+                self.cpu_clock.set(clock);
+            }
+            if let Some(clock) = clock {
+                self.gpu_clock.set(clock);
+            }
+            if let Some(cpu) = cpu {
+                self.cpu.set(percent(cpu));
+            }
+            if let Some(ram) = ram {
+                self.ram.set(percent(ram));
+            }
+            self.gpu.set(gpu);
+        });
+    }
+}
+
+impl Sampler {
+    /// Every source, read once.
+    pub fn read(&mut self) -> Reading {
         let now = cpu_times();
-        let cpu = match (self.last_cpu.get(), now) {
+        let cpu = match (self.last_cpu, now) {
             (Some((b0, t0)), Some((b1, t1))) if t1 > t0 => Some((b1 - b0) as f64 / (t1 - t0) as f64),
             _ => None,
         };
-        self.last_cpu.set(now);
+        self.last_cpu = now;
         let gpu = self
             .gpu_path
             .as_ref()
@@ -260,7 +334,7 @@ impl Vitals {
             if mhz.is_empty() || max <= min {
                 return None;
             }
-            let mut samples = self.clock_samples.borrow_mut();
+            let samples = &mut self.clock_samples;
             samples.push(mhz.iter().sum::<f64>() / mhz.len() as f64);
             if samples.len() > 5 {
                 samples.remove(0);
@@ -290,30 +364,7 @@ impl Vitals {
             })
             .collect();
         let (cpu_temp, gpu_temp) = (self.cpu_source.and_then(|i| values[i]), self.gpu_source.and_then(|i| values[i]));
-        batch(|| {
-            if self.sensors.get_untracked().as_ref() != Some(&sensors) {
-                self.sensors.set(sensors);
-            }
-            if self.cpu_temp.get_untracked() != Some(cpu_temp) {
-                self.cpu_temp.set(cpu_temp);
-            }
-            if self.gpu_temp.get_untracked() != Some(gpu_temp) {
-                self.gpu_temp.set(gpu_temp);
-            }
-            if let Some(clock) = cpu_clock {
-                self.cpu_clock.set(clock);
-            }
-            if let Some(clock) = clock {
-                self.gpu_clock.set(clock);
-            }
-            if let Some(cpu) = cpu {
-                self.cpu.set(percent(cpu));
-            }
-            if let Some(ram) = ram() {
-                self.ram.set(percent(ram));
-            }
-            self.gpu.set(gpu);
-        });
+        Reading { cpu, ram: ram(), gpu, gpu_clock: clock, cpu_clock, sensors, cpu_temp, gpu_temp }
     }
 }
 

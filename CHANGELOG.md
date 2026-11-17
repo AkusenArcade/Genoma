@@ -20,6 +20,10 @@ changes what a shell sees.
   surface: for one frame a mask showed its content whole. Group pictures
   now go only when their frame no longer shows them, and an image whose
   mask is not ready is left out for that frame rather than shown unmasked.
+- `@genoma/vitals` read the sensors on the event loop: a drive's or a
+  radio's hwmon can take tens of milliseconds (an NVMe drive, 40 ms), and
+  every two seconds whatever moved stalled for 50 to 150 ms. It samples on
+  a thread of its own; the loop only sets the values.
 
 ## 0.1.17 — 2026-11-17
 

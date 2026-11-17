@@ -263,13 +263,30 @@ impl Sources {
                         .expect("clock timer");
                 }
                 "vitals" => {
+                    // Read on a thread of its own: a drive's sensor can take
+                    // tens of milliseconds, and on the loop it stalled every
+                    // animation every two seconds. The loop only applies it.
                     let vitals = self.services.vitals.clone();
+                    let Some(mut sampler) = vitals.take_sampler() else { continue };
+                    let (post, readings) = channel();
                     handle
-                        .insert_source(Timer::from_duration(vitals::INTERVAL), move |_, _, _| {
-                            vitals.sample();
-                            TimeoutAction::ToDuration(vitals::INTERVAL)
+                        .insert_source(readings, move |event, _, _| {
+                            if let ChannelEvent::Msg(reading) = event {
+                                vitals.apply(reading);
+                            }
                         })
-                        .expect("vitals timer");
+                        .expect("vitals channel");
+                    std::thread::Builder::new()
+                        .name("vitals".into())
+                        .spawn(move || {
+                            loop {
+                                std::thread::sleep(vitals::INTERVAL);
+                                if post.send(sampler.read()).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .expect("vitals thread");
                 }
                 "power" => {
                     let Some(bus) = self.bus() else { continue };
