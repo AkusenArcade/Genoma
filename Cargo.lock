@@ -824,6 +824,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1037,6 +1049,7 @@ dependencies = [
 name = "genoma-scene"
 version = "0.1.17"
 dependencies = [
+ "fast_image_resize",
  "genoma-core",
  "genoma-render",
  "image",

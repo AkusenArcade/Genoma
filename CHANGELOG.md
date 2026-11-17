@@ -37,6 +37,13 @@ changes what a shell sees.
   (Bioma: 230 MB at start, 380 after thirteen hours, sixteen arenas).
   Genoma bounds them to two before any thread starts, unless
   `MALLOC_ARENA_MAX` says otherwise.
+- An image was resized through four floats a pixel and copied whole on
+  the way, and a wallpaper spanning the screens was fitted to all of them
+  before each screen cut its share: a 4K wallpaper on two screens took
+  Bioma to 770 MB for a moment at start. Images are resized eight bits a
+  channel (`fast_image_resize`), a photograph keeps its three channels
+  until it is the size shown, and a cropped picture resizes only its
+  part: Bioma's start peaks at 290 MB, for the same pixels.
 - `genoma snapshot` never told `on_ready` and `on_size`: an interface
   that sizes itself from its own size was drawn at the wrong scale. Both
   are told after each frame, as on a screen.

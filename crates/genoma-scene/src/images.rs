@@ -278,7 +278,20 @@ fn animation(path: &Path) -> Option<Vec<(image::RgbaImage, f32)>> {
 /// One picture (a still, or a frame) made what the node shows: fitted,
 /// softened, rounded, cropped and premultiplied.
 #[allow(clippy::too_many_arguments)]
-fn finish(image: &image::RgbaImage, width: u32, height: u32, fit: Fit, radius: f32, soften: f32, crop: Option<[u32; 4]>) -> Vec<u8> {
+fn finish(image: &image::DynamicImage, width: u32, height: u32, fit: Fit, radius: f32, soften: f32, crop: Option<[u32; 4]>) -> Vec<u8> {
+    // A plain picture cut to a part of its box (a wallpaper spanning the
+    // screens, one screen's share): only that part is resized. Fitting the
+    // whole box first made each screen pay for all of them.
+    if let Some([x, y, w, h]) = crop
+        && soften < 0.5
+        && radius <= 0.0
+        && let Some([left, top, sx, sy]) = placement(image, width, height, fit)
+    {
+        let region = [left + x as f64 / sx, top + y as f64 / sy, w as f64 / sx, h as f64 / sy];
+        let mut out = resized(image, region, w, h);
+        premultiply(&mut out);
+        return out.into_raw();
+    }
     let mut out = fitted(image, width, height, fit);
     // Once, here, off the frame: a backdrop costs its decode and nothing
     // after.
@@ -299,13 +312,13 @@ fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: 
     }
     let path = Path::new(source);
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
-        return Some(Decoded::Still(finish(&svg(path, width, height)?, width, height, fit, radius, soften, crop)));
+        return Some(Decoded::Still(finish(&svg(path, width, height)?.into(), width, height, fit, radius, soften, crop)));
     }
     if let Some(frames) = animation(path) {
         let mut out = Vec::with_capacity(frames.len());
         let mut bytes = 0;
         for (image, seconds) in frames {
-            let pixels = finish(&image, width, height, fit, radius, soften, crop);
+            let pixels = finish(&image.into(), width, height, fit, radius, soften, crop);
             bytes += pixels.len();
             out.push((Arc::new(pixels), seconds));
             if bytes > MOST_FRAME_BYTES {
@@ -315,7 +328,9 @@ fn decode(source: &str, width: u32, height: u32, fit: Fit, radius: f32, soften: 
         }
         return Some(Decoded::Frames(out));
     }
-    let image = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?.into_rgba8();
+    // As decoded: a photograph's three channels are not widened to four at
+    // its full size, only once it is resized.
+    let image = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
     Some(Decoded::Still(finish(&image, width, height, fit, radius, soften, crop)))
 }
 
@@ -343,31 +358,80 @@ fn svg(path: &Path, width: u32, height: u32) -> Option<image::RgbaImage> {
     image::RgbaImage::from_raw(w.max(1), h.max(1), raw)
 }
 
-fn fitted(image: &image::RgbaImage, width: u32, height: u32, fit: Fit) -> image::RgbaImage {
-    use image::imageops::{self, FilterType};
-    let (iw, ih) = (image.width() as f32, image.height() as f32);
+/// Where a box of `width` × `height` lies on the image when it fills the
+/// box: the image's pixel at the box's corner, and the box's pixels per
+/// image pixel across and down. `None` for `Contain`, which leaves room.
+fn placement(image: &image::DynamicImage, width: u32, height: u32, fit: Fit) -> Option<[f64; 4]> {
+    let (iw, ih) = (image.width() as f64, image.height() as f64);
+    let (w, h) = (width as f64, height as f64);
     match fit {
-        Fit::Fill => imageops::resize(image, width, height, FilterType::Triangle),
+        Fit::Fill => Some([0.0, 0.0, w / iw, h / ih]),
         Fit::Cover => {
             // The part of the image with the box's shape, about its centre.
-            let scale = (width as f32 / iw).max(height as f32 / ih);
-            let cw = (width as f32 / scale).round().clamp(1.0, iw) as u32;
-            let ch = (height as f32 / scale).round().clamp(1.0, ih) as u32;
-            let x = ((iw as u32).saturating_sub(cw)) / 2;
-            let y = ((ih as u32).saturating_sub(ch)) / 2;
-            let crop = imageops::crop_imm(image, x, y, cw, ch).to_image();
-            imageops::resize(&crop, width, height, FilterType::Triangle)
+            let scale = (w / iw).max(h / ih);
+            Some([(iw - w / scale) / 2.0, (ih - h / scale) / 2.0, scale, scale])
         }
-        Fit::Contain => {
+        Fit::Contain => None,
+    }
+}
+
+fn fitted(image: &image::DynamicImage, width: u32, height: u32, fit: Fit) -> image::RgbaImage {
+    match placement(image, width, height, fit) {
+        Some([left, top, sx, sy]) => resized(image, [left, top, width as f64 / sx, height as f64 / sy], width, height),
+        None => {
+            let (iw, ih) = (image.width() as f32, image.height() as f32);
             let scale = (width as f32 / iw).min(height as f32 / ih);
-            let w = (iw * scale).round().max(1.0) as u32;
-            let h = (ih * scale).round().max(1.0) as u32;
-            let inner = imageops::resize(image, w, h, FilterType::Triangle);
+            let w = (iw * scale).round().clamp(1.0, width as f32) as u32;
+            let h = (ih * scale).round().clamp(1.0, height as f32) as u32;
+            let inner = resized(image, [0.0, 0.0, iw as f64, ih as f64], w, h);
             let mut out = image::RgbaImage::new(width, height);
-            imageops::overlay(&mut out, &inner, ((width - w.min(width)) / 2) as i64, ((height - h.min(height)) / 2) as i64);
+            image::imageops::overlay(&mut out, &inner, ((width - w) / 2) as i64, ((height - h) / 2) as i64);
             out
         }
     }
+}
+
+/// `region` of the image (x, y, width, height in its pixels, fractions
+/// kept) resized to `width` × `height`, bilinear. On the image's own bytes,
+/// eight bits a channel: `imageops::resize` widened every pixel to four
+/// floats on the way, a 4K wallpaper's pass alone 130 MB, and a picture of
+/// three channels is widened to four only once it is the size shown.
+fn resized(image: &image::DynamicImage, region: [f64; 4], width: u32, height: u32) -> image::RgbaImage {
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::Image, images::ImageRef};
+    let owned;
+    let (bytes, pixel): (&[u8], PixelType) = match image {
+        image::DynamicImage::ImageRgb8(i) => (i.as_raw(), PixelType::U8x3),
+        image::DynamicImage::ImageRgba8(i) => (i.as_raw(), PixelType::U8x4),
+        other => {
+            owned = other.to_rgba8();
+            (owned.as_raw(), PixelType::U8x4)
+        }
+    };
+    let (iw, ih) = (image.width() as f64, image.height() as f64);
+    // Inside the image, at least a pixel each way.
+    let x = region[0].clamp(0.0, iw - 1.0);
+    let y = region[1].clamp(0.0, ih - 1.0);
+    let w = region[2].clamp(1.0, iw - x);
+    let h = region[3].clamp(1.0, ih - y);
+    let mut dst = Image::new(width, height, pixel);
+    let resized = ImageRef::new(image.width(), image.height(), bytes, pixel).ok().and_then(|src| {
+        let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)).crop(x, y, w, h);
+        Resizer::new().resize(&src, &mut dst, &options).ok()
+    });
+    if resized.is_none() {
+        return image::RgbaImage::new(width, height);
+    }
+    let raw = dst.into_vec();
+    let rgba = if pixel == PixelType::U8x3 {
+        let mut out = Vec::with_capacity(raw.len() / 3 * 4);
+        for px in raw.chunks_exact(3) {
+            out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+        out
+    } else {
+        raw
+    };
+    image::RgbaImage::from_raw(width, height, rgba).unwrap_or_else(|| image::RgbaImage::new(width, height))
 }
 
 /// The corners cut to a radius, antialiased across one pixel.
