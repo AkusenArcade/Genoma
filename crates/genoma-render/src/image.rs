@@ -446,7 +446,13 @@ impl Pipeline {
         if self.uploads % 256 == 0 {
             let now = self.uploads;
             let shown: std::collections::HashSet<u64> = self.shown.values().flatten().copied().collect();
-            self.textures.retain(|key, (_, used)| now - *used < 1024 || shown.contains(key));
+            // A picture a group drew is let go by `release`, frame by frame,
+            // never by age: one drawn once and kept (a mask at rest) is as
+            // old as when it was drawn, and the frame drawing a group's own
+            // list says nothing of it. Gone, a mask showed its picture
+            // whole, or nothing, for a frame every 256.
+            let adopted = &self.adopted;
+            self.textures.retain(|key, (_, used)| now - *used < 1024 || shown.contains(key) || adopted.contains_key(key));
             let textures = &self.textures;
             self.sizes.retain(|key, _| textures.contains_key(key));
             let mut resident = RESIDENT.lock().unwrap();
@@ -469,8 +475,10 @@ impl Pipeline {
             if !self.ensure(device, queue, image.key, &image.pixels, image.width, image.height) {
                 continue;
             }
-            if let Some((_, used)) = self.textures.get_mut(&image.key) {
-                *used = self.uploads;
+            for key in std::iter::once(image.key).chain(image.mask) {
+                if let Some((_, used)) = self.textures.get_mut(&key) {
+                    *used = self.uploads;
+                }
             }
             quads.push(Quad {
                 origin: image.origin,
@@ -517,8 +525,20 @@ impl Pipeline {
                 pass.set_pipeline(&self.pipelines[wanted as usize]);
                 current = wanted;
             }
+            // A mask (or what an overlay meets) not on the GPU this frame:
+            // the picture is left out once rather than shown whole, which
+            // flashed a text-shaped mask's whole texture for a frame.
+            let mask = match mask {
+                Some(m) => match self.textures.get(m) {
+                    Some(t) => &t.0,
+                    None => {
+                        log::debug!("image {key:x}: its mask {m:x} is not ready, left out this frame");
+                        continue;
+                    }
+                },
+                None => &self.blank,
+            };
             pass.set_bind_group(1, &self.textures[key].0, &[]);
-            let mask = mask.and_then(|m| self.textures.get(&m)).map_or(&self.blank, |t| &t.0);
             pass.set_bind_group(2, mask, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }

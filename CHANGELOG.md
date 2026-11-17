@@ -15,6 +15,11 @@ changes what a shell sees.
   isolated group — was moved into that picture with its matrix the wrong
   way round, so it landed elsewhere or nowhere: a turned mask showed
   nothing. It lands where it is drawn on the surface.
+- A picture a group drew and kept (a mask at rest, a blur) was let go by
+  the image cache's sweep every 256 uploads, about two seconds of a moving
+  surface: for one frame a mask showed its content whole. Group pictures
+  now go only when their frame no longer shows them, and an image whose
+  mask is not ready is left out for that frame rather than shown unmasked.
 
 ## 0.1.17 — 2026-11-17
 
