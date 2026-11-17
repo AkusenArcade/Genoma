@@ -188,12 +188,24 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
         let started = Instant::now();
         loop {
             event_loop.dispatch(Some(Duration::from_millis(16)), &mut ()).map_err(|e| e.to_string())?;
-            for (spec, _, scene, _) in &targets {
+            for (t, (spec, _, scene, _)) in targets.iter().enumerate() {
                 let (w, h) = bounds(&specs[*spec], o.size);
-                let mut s = scene.borrow_mut();
-                let _ = s.advance(Instant::now(), 1.0);
-                s.layout(w, h);
-                let _ = s.draw_list(1.0);
+                let (ready, sized) = {
+                    let mut s = scene.borrow_mut();
+                    let _ = s.advance(Instant::now(), 1.0);
+                    s.layout(w, h);
+                    let _ = s.draw_list(1.0);
+                    (s.take_ready(), s.take_sized())
+                };
+                // Told after the frame, as the runtime tells them: a node
+                // that sizes itself from its own size (a stage scaled to
+                // its window) is drawn here as it is on a screen.
+                for node in ready {
+                    script.borrow().dispatch(t, node, genoma_script::Input::Ready);
+                }
+                for (node, w, h) in sized {
+                    script.borrow().dispatch(t, node, genoma_script::Input::Size(w, h));
+                }
             }
             if started.elapsed().as_secs_f64() >= seconds {
                 return Ok(());

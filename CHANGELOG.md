@@ -24,6 +24,9 @@ changes what a shell sees.
   radio's hwmon can take tens of milliseconds (an NVMe drive, 40 ms), and
   every two seconds whatever moved stalled for 50 to 150 ms. It samples on
   a thread of its own; the loop only sets the values.
+- `genoma snapshot` never told `on_ready` and `on_size`: an interface
+  that sizes itself from its own size was drawn at the wrong scale. Both
+  are told after each frame, as on a screen.
 
 ## 0.1.17 — 2026-11-17
 
