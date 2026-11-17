@@ -2273,6 +2273,7 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `terminal` | `boolean` |  |
 | `keywords` | `{ string }` |  |
 | `categories` | `{ string }` |  |
+| `actions` | `{ { id: string, name: string, icon: string, exec: string } }` | What it offers beside starting (`Actions=`), each with its command. |
 | `file` | `string` |  |
 
 ### Auth

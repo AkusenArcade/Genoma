@@ -211,7 +211,19 @@ pub struct DesktopEntry {
     pub terminal: bool,
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
+    /// What it offers beside starting (`Actions=`): a new window, a private
+    /// one, each with its own command.
+    pub actions: Vec<DesktopAction>,
     pub file: PathBuf,
+}
+
+/// One of an entry's `[Desktop Action …]` groups.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DesktopAction {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub exec: String,
 }
 
 /// The applications the menu offers, in the order the data directories
@@ -234,42 +246,83 @@ pub fn desktop_entries() -> Vec<DesktopEntry> {
                 continue;
             }
             let Ok(text) = fs::read_to_string(&path) else { continue };
-            let mut fields = HashMap::new();
-            let mut in_group = false;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('[') {
-                    in_group = line == "[Desktop Entry]";
-                    continue;
-                }
-                if !in_group {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    fields.entry(key.trim().to_owned()).or_insert_with(|| value.trim().to_owned());
-                }
+            if let Some(entry) = parse_entry(id, &text, path) {
+                out.push(entry);
             }
-            let get = |k: &str| fields.get(k).cloned().unwrap_or_default();
-            let yes = |k: &str| get(k).eq_ignore_ascii_case("true");
-            if get("Type") != "Application" || yes("Hidden") || yes("NoDisplay") {
-                continue;
-            }
-            let list = |k: &str| get(k).split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
-            out.push(DesktopEntry {
-                id,
-                name: get("Name"),
-                generic_name: get("GenericName"),
-                comment: get("Comment"),
-                icon: get("Icon"),
-                exec: get("Exec"),
-                startup_class: get("StartupWMClass"),
-                path: get("Path"),
-                terminal: yes("Terminal"),
-                keywords: list("Keywords"),
-                categories: list("Categories"),
-                file: path,
-            });
         }
     }
     out
+}
+
+/// One desktop file: its `[Desktop Entry]` and the `[Desktop Action …]`
+/// groups it lists; none when it is no application the menu offers.
+fn parse_entry(id: String, text: &str, path: PathBuf) -> Option<DesktopEntry> {
+    let mut fields = HashMap::new();
+    let mut groups: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // None outside any group; Some("") in [Desktop Entry]; Some(id) in
+    // [Desktop Action id].
+    let mut group: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            group = if line == "[Desktop Entry]" {
+                Some(String::new())
+            } else {
+                line.strip_prefix("[Desktop Action ").and_then(|l| l.strip_suffix(']')).map(str::to_owned)
+            };
+            continue;
+        }
+        let (Some(g), Some((key, value))) = (&group, line.split_once('=')) else { continue };
+        let into = if g.is_empty() { &mut fields } else { groups.entry(g.clone()).or_default() };
+        into.entry(key.trim().to_owned()).or_insert_with(|| value.trim().to_owned());
+    }
+    let get = |k: &str| fields.get(k).cloned().unwrap_or_default();
+    let yes = |k: &str| get(k).eq_ignore_ascii_case("true");
+    if get("Type") != "Application" || yes("Hidden") || yes("NoDisplay") {
+        return None;
+    }
+    let list = |k: &str| get(k).split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    let actions = get("Actions")
+        .split(';')
+        .filter(|a| !a.is_empty())
+        .filter_map(|a| {
+            let f = groups.get(a)?;
+            let field = |k: &str| f.get(k).cloned().unwrap_or_default();
+            Some(DesktopAction { id: a.to_owned(), name: field("Name"), icon: field("Icon"), exec: field("Exec") })
+        })
+        .filter(|a| !a.exec.is_empty())
+        .collect();
+    Some(DesktopEntry {
+        id,
+        name: get("Name"),
+        generic_name: get("GenericName"),
+        comment: get("Comment"),
+        icon: get("Icon"),
+        exec: get("Exec"),
+        startup_class: get("StartupWMClass"),
+        path: get("Path"),
+        terminal: yes("Terminal"),
+        keywords: list("Keywords"),
+        categories: list("Categories"),
+        actions,
+        file: path,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_brings_the_actions_it_lists_with_their_commands() {
+        let text = "[Desktop Entry]\nType=Application\nName=Zen\nExec=zen %u\nActions=new-window;new-private-window;gone;\n\n\
+                    [Desktop Action new-window]\nName=New Window\nExec=zen --new-window\n\n\
+                    [Desktop Action new-private-window]\nName=New Private Window\nName[it]=Nuova finestra anonima\nExec=zen --private-window\n\n\
+                    [Desktop Action unlisted]\nName=Not offered\nExec=zen --other\n";
+        let e = parse_entry("zen".into(), text, PathBuf::from("zen.desktop")).unwrap();
+        assert_eq!(e.exec, "zen %u", "an action's Exec is not the entry's");
+        let got: Vec<(&str, &str, &str)> = e.actions.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.exec.as_str())).collect();
+        assert_eq!(got, vec![("new-window", "New Window", "zen --new-window"), ("new-private-window", "New Private Window", "zen --private-window")]);
+        assert!(parse_entry("x".into(), "[Desktop Entry]\nType=Link\n", PathBuf::new()).is_none());
+    }
 }

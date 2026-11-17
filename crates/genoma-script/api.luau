@@ -98,6 +98,8 @@ export type DesktopEntry = {
     terminal: boolean,
     keywords: { string },
     categories: { string },
+    -- What it offers beside starting (`Actions=`), each with its command.
+    actions: { { id: string, name: string, icon: string, exec: string } },
     file: string,
 }
 

@@ -26,6 +26,9 @@ changes what a shell sees.
   the finger that takes the drag itself (`on_drag`, `on_drag_start`,
   `on_swipe`) keeps it. A finger landing on a list still moving stops it,
   and that touch is no click.
+- `g.desktop_entries()` gives each entry its `actions` (`Actions=`): id,
+  name, icon and its own `exec`, so a shell can start a new window or a
+  private one the way it starts the application.
 
 ### Changed
 

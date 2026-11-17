@@ -2816,8 +2816,9 @@ impl Script {
             })?,
         )?;
         // g.desktop_entries() → { { id, name, generic_name, comment, icon,
-        // exec, startup_class, path, terminal, keywords, categories, file } }:
-        // the applications the menu offers, read now.
+        // exec, startup_class, path, terminal, keywords, categories,
+        // actions = { { id, name, icon, exec } }, file } }: the applications
+        // the menu offers, read now.
         g.set(
             "desktop_entries",
             lua.create_function(|lua, ()| {
@@ -2835,6 +2836,16 @@ impl Script {
                     t.set("terminal", e.terminal)?;
                     t.set("keywords", e.keywords)?;
                     t.set("categories", e.categories)?;
+                    let actions = lua.create_table()?;
+                    for (k, a) in e.actions.into_iter().enumerate() {
+                        let at = lua.create_table()?;
+                        at.set("id", a.id)?;
+                        at.set("name", a.name)?;
+                        at.set("icon", a.icon)?;
+                        at.set("exec", a.exec)?;
+                        actions.set(k + 1, at)?;
+                    }
+                    t.set("actions", actions)?;
                     t.set("file", e.file.display().to_string())?;
                     list.set(i + 1, t)?;
                 }
