@@ -21,4 +21,5 @@ accesskit_unix = "0.24"
 notify = "8"
 smithay-client-toolkit.workspace = true
 rustix = { version = "1.1", features = ["termios", "stdio", "thread", "pipe", "fs"] }
+libc = "0.2.191"
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -50,7 +50,25 @@ use smithay_client_toolkit::reexports::{
     calloop_wayland_source::WaylandSource,
 };
 
+/// glibc gives each thread that allocates an arena of its own, up to eight
+/// a core, and keeps what each freed: Bioma ran with sixteen, and grew from
+/// about 230 MB at start to 380 over a day (the image decoders, a wallpaper
+/// of tens of megabytes each). With two, measured over runs: about 190 MB
+/// at start and 210 after its theme cell, against 230 and 290. Set before
+/// any thread starts, unless MALLOC_ARENA_MAX already says.
+fn bound_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: mallopt changes the allocator's settings; nothing else runs
+        // yet, so no allocation is under way in another thread.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 2);
+        }
+    }
+}
+
 fn main() {
+    bound_malloc_arenas();
     env_logger::Builder::from_env(env_logger::Env::new().filter_or("GENOMA_LOG", "info,zbus=warn,tracing=warn")).init();
     take_name();
     let arg = std::env::args().nth(1);

@@ -32,6 +32,11 @@ changes what a shell sees.
   radio's hwmon can take tens of milliseconds (an NVMe drive, 40 ms), and
   every two seconds whatever moved stalled for 50 to 150 ms. It samples on
   a thread of its own; the loop only sets the values.
+- glibc gave every thread that allocates an arena of its own and kept
+  what each freed: a shell grew by the hundreds of megabytes over a day
+  (Bioma: 230 MB at start, 380 after thirteen hours, sixteen arenas).
+  Genoma bounds them to two before any thread starts, unless
+  `MALLOC_ARENA_MAX` says otherwise.
 - `genoma snapshot` never told `on_ready` and `on_size`: an interface
   that sizes itself from its own size was drawn at the wrong scale. Both
   are told after each frame, as on a screen.

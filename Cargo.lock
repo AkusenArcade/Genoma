@@ -1004,6 +1004,7 @@ dependencies = [
  "genoma-script",
  "genoma-services",
  "image",
+ "libc",
  "log",
  "notify",
  "png",
