@@ -399,6 +399,9 @@ pub struct App {
     /// Where pointer and keyboard input goes: the script's dispatcher, by
     /// the index of the surface's tree.
     input: Option<Box<dyn FnMut(usize, NodeId, Input) -> bool>>,
+    /// What a finger dragged from a node moves, if a scroller: the
+    /// script's answer.
+    pans: Option<Box<dyn Fn(usize, NodeId) -> Option<NodeId>>>,
     focus: Option<genoma_script::FocusQueue>,
     /// Surfaces the compositor gave another area than their trees were
     /// built for (another surface took or let go of a zone): each is built
@@ -528,6 +531,7 @@ impl App {
             keyboard_seat: None,
             modifiers: Modifiers::default(),
             input: None,
+            pans: None,
             focus: None,
             drag: None,
             areas_changed: Vec::new(),
@@ -1310,6 +1314,12 @@ impl App {
     /// Where input is delivered: (the surface's tree index, node, input).
     pub fn on_input(&mut self, f: impl FnMut(usize, NodeId, Input) -> bool + 'static) {
         self.input = Some(Box::new(f));
+    }
+
+    /// What a finger dragged from a node scrolls: (the surface's tree
+    /// index, node) to the scroller, or none.
+    pub fn on_pan(&mut self, f: impl Fn(usize, NodeId) -> Option<NodeId> + 'static) {
+        self.pans = Some(Box::new(f));
     }
 
     /// A press on a node that gives something when dragged, moved six units
@@ -2460,6 +2470,9 @@ impl App {
         press.id += 1;
         press.dragging = false;
         press.long_pressed = false;
+        press.touch = false;
+        press.stopped = false;
+        press.pan = None;
         press.samples.clear();
         press.sample(Instant::now(), x, y);
         if let Some(node) = hit {
@@ -2514,6 +2527,9 @@ impl App {
     /// The pointer or the first finger moving, pressed.
     fn pointer_motion(&mut self, i: usize, x: f32, y: f32) {
         let Some(node) = self.surfaces[i].pressed else { return };
+        if self.pan(i, node, x, y) {
+            return;
+        }
         if self.start_drag(i, node, x, y) {
             return;
         }
@@ -2541,9 +2557,62 @@ impl App {
         }
     }
 
+    /// A finger moving what it pressed in: past the slop, inside a
+    /// scroller and not in something nearer that takes the drag, the
+    /// content follows the finger, as a touchpad's does, and the press is
+    /// let go without a click. Whether the finger is moving a scroller.
+    fn pan(&mut self, i: usize, node: NodeId, x: f32, y: f32) -> bool {
+        let press = &self.surfaces[i].press;
+        if !press.touch {
+            return false;
+        }
+        let (target, lx, ly) = match press.pan {
+            Some(p) => p,
+            None => {
+                let (px, py) = self.surfaces[i].press_point;
+                if (x - px).hypot(y - py) <= gesture::SLOP {
+                    return false;
+                }
+                let Some(target) = self.pans.as_ref().and_then(|f| f(i, node)) else { return false };
+                self.cancel_long_press(i);
+                let (nx, ny) = self.surfaces[i].scene.borrow().local(node, x, y);
+                self.deliver(i, node, Input::Release(0x110, nx, ny));
+                if self.surfaces[i].press.dragging {
+                    self.drag = None;
+                    self.deliver(i, node, Input::DragEnd(0.0, 0.0));
+                    self.surfaces[i].press.dragging = false;
+                }
+                // From where it was pressed: the slop is caught up with.
+                (target, px, py)
+            }
+        };
+        let press = &mut self.surfaces[i].press;
+        press.pan = Some((target, x, y));
+        press.sample(Instant::now(), x, y);
+        let (dx, dy) = (x - lx, y - ly);
+        if dx != 0.0 || dy != 0.0 {
+            self.deliver(i, target, Input::Wheel(-dx as f64, -dy as f64, false));
+        }
+        true
+    }
+
     /// The pointer's button or the first finger let go.
     fn pointer_release(&mut self, i: usize, hit: Option<NodeId>, x: f32, y: f32, button: u32) {
         self.cancel_long_press(i);
+        // A finger that was moving a list lifts: it carries on at the
+        // finger's speed. The press was let go when the pan began.
+        if let Some((target, _, _)) = self.surfaces[i].press.pan.take() {
+            self.surfaces[i].pressed = None;
+            let (vx, vy) = self.surfaces[i].press.velocity(Instant::now());
+            if vx != 0.0 || vy != 0.0 {
+                self.deliver(i, target, Input::Fling(-vx, -vy));
+            }
+            let press = &mut self.surfaces[i].press;
+            press.dragging = false;
+            press.long_pressed = false;
+            press.samples.clear();
+            return;
+        }
         let scene = self.surfaces[i].scene.clone();
         // The node pressed hears its release wherever it is let go: a drag
         // that ends over another node ends for the one that began it, as a
@@ -2556,7 +2625,7 @@ impl App {
             self.deliver(i, node, Input::Release(button, lx, ly));
             let mut clicks = pressed.is_some() && pressed == hit;
             if let Some(p) = pressed {
-                clicks &= !self.surfaces[i].press.long_pressed;
+                clicks &= !self.surfaces[i].press.long_pressed && !self.surfaces[i].press.stopped;
                 if self.surfaces[i].press.dragging {
                     let (vx, vy) = self.surfaces[i].press.velocity(Instant::now());
                     self.deliver(i, p, Input::DragEnd(vx, vy));

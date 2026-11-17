@@ -950,6 +950,8 @@ fn run(dir: PathBuf, entry: Option<String>) {
     ipc::serve(&handle, script.clone(), |app: &mut wayland::App, words: &[String]| app.inspect(words));
     let dispatcher = script.clone();
     app.on_input(move |target, node, input| dispatcher.borrow().dispatch(target, node, input));
+    let panner = script.clone();
+    app.on_pan(move |target, node| panner.borrow().pans(target, node));
     app.on_focus(script.borrow().focus_queue());
     app.on_activation(script.borrow().activation_queue());
     let pending = Rc::new(Cell::new(false));

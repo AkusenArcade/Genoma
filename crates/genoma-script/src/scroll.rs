@@ -403,6 +403,27 @@ pub(crate) fn attach(
     Ok(())
 }
 
+/// What a finger dragged from `node` moves: the nearest node around it
+/// that carries a fling (a `scroll` node, a `g.list`), unless one that takes
+/// the drag itself (`on_drag`, `on_drag_start`, `on_swipe`) is nearer — a
+/// slider in a list keeps its finger.
+pub(crate) fn pans(scene: &Rc<RefCell<Scene>>, handlers: &Handlers, target: usize, node: NodeId) -> Option<NodeId> {
+    let handlers = handlers.borrow();
+    let mut at = Some(node);
+    while let Some(id) = at {
+        if let Some(h) = handlers.get(&(target, id)) {
+            if ["on_drag", "on_drag_start", "on_swipe"].iter().any(|n| h.contains_key(n)) {
+                return None;
+            }
+            if h.contains_key("on_fling") {
+                return Some(id);
+            }
+        }
+        at = scene.borrow().parent(id);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -484,6 +505,34 @@ mod tests {
         assert!(deliver(&scene, &handlers, "inner", "on_wheel", (40.0, 3.0, false)));
         assert_eq!(at(&scene, "inner")[0], 40.0);
         assert_eq!(at(&scene, "outer")[1], 24.0, "the row took it whole");
+    }
+
+    #[test]
+    fn a_finger_moves_the_scroller_it_is_in_unless_something_nearer_takes_the_drag() {
+        let fonts = Arc::new(Mutex::new(genoma_render::cosmic_text::FontSystem::new_with_fonts(std::iter::empty())));
+        let scene = Rc::new(RefCell::new(Scene::new(fonts)));
+        let handlers: Handlers = Rc::default();
+        let lua = Lua::new();
+        let t: Table = lua
+            .load(
+                r#"
+                return { __kind = "box", id = "page", on_wheel = function() end,
+                    { __kind = "box", id = "list", scroll = "y", direction = "column", width = 200, height = 100,
+                        { __kind = "box", id = "row", width = 200, height = 60, on_click = function() end,
+                            { __kind = "box", id = "label", width = 50, height = 20 } },
+                        { __kind = "box", id = "slider", width = 200, height = 60, on_drag = function() end } },
+                    { __kind = "box", id = "volume", width = 50, height = 50, on_wheel = function() end } }
+                "#,
+            )
+            .eval()
+            .unwrap();
+        let root = scene.borrow().root();
+        let (_scope, _) = Scope::new(|| mount(&scene, &handlers, 0, &t, root).unwrap());
+        let id = |name| scene.borrow().find(name).unwrap();
+        assert_eq!(pans(&scene, &handlers, 0, id("label")), Some(id("list")), "a row's child: the list");
+        assert_eq!(pans(&scene, &handlers, 0, id("list")), Some(id("list")), "between the rows");
+        assert_eq!(pans(&scene, &handlers, 0, id("slider")), None, "a slider keeps its finger");
+        assert_eq!(pans(&scene, &handlers, 0, id("volume")), None, "a wheel alone is no scroller");
     }
 
     #[test]

@@ -2372,6 +2372,14 @@ impl Script {
         false
     }
 
+    /// What a finger dragged from `node` moves: the nearest node around it
+    /// that carries a fling (a `scroll` node, a `g.list`), unless one that
+    /// takes the drag itself (`on_drag`, `on_drag_start`, `on_swipe`) is
+    /// nearer — a slider in a list keeps its finger.
+    pub fn pans(&self, target: usize, node: genoma_scene::NodeId) -> Option<genoma_scene::NodeId> {
+        scroll::pans(self.scenes.get(target)?, &self.handlers, target, node)
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }

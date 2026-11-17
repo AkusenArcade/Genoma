@@ -20,6 +20,12 @@ changes what a shell sees.
   times a second instead of at every refresh, and the surface sleeps in
   between. A slow motion reads the same at 30 as at 165, at a fraction of
   the cost.
+- A finger on a touchscreen scrolls: dragged inside a `scroll` node or a
+  `g.list`, past a few units, the content follows it and is flung when
+  it lifts; the row it began on is let go without a click. A node nearer
+  the finger that takes the drag itself (`on_drag`, `on_drag_start`,
+  `on_swipe`) keeps it. A finger landing on a list still moving stops it,
+  and that touch is no click.
 
 ### Changed
 

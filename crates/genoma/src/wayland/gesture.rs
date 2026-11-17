@@ -32,6 +32,14 @@ pub struct Press {
     pub dragging: bool,
     /// The interface took a long press: the release is no click.
     pub long_pressed: bool,
+    /// A finger, not the pointer's button.
+    pub touch: bool,
+    /// The finger landed on a list still moving and stopped it: the
+    /// release is no click.
+    pub stopped: bool,
+    /// The finger is moving a scroller: the node that carries the fling,
+    /// and where the finger was last.
+    pub pan: Option<(genoma_scene::NodeId, f32, f32)>,
     /// Where the pointer was, recently, surface coordinates.
     pub samples: VecDeque<(Instant, f32, f32)>,
     pub timer: Option<RegistrationToken>,
@@ -153,7 +161,12 @@ impl TouchHandler for App {
                 self.fingers.primary = Some((id, i, x, y));
                 let hit = self.surfaces[i].scene.borrow().hit_test(x, y);
                 self.surfaces[i].scene.borrow_mut().set_pointer(Some((x, y, true)));
+                // A finger on a list still moving stops it, as fingers
+                // resting on a touchpad do; that touch is no click.
+                let stopped = hit.is_some_and(|h| self.deliver(i, h, Input::Hold(true)));
                 self.pointer_press(i, hit, x, y, 0x110, serial);
+                self.surfaces[i].press.touch = true;
+                self.surfaces[i].press.stopped = stopped;
             }
             // A second finger on the same surface: what the first pressed
             // is let go without a click, and the two pinch.
@@ -195,7 +208,12 @@ impl TouchHandler for App {
             self.fingers.primary = None;
             self.flush_drag();
             let hit = self.surfaces[i].scene.borrow().hit_test(x, y);
+            // A list the finger stopped settles, if it snaps, once it lifts.
+            let stopped = self.surfaces[i].press.stopped.then_some(self.surfaces[i].pressed).flatten();
             self.pointer_release(i, hit, x, y, 0x110);
+            if let Some(node) = stopped {
+                self.deliver(i, node, Input::Hold(false));
+            }
             self.surfaces[i].scene.borrow_mut().set_pointer(None);
         }
     }
@@ -234,6 +252,9 @@ impl TouchHandler for App {
         if let Some((_, i, x, y)) = self.fingers.primary.take() {
             self.flush_drag();
             self.cancel_long_press(i);
+            if self.surfaces[i].press.pan.take().is_some() {
+                self.surfaces[i].pressed = None;
+            }
             if let Some(node) = self.surfaces[i].pressed.take() {
                 let (lx, ly) = self.surfaces[i].scene.borrow().local(node, x, y);
                 self.deliver(i, node, Input::Release(0x110, lx, ly));
