@@ -630,7 +630,9 @@ impl Pipeline {
         let mut bytes = vec![0u8; shaders.len() * STRIDE as usize];
         for (i, s) in shaders.iter().enumerate() {
             if !self.pipelines.contains_key(&s.key) {
+                let compiling = std::time::Instant::now();
                 let pipeline = self.compile(device, &s.source);
+                log::debug!("shader {:x}: compiled in {} ms (upload {})", s.key, compiling.elapsed().as_millis(), self.uploads);
                 self.pipelines.insert(s.key, (pipeline, 0));
             }
             let entry = self.pipelines.get_mut(&s.key).expect("inserted above");

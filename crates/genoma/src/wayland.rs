@@ -198,6 +198,9 @@ struct Surface {
     tally: (u64, Duration, Instant),
     /// The last frame's time on the main thread, for the overlay.
     built_ms: f32,
+    /// When the frame before began: the gap to this one is what a stall
+    /// between frames (the script's work, a layout) costs, traced.
+    last_frame: Option<Instant>,
     /// The blur and input regions last sent, as rectangles, so each is set
     /// only when it changes; the inputs `None` until the first is sent,
     /// because Wayland's default is the whole surface.
@@ -303,6 +306,7 @@ impl Surface {
             frames: 0,
             tally: (0, Duration::ZERO, Instant::now()),
             built_ms: 0.0,
+            last_frame: None,
             blurred: Vec::new(),
             inputs: None,
             holes: Vec::new(),
@@ -2150,6 +2154,9 @@ impl App {
         let qh = &self.qh;
         let s = &mut self.surfaces[i];
         let started = Instant::now();
+        if let Some(before) = s.last_frame.replace(started) {
+            log::trace!("surface {} gap {} us", s.id, started.duration_since(before).as_micros());
+        }
         // A lock surface's first frame waits for its pictures, a while: the
         // frame is laid out and listed, which asks for them, and only shown
         // once nothing is still decoding.
