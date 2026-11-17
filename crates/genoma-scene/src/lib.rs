@@ -5710,6 +5710,25 @@ mod tests {
     }
 
     #[test]
+    fn a_turned_path_is_turned_by_its_own_angle() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let n = scene.create(Kind::Path, Role::None);
+        scene.append(root, n);
+        scene.set(n, Prop::Width, Value::Number(200.0), None).unwrap();
+        scene.set(n, Prop::Height, Value::Number(200.0), None).unwrap();
+        scene.set(n, Prop::D, Value::Text("M 100 10 L 190 190 L 10 190 Z".into()), None).unwrap();
+        scene.set(n, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        scene.set(n, Prop::Rotate, Value::Number(30.0), None).unwrap();
+        scene.layout(Some(400.0), Some(400.0));
+        let list = scene.draw_list(1.0);
+        let m = list.paths[0].transform;
+        let (s, c) = 30f32.to_radians().sin_cos();
+        assert!((m[0][0] - c).abs() < 1e-4 && (m[0][1] + s).abs() < 1e-4 && (m[1][0] - s).abs() < 1e-4, "{m:?}");
+    }
+
+    #[test]
     fn a_capsule_is_combined_with_the_one_it_names() {
         let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
         let mut scene = Scene::new(fonts);

@@ -292,6 +292,22 @@ fn same_text(a: &Text, b: &Text) -> bool {
     Arc::ptr_eq(&a.buffer, &b.buffer) && a.origin == b.origin && a.scale == b.scale && a.color == b.color && a.clip == b.clip
 }
 
+/// A depth matrix (by rows, applied to a column: M · p, its move in the last
+/// column) for a picture whose corner is at (dx, dy): T(−d) · M · T(d), so
+/// what was drawn at q from p is drawn at q − d from p − d.
+fn moved_matrix(m: &mut [[f32; 4]; 4], dx: f32, dy: f32) {
+    // M · T(d): each row's last column gains dx and dy times its first two.
+    for row in m.iter_mut() {
+        row[3] += dx * row[0] + dy * row[1];
+    }
+    // T(−d) · …: rows 0 and 1 lose dx and dy times row 3.
+    let r3 = m[3];
+    for c in 0..4 {
+        m[0][c] -= dx * r3[c];
+        m[1][c] -= dy * r3[c];
+    }
+}
+
 /// What an item covers, clipped: everything its clip allows when it is
 /// tilted (`anywhere`), as its own corners no longer say where it lands.
 fn bounds(origin: [f32; 2], size: [f32; 2], clip: [f32; 4], anywhere: bool) -> [f32; 4] {
@@ -644,13 +660,6 @@ impl DrawList {
     /// own matrix, so what depth turned stays turned; clips are measured
     /// before the matrix and are moved with it.
     pub fn shifted(mut self, dx: f32, dy: f32) -> DrawList {
-        // Row vectors: p · M · T, T's last row the move.
-        let after = |m: &mut [[f32; 4]; 4]| {
-            for row in m.iter_mut() {
-                row[0] -= dx * row[3];
-                row[1] -= dy * row[3];
-            }
-        };
         let clip = |c: &mut [f32; 4]| {
             c[0] -= dx;
             c[1] -= dy;
@@ -714,44 +723,31 @@ impl DrawList {
         for p in self.paint.iter_mut().flatten() {
             clip(p);
         }
-        // The matrices turn about surface points: moved before and after,
+        // The matrices turn about surface points; moved with everything else,
         // they turn the same way about the moved ones.
-        let before = |m: &mut [[f32; 4]; 4]| {
-            // p · T⁻¹ · M · T with T⁻¹ adding the move back: row 3 of M gains
-            // dx · row 0 + dy · row 1.
-            let (r0, r1) = (m[0], m[1]);
-            for (c, v) in m[3].iter_mut().enumerate() {
-                *v += dx * r0[c] + dy * r1[c];
-            }
-        };
         for r in &mut self.rects {
             if r.transform != Rect::IDENTITY {
-                before(&mut r.transform);
-                after(&mut r.transform);
+                moved_matrix(&mut r.transform, dx, dy);
             }
         }
         for p in &mut self.paths {
             if p.transform != Rect::IDENTITY {
-                before(&mut p.transform);
-                after(&mut p.transform);
+                moved_matrix(&mut p.transform, dx, dy);
             }
         }
         for i in &mut self.images {
             if i.transform != Rect::IDENTITY {
-                before(&mut i.transform);
-                after(&mut i.transform);
+                moved_matrix(&mut i.transform, dx, dy);
             }
         }
         for sh in &mut self.shaders {
             if sh.transform != Rect::IDENTITY {
-                before(&mut sh.transform);
-                after(&mut sh.transform);
+                moved_matrix(&mut sh.transform, dx, dy);
             }
         }
         for e in &mut self.emitters {
             if e.params.transform != Rect::IDENTITY {
-                before(&mut e.params.transform);
-                after(&mut e.params.transform);
+                moved_matrix(&mut e.params.transform, dx, dy);
             }
         }
         self
@@ -1040,6 +1036,32 @@ pub(crate) fn raw_handles(
 
 #[cfg(test)]
 mod tests {
+    /// A turned picture drawn into a texture whose corner is at (dx, dy)
+    /// lands where it did on the surface, less (dx, dy): a turn and a
+    /// perspective both (a rotated mask was drawn nowhere).
+    #[test]
+    fn a_turned_item_moved_into_a_picture_lands_where_it_did() {
+        let apply = |m: &[[f32; 4]; 4], p: [f32; 2]| {
+            let v = [p[0], p[1], 0.0, 1.0];
+            let q: Vec<f32> = m.iter().map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum()).collect();
+            [q[0] / q[3], q[1] / q[3]]
+        };
+        let (s, c) = 30f32.to_radians().sin_cos();
+        // A turn about (120, 120), then a perspective.
+        let turn = [[c, -s, 0.0, 120.0 - (c * 120.0 - s * 120.0)], [s, c, 0.0, 120.0 - (s * 120.0 + c * 120.0)], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let persp = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0001, 0.0002, 0.0, 1.0]];
+        for m in [turn, persp] {
+            let (dx, dy) = (20.0, 35.0);
+            let mut moved = m;
+            super::moved_matrix(&mut moved, dx, dy);
+            for p in [[100.0, 10.0], [190.0, 190.0], [10.0, 190.0]] {
+                let was = apply(&m, p);
+                let now = apply(&moved, [p[0] - dx, p[1] - dy]);
+                assert!((now[0] - (was[0] - dx)).abs() < 1e-3 && (now[1] - (was[1] - dy)).abs() < 1e-3, "{was:?} → {now:?}");
+            }
+        }
+    }
+
     /// The built-in pipelines' WGSL, checked as wgpu would at start: a
     /// mistake here otherwise shows first as a panic on the render thread.
     #[test]

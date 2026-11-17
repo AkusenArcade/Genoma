@@ -6,6 +6,16 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Fixed
+
+- A node turned (`rotate`, `rotate_x`/`rotate_y`, `affine`) inside a
+  picture Genoma draws apart — a mask, a blur, a pass, a blend, an
+  isolated group — was moved into that picture with its matrix the wrong
+  way round, so it landed elsewhere or nowhere: a turned mask showed
+  nothing. It lands where it is drawn on the surface.
+
 ## 0.1.17 — 2026-11-17
 
 ### Added
