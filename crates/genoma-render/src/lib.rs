@@ -281,6 +281,7 @@ fn same_shader(a: &Shader, b: &Shader) -> bool {
         && a.fade == b.fade
         && a.values == b.values
         && a.transform == b.transform
+        && a.pointer == b.pointer
         && a.backdrop == b.backdrop
 }
 
@@ -1145,6 +1146,28 @@ mod tests {
         list.push_image(image(200.0));
         list.push_rect(rect(400.0 + moved));
         list
+    }
+
+    #[test]
+    fn a_light_that_follows_the_pointer_is_drawn_again_when_it_moves() {
+        let light = |x: f32| Shader {
+            source: std::sync::Arc::new(String::new()),
+            key: 1,
+            origin: [0.0; 2],
+            size: [100.0, 40.0],
+            scale: 1.0,
+            time: 0.0,
+            alpha: 1.0,
+            clip: [0.0, 0.0, 1.0e6, 1.0e6],
+            fade: [0.0; 4],
+            values: Vec::new(),
+            transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            pointer: [x, 20.0, 1.0, 0.0],
+            backdrop: None,
+            sim: None,
+        };
+        assert!(same_shader(&light(10.0), &light(10.0)));
+        assert!(!same_shader(&light(30.0), &light(10.0)), "the pointer is part of what it draws");
     }
 
     #[test]

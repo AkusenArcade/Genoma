@@ -6,6 +6,27 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `genoma snapshot --pointer "N X Y"`: the pointer brought to a point of
+  surface N, logical units. What is under it hears it enter and move, and
+  a shader that reads `shader.pointer` is drawn with it there: a light
+  that follows the hand can be checked without a compositor.
+
+### Fixed
+
+- A shader that reads `shader.pointer` became what the pointer hits, so
+  laid over buttons it took their hover and their press. It still keeps
+  its surface taking the pointer, but the hit goes to what is under it: a
+  light drawn over a panel's content leaves the content working.
+- A shader that reads `shader.pointer` stayed where the pointer first
+  came onto it: a move changed nothing the frame's damage looked at, so
+  nothing was drawn again until something else moved. The pointer is now
+  part of what such a shader draws, and only such a shader is handed it,
+  so a move redraws it and nothing else.
+
 ## 0.1.18 — 2026-11-17
 
 ### Added

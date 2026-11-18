@@ -6,7 +6,7 @@
 //!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME] [--wait SECONDS]
 //!                         [--entry FILE] [--mock @genoma/NAME=FILE]…
 //!                         [--ipc "TARGET FUNCTION ARGS…" | --click ID | --wheel "ID DX DY"
-//!                          | --sleep SECONDS]…
+//!                          | --pointer "N X Y" | --sleep SECONDS]…
 //!
 //! The interface gets one screen of that size and name (1920×1080, "SNAP"
 //! unless told), its services as they are on this machine, and `--wait`
@@ -15,7 +15,10 @@
 //! (`--ipc "cell toggle clock"`), each `--click` a press and release on the
 //! node of that id, each `--wheel` a touchpad's movement over it (logical
 //! units, down and right positive, as a finger dragged up and left moves a
-//! list), each `--sleep` time going by. A `--mock` gives a module
+//! list), each `--pointer` the pointer brought to that point of surface N
+//! (the number its picture is named with), logical units: what is under
+//! hears it enter and move, and a shader reading the pointer sees it
+//! there. Each `--sleep` is time going by. A `--mock` gives a module
 //! of the test's own for a service (`--mock @genoma/vitals=busy.luau`, a
 //! table with the readings a cell is to be seen with). Into `--out`
 //! (`snapshot/` by default) go `<n>-<namespace>.png` for each surface
@@ -52,6 +55,7 @@ enum Step {
     Ipc(Vec<String>),
     Click(String),
     Wheel(String, f64, f64),
+    Pointer(usize, f32, f32),
     Sleep(f64),
 }
 
@@ -88,6 +92,14 @@ fn options(args: Vec<String>) -> Result<Options, String> {
                 let number = |s: &str| s.parse::<f64>().map_err(|_| "--wheel is \"ID DX DY\"".to_owned());
                 let [id, dx, dy] = w.as_slice() else { return Err("--wheel is \"ID DX DY\"".into()) };
                 o.steps.push(Step::Wheel((*id).to_owned(), number(dx)?, number(dy)?));
+            }
+            "--pointer" => {
+                let v = value("--pointer")?;
+                let parts: Vec<&str> = v.split_whitespace().collect();
+                let [n, x, y] = parts.as_slice() else { return Err("--pointer is \"N X Y\"".into()) };
+                let n = n.parse::<usize>().map_err(|_| format!("--pointer: {n} is not a surface's number"))?;
+                let at = |f: &str| f.parse::<f32>().map_err(|_| format!("--pointer: {f} is not a number"));
+                o.steps.push(Step::Pointer(n, at(x)?, at(y)?));
             }
             "--sleep" => o.steps.push(Step::Sleep(value("--sleep")?.parse().map_err(|_| "--sleep: seconds")?)),
             "--mock" => {
@@ -234,6 +246,24 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
                 let (t, node) = shown(&targets, id).ok_or_else(|| format!("--wheel {id}: no node with that id is shown"))?;
                 script.borrow().dispatch(t, node, genoma_script::Input::Wheel(*dx, *dy, false));
             }
+            &Step::Pointer(t, x, y) => {
+                let scene = targets.get(t).ok_or_else(|| format!("--pointer {t}: there is no surface {t}"))?.2.clone();
+                scene.borrow_mut().set_pointer(Some((x, y, false)));
+                // As the runtime tells it: the node under the pointer and
+                // each of its ancestors entered, outermost first, then the
+                // move to the one under it.
+                let hit = scene.borrow().hit_test(x, y);
+                if let Some(hit) = hit {
+                    let mut chain = vec![hit];
+                    while let Some(up) = scene.borrow().parent(*chain.last().unwrap()) {
+                        chain.push(up);
+                    }
+                    for n in chain.iter().rev() {
+                        script.borrow().dispatch(t, *n, genoma_script::Input::Hover(true));
+                    }
+                    script.borrow().dispatch(t, hit, genoma_script::Input::Move(x, y));
+                }
+            }
             Step::Sleep(seconds) => pass(*seconds)?,
         }
         pass(0.05)?;
@@ -343,6 +373,8 @@ mod tests {
         assert_eq!((o.dir, o.size, o.wait), (PathBuf::from("shell"), (800, 600), 0.5));
         assert_eq!(o.steps, vec![Step::Ipc(vec!["cell".to_owned(), "toggle".into(), "clock".into()])]);
         let o = options(["s", "--click", "ok", "--wheel", "list 0 120", "--sleep", "1", "--mock", "@genoma/vitals=v.luau"].map(String::from).to_vec()).unwrap();
+        let h = options(["s", "--pointer", "0 120 18.5"].map(String::from).to_vec()).unwrap();
+        assert_eq!(h.steps, vec![Step::Pointer(0, 120.0, 18.5)]);
         assert_eq!(o.steps, vec![Step::Click("ok".into()), Step::Wheel("list".into(), 0.0, 120.0), Step::Sleep(1.0)]);
         assert_eq!(o.mocks, vec![("@genoma/vitals".to_owned(), PathBuf::from("v.luau"))]);
         assert!(options(vec!["--size".into()]).is_err());

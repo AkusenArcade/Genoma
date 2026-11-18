@@ -190,6 +190,11 @@ pub struct Node {
     offset: [f32; 2],
     /// Takes pointer input: it is hit-tested and belongs to the input region.
     interactive: bool,
+    /// Reads the pointer (a shader's or simulation's `shader.pointer`): the
+    /// surface takes the pointer over it, or it would never see it, but it
+    /// is not what the pointer hits. What is under it is, so a light laid
+    /// over buttons leaves them their hover and their press.
+    reads_pointer: bool,
     /// The frame it was last drawn in with something to see, and where it
     /// was then, unclipped: what the keyboard's focus may reach, and where
     /// a well scrolls to bring it into view.
@@ -441,6 +446,7 @@ impl Node {
             offset: [0.0; 2],
             // A field takes the pointer, to place its caret.
             interactive: kind == Kind::Field,
+            reads_pointer: false,
             drawn_frame: 0,
             morph_name: None,
             morph_timing: None,
@@ -1232,7 +1238,7 @@ impl Scene {
     pub fn input_rects(&self) -> Vec<[f32; 4]> {
         let mut rects = Vec::new();
         self.walk(self.root, &mut |_, n| {
-            if n.interactive {
+            if n.interactive || n.reads_pointer {
                 rects.push(n.bounds);
             }
         });
@@ -2195,11 +2201,7 @@ impl Scene {
                         None
                     }
                 };
-                // One that reads the pointer takes it, or the surface would
-                // let it through to what is under.
-                if n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer")) {
-                    n.interactive = true;
-                }
+                n.reads_pointer = reads_pointer(n);
             }
             Prop::Compute => {
                 let path = take!(text);
@@ -2240,9 +2242,7 @@ impl Scene {
                 // Started afresh with another file.
                 n.steps_taken = 0;
                 n.steps_owed = 0.0;
-                if n.compute.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer")) {
-                    n.interactive = true;
-                }
+                n.reads_pointer = reads_pointer(n);
                 mover = true;
             }
             Prop::Grid => {
@@ -4852,9 +4852,12 @@ fn collect_node(
                     fade: out.fade_of(),
                     values: n.shown.clone(),
                     transform: out.transform,
+                    // Only to one that reads it: the pointer is part of what
+                    // it draws, so a move is drawn again there and nowhere
+                    // else.
                     pointer: match out.pointer {
-                        Some((x, y, held)) => [x - origin[0], y - origin[1], 1.0, if held { 1.0 } else { 0.0 }],
-                        None => [-1.0e6, -1.0e6, 0.0, 0.0],
+                        Some((x, y, held)) if n.reads_pointer => [x - origin[0], y - origin[1], 1.0, if held { 1.0 } else { 0.0 }],
+                        _ => [-1.0e6, -1.0e6, 0.0, 0.0],
                     },
                     backdrop: out.under.filter(|(n, ..)| *n == node).map(|(_, key, at)| (key, at)),
                     sim,
@@ -5423,6 +5426,12 @@ fn path_svg(n: &Node, size: [f32; 2], pixels: [u32; 2]) -> Option<String> {
     ))
 }
 
+/// Whether a shader node's own code or its simulation's reads the pointer.
+fn reads_pointer(n: &Node) -> bool {
+    n.shader.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"))
+        || n.compute.as_ref().is_some_and(|(source, _)| source.contains("shader.pointer"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5673,6 +5682,24 @@ mod tests {
         scene.set(row, Prop::MoveWindow, Value::Bool(true), None).unwrap();
         assert!(scene.moves_window(row));
         assert!(scene.tree.get_node_context(row).unwrap().interactive);
+    }
+
+    #[test]
+    fn a_shader_that_reads_the_pointer_leaves_the_hit_to_what_is_under() {
+        let fonts = Arc::new(std::sync::Mutex::new(ct::FontSystem::new_with_fonts(std::iter::empty())));
+        let mut scene = Scene::new(fonts);
+        let root = scene.root();
+        let button = scene.create(Kind::Capsule, Role::Button);
+        let light = scene.create(Kind::Shader, Role::Group);
+        scene.append(root, button);
+        scene.append(root, light);
+        let file = std::env::temp_dir().join(format!("genoma-light-{}.wgsl", std::process::id()));
+        std::fs::write(&file, "fn shade(p: vec2<f32>) -> vec4<f32> { return vec4<f32>(shader.pointer.z); }").unwrap();
+        scene.set(light, Prop::Src, Value::Text(file.display().to_string()), None).unwrap();
+        let _ = std::fs::remove_file(&file);
+        let n = scene.tree.get_node_context(light).unwrap();
+        assert!(n.reads_pointer, "it reads the pointer");
+        assert!(!n.interactive, "but the button under it is what is hit");
     }
 
     #[test]
