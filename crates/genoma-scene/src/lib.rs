@@ -7,6 +7,7 @@
 //! when it next will (`Motion`); the surface asks the compositor for a frame
 //! only then.
 
+pub mod contours;
 mod distance;
 pub mod field;
 mod glyphs;
@@ -321,6 +322,8 @@ pub struct Node {
     shown: Vec<f32>,
     follow: f32,
     clock: bool,
+    /// How fast `time` runs while the clock does (`clock_rate`).
+    clock_rate: f32,
     time: f32,
     /// What it simulates (`compute`): the WGSL and its key; whether that
     /// file's own `shade` can draw the node, and why not; why the
@@ -527,6 +530,7 @@ impl Node {
             shown: Vec::new(),
             follow: 0.0,
             clock: false,
+            clock_rate: 1.0,
             time: 0.0,
             compute: None,
             compute_shades: Ok(()),
@@ -1797,6 +1801,7 @@ fn value_of(n: &Node, style: &Style, prop: Prop) -> Option<Value> {
             Prop::Bud => Value::Number(n.bud),
             Prop::CombineSoft => Value::Number(n.combine_soft),
             Prop::BlurRadius => Value::Number(n.blur_radius),
+            Prop::ClockRate => Value::Number(n.clock_rate),
             Prop::Saturation => Value::Number(n.filter[0]),
             Prop::Contrast => Value::Number(n.filter[1]),
             Prop::Brightness => Value::Number(n.filter[2]),
@@ -2280,6 +2285,7 @@ impl Scene {
             }
             Prop::Follow => n.follow = take!(number).max(0.0),
             Prop::Clock => (n.clock, mover) = (take!(flag), true),
+            Prop::ClockRate => n.clock_rate = take!(number).max(0.0),
             Prop::Fit => {
                 n.fit = match take!(text).as_str() {
                     "contain" => images::Fit::Contain,
@@ -2620,12 +2626,12 @@ impl Scene {
                 if n.clock || moving {
                     // A paced shader's frames are further apart than a
                     // clock's; after a quiet spell neither leaps.
-                    n.time += dt.min(if n.clock { most } else { 0.1 });
+                    n.time += dt.min(if n.clock { most } else { 0.1 }) * if n.clock { n.clock_rate } else { 1.0 };
                     self.dirty = true;
                 }
                 // Its simulation steps while its clock runs, at its rate.
                 if n.clock && n.compute.is_some() {
-                    n.steps_owed += n.steps_rate * dt.min(most);
+                    n.steps_owed += n.steps_rate * n.clock_rate * dt.min(most);
                     let whole = n.steps_owed.floor();
                     n.steps_owed -= whole;
                     n.steps_taken += whole as u64;

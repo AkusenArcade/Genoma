@@ -3,7 +3,7 @@
 //! seen and checked by a script or in CI, on a machine with a GPU but no
 //! desktop, and a change compared with the picture before it.
 //!
-//!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME] [--wait SECONDS]
+//!   genoma snapshot <dir> [--out DIR] [--size WxH] [--output NAME] [--wait SECONDS] [--frames]
 //!                         [--entry FILE] [--mock @genoma/NAME=FILE]…
 //!                         [--ipc "TARGET FUNCTION ARGS…" | --click ID | --wheel "ID DX DY"
 //!                          | --pointer "N X Y" | --sleep SECONDS]…
@@ -18,7 +18,8 @@
 //! list), each `--pointer` the pointer brought to that point of surface N
 //! (the number its picture is named with), logical units: what is under
 //! hears it enter and move, and a shader reading the pointer sees it
-//! there. Each `--sleep` is time going by. A `--mock` gives a module
+//! there. Each `--sleep` is time going by. `--frames` draws every frame of
+//! the waits, not only the last: a simulation steps only as it is drawn. A `--mock` gives a module
 //! of the test's own for a service (`--mock @genoma/vitals=busy.luau`, a
 //! table with the readings a cell is to be seen with). Into `--out`
 //! (`snapshot/` by default) go `<n>-<namespace>.png` for each surface
@@ -47,6 +48,9 @@ struct Options {
     entry: Option<String>,
     mocks: Vec<(String, PathBuf)>,
     steps: Vec<Step>,
+    /// Every frame of the waits drawn, not only the last: a simulation
+    /// steps only as it is drawn, at most eight steps a frame.
+    frames: bool,
 }
 
 /// What is done after the load, in the order written.
@@ -70,6 +74,7 @@ fn options(args: Vec<String>) -> Result<Options, String> {
         entry: None,
         mocks: Vec::new(),
         steps: Vec::new(),
+        frames: false,
     };
     let mut dir = None;
     while let Some(a) = it.next() {
@@ -82,6 +87,7 @@ fn options(args: Vec<String>) -> Result<Options, String> {
                 o.size = (w.parse().map_err(|_| "--size: a width")?, h.parse().map_err(|_| "--size: a height")?);
             }
             "--output" => o.output = value("--output")?,
+            "--frames" => o.frames = true,
             "--wait" => o.wait = value("--wait")?.parse().map_err(|_| "--wait: seconds")?,
             "--entry" => o.entry = Some(value("--entry")?),
             "--ipc" => o.steps.push(Step::Ipc(value("--ipc")?.split_whitespace().map(str::to_owned).collect())),
@@ -205,8 +211,12 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
                 let (ready, sized) = {
                     let mut s = scene.borrow_mut();
                     let _ = s.advance(Instant::now(), 1.0);
-                    s.layout(w, h);
-                    let _ = s.draw_list(1.0);
+                    let size = s.layout(w, h);
+                    let list = s.draw_list(1.0);
+                    if o.frames {
+                        let (pw, ph) = (size.0.ceil().max(1.0) as u32, size.1.ceil().max(1.0) as u32);
+                        renderer.snapshot(pw, ph, list)?;
+                    }
                     (s.take_ready(), s.take_sized())
                 };
                 // Told after the frame, as the runtime tells them: a node

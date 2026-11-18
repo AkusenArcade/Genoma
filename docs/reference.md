@@ -106,6 +106,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `values` | { number } |  | A shader's numbers, up to 1024: what its `value(i)` reads. |
 | `follow` | number |  | Seconds a shader's numbers take to ease most of the way to new values (an exponential's time constant); 0 is at once. |
 | `clock` | boolean |  | While true a shader's `shader.time` runs, a frame every refresh; it also runs while its numbers ease. Bind it to the value that moves it. |
+| `clock_rate` | number | yes | How fast a shader's `shader.time` runs while its clock does: 1 (the default) is real time, 2 twice as fast, 0 held, and a simulation's steps with it. Animated, the speed changes smoothly and the time never jumps: a motion that quickens with a value. |
 | `fit` | "cover" \| "contain" \| "fill" |  | How an image fills its box: cover crops it about its centre, contain shows it whole, fill stretches it. |
 | `gradient_top` | colour |  | Paints an icon in a 165° gradient from this colour… |
 | `gradient_bottom` | colour |  | …to this one. |
@@ -652,6 +653,14 @@ dbus: { -- g.dbus.call { bus, destination, path, interface, method, -- signature
 ```luau
 pam: { -- g.pam.start { service, directory, user, on_prompt(message, echo), -- on_message(message, error), on_done(result) }. start: (t: { [string]: any }) -> Auth }
 ```
+
+### `g.contours`
+
+```luau
+contours: (t: { [string]: any }) -> ()
+```
+
+g.contours { src, size, most, shortest, on_done(lines, width, height) }: the outlines in a picture, found off the frame. Each line is { x1, y1, x2, y2, … } from 0 to 1 of the picture, longest first; width and height its own size in pixels; nil for a picture that cannot be read. Read once per picture: a wallpaper's lines for something to travel along.
 
 ### `g.greetd`
 

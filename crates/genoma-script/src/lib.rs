@@ -14,6 +14,7 @@ use std::{
 };
 
 mod auth;
+mod contours;
 mod colour;
 mod scroll;
 mod profile;
@@ -3018,6 +3019,10 @@ impl Script {
         dbus_table.set("set", lua.create_function(move |_, t: Table| dbus::set_from(&f()?, t))?)?;
         let f = get_dbus.clone();
         dbus_table.set("watch", lua.create_function(move |_, t: Table| dbus::watch_from(&f()?, t))?)?;
+        // g.contours { … }: a picture's outlines, from a thread, through the
+        // same channel into the loop.
+        let f = get_dbus.clone();
+        g.set("contours", lua.create_function(move |_, t: Table| contours::start(&f()?, t))?)?;
         // g.pam.start { … }: PAM, through the same channel into the loop.
         let pam_table = lua.create_table()?;
         let f = get_dbus;

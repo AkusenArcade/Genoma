@@ -10,6 +10,17 @@ changes what a shell sees.
 
 ### Added
 
+- `g.contours { src, size, most, shortest, on_done(lines, width, height) }`:
+  the outlines in a picture as lines, found on a thread (smoothed, Canny's
+  edges walked into chains, simplified and rounded, longest first), each
+  `{ x1, y1, … }` from 0 to 1 of the picture. Once per picture: lines for
+  something to travel along. A 4412 × 2362 JPEG takes about 45 ms.
+- `clock_rate` on a shader: how fast `shader.time` runs while its clock
+  does, and a simulation's steps with it; animatable, so a motion quickens
+  or slows with a value without its time ever jumping.
+- `genoma snapshot --frames`: every frame of the waits drawn, not only the
+  last, so a simulation (which steps only as it is drawn, at most eight
+  steps a frame) is seen where it has got to.
 - `genoma snapshot --pointer "N X Y"`: the pointer brought to a point of
   surface N, logical units. What is under it hears it enter and move, and
   a shader that reads `shader.pointer` is drawn with it there: a light

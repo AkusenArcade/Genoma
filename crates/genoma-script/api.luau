@@ -404,6 +404,13 @@ export type G = {
         -- on_message(message, error), on_done(result) }.
         start: (t: { [string]: any }) -> Auth,
     },
+    -- g.contours { src, size, most, shortest, on_done(lines, width, height) }:
+    -- the outlines in a picture, found off the frame. Each line is
+    -- { x1, y1, x2, y2, … } from 0 to 1 of the picture, longest first;
+    -- width and height its own size in pixels; nil for a picture that
+    -- cannot be read. Read once per picture: a wallpaper's lines for
+    -- something to travel along.
+    contours: (t: { [string]: any }) -> (),
     -- g.greetd { on_auth_message(message, kind), on_ready, on_launched,
     -- on_failure(description), on_error }.
     greetd: (t: { [string]: any }) -> Greetd,
