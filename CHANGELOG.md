@@ -26,6 +26,12 @@ changes what a shell sees.
   nothing was drawn again until something else moved. The pointer is now
   part of what such a shader draws, and only such a shader is handed it,
   so a move redraws it and nothing else.
+- An image reaching well past its surface (a wallpaper spanned over two
+  monitors) went black while it moved: only the part on the surface is
+  decoded, and that part was measured to the pixel, so every move asked
+  for a new decode and drew nothing until it came. The part is now widened
+  and snapped to 64 decoded pixels, and while a part that moved is being
+  decoded the last one is drawn on.
 
 ## 0.1.18 — 2026-11-17
 

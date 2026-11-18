@@ -222,6 +222,10 @@ pub struct Node {
     playing: bool,
     play_time: f32,
     frame_left: f32,
+    /// The part of an image last drawn, in its decoded pixels, when only a
+    /// part is kept (`visible_part`): drawn on while a part that moved is
+    /// decoded, so a picture sliding over the surface never goes blank.
+    crop_shown: Option<[u32; 4]>,
     /// A nine-slice's edges in the picture's own pixels: top, right,
     /// bottom, left; `None` is an ordinary image.
     slice: Option<[f32; 4]>,
@@ -462,6 +466,7 @@ impl Node {
             playing: true,
             play_time: 0.0,
             frame_left: f32::INFINITY,
+            crop_shown: None,
             slice: None,
             mask: false,
             pass: false,
@@ -3246,6 +3251,10 @@ fn draw_field(fonts: &mut ct::FontSystem, n: &mut Node, origin: [f32; 2], layout
     out.clip = saved;
 }
 
+/// The step a kept part of an image is widened and snapped by, decoded
+/// pixels (`visible_part`).
+const CROP_STEP: f32 = 64.0;
+
 /// The part of an image on the surface, in its decoded pixels (x, y, w,
 /// h), when it reaches well past the surface and is drawn flat, its decode
 /// in proportion to its box; `None` to keep it whole.
@@ -3269,10 +3278,17 @@ fn visible_part(at: [f32; 2], size: [u32; 2], decoded: [u32; 2], viewport: [f32;
     if (x1 - x0) * (y1 - y0) > 0.9 * w * h {
         return None;
     }
-    let cx = (((x0 - at[0]) * sx).floor() as u32).min(decoded[0] - 1);
-    let cy = (((y0 - at[1]) * sy).floor() as u32).min(decoded[1] - 1);
-    let cw = ((((x1 - at[0]) * sx).ceil() as u32).min(decoded[0]) - cx).max(1);
-    let ch = ((((y1 - at[1]) * sy).ceil() as u32).min(decoded[1]) - cy).max(1);
+    // Widened by a step of CROP_STEP decoded pixels each way and snapped
+    // out to that step: a picture that moves a little (a wallpaper
+    // following the pointer) keeps its part, rather than asking for a new
+    // decode at every pixel it moves, and what it reveals before a new part
+    // arrives is already in the old one.
+    let snap_down = |v: f32| ((v / CROP_STEP).floor() - 1.0).max(0.0) * CROP_STEP;
+    let snap_up = |v: f32, max: u32| (((v / CROP_STEP).ceil() + 1.0) * CROP_STEP).min(max as f32);
+    let cx = (snap_down((x0 - at[0]) * sx) as u32).min(decoded[0] - 1);
+    let cy = (snap_down((y0 - at[1]) * sy) as u32).min(decoded[1] - 1);
+    let cw = ((snap_up((x1 - at[0]) * sx, decoded[0]) as u32) - cx).max(1);
+    let ch = ((snap_up((y1 - at[1]) * sy, decoded[1]) as u32) - cy).max(1);
     Some([cx, cy, cw, ch])
 }
 
@@ -4963,8 +4979,20 @@ fn collect_node(
                 // monitors does on each: only the part on it is kept, in the
                 // decoded picture's own pixels. A spanned 3440 × 2520 was
                 // kept whole on both screens.
-                let crop = visible_part(at, [w, h], [dw, dh], out.viewport, out.transform == Rect::IDENTITY);
-                if let Some((key, data, left)) = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, crop, n.play_time) {
+                let wanted = visible_part(at, [w, h], [dw, dh], out.viewport, out.transform == Rect::IDENTITY);
+                let mut crop = wanted;
+                let mut got = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, wanted, n.play_time);
+                if got.is_some() {
+                    n.crop_shown = wanted;
+                } else if let (Some(_), Some(shown)) = (wanted, n.crop_shown) {
+                    // The part moved and is being decoded: the last one
+                    // until it is there, rather than nothing.
+                    if Some(shown) != wanted {
+                        got = out.images.get_part(&source, dw, dh, n.fit, 0.0, soften, Some(shown), n.play_time);
+                        crop = Some(shown);
+                    }
+                }
+                if let Some((key, data, left)) = got {
                     out.drawn_images.push(node);
                     n.frame_left = left.unwrap_or(f32::INFINITY);
                     if left.is_some() {
