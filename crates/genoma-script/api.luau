@@ -192,6 +192,14 @@ export type WindowSurface = {
     -- The compositor asks to close it. With this, it is only told, and
     -- goes when `present` lets it go; without, it closes itself for good.
     on_close: (() -> ())?,
+    -- On the whole screen, or a function saying when: asked of the
+    -- compositor each time the answer changes (true before it opens, it
+    -- opens there). The compositor may refuse or end it on its own.
+    fullscreen: (boolean | () -> boolean)?,
+    -- The compositor put it on the whole screen or took it off (its own
+    -- key, a refusal): `fullscreen` follows it here, or it is asked again
+    -- only when its own answer next changes.
+    on_fullscreen: ((on: boolean) -> ())?,
     [number]: any,
 }
 

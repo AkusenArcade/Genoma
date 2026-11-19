@@ -4,8 +4,9 @@
 --
 --   genoma examples/showcase
 --
--- A window like any program's: the compositor places it, and its own
--- fullscreen (niri's Mod+Shift+F) gives it the whole screen.
+-- A window like any program's: the compositor places it; F11, or the
+-- compositor's own fullscreen (niri's Mod+Shift+F), gives it the whole
+-- screen, and either takes it back.
 --
 -- → space or a click: the next slide; ← or the right button: the one
 -- before; a swipe either way. Digits go to a slide by its number. C shows
@@ -146,9 +147,15 @@ local function digit(d: string)
     end
 end
 
+-- On the whole screen: asked with F11, and following the compositor when
+-- its own key puts it there or takes it off.
+local whole = g.signal(false)
+
 local function key(name: string, text: string?)
     if name == "Escape" then
         g.quit()
+    elseif name == "F11" then
+        whole.value = not g.untracked(function() return whole.value end)
     elseif name == "Right" or name == "space" or name == "Next" or name == "Return" or name == "Down" then
         next_slide()
     elseif name == "Left" or name == "BackSpace" or name == "Prior" or name == "Up" then
@@ -350,6 +357,8 @@ return g.window {
     width = 1280,
     height = 720,
     min = { 640, 360 },
+    fullscreen = function() return whole.value end,
+    on_fullscreen = function(on: boolean) whole.value = on end,
 
     -- The whole window, whatever the compositor gives: it grows into it
     -- and measures it, and the stage inside is scaled to fit.

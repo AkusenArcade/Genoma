@@ -121,6 +121,12 @@ struct WindowRole {
     fraction: Option<WpFractionalScaleV1>,
     title: String,
     maximized: bool,
+    /// Whether the last configure had it on the whole screen.
+    fullscreen: bool,
+    /// What was last asked of the compositor: asked again only when the
+    /// wish changes, so a window the compositor took off the screen (its
+    /// own key) is not forced back by a wish that still says yes.
+    fullscreen_asked: bool,
 }
 
 /// What a popup opens from: a layer surface, or a window.
@@ -268,6 +274,8 @@ struct Surface {
     anchor_wish: Option<String>,
     /// A window's title as its function gives it now.
     title_wish: Option<String>,
+    /// Whether a window wants the whole screen, when its description says.
+    fullscreen_wish: Option<bool>,
     /// When a window's title bar was last pressed: twice soon maximizes.
     title_pressed: Option<Instant>,
     /// A field has the keys while nothing catches: the surface takes the
@@ -323,6 +331,7 @@ impl Surface {
             dismissed: false,
             anchor_wish: None,
             title_wish: None,
+            fullscreen_wish: None,
             title_pressed: None,
             typing: false,
             strokes: Vec::new(),
@@ -466,6 +475,9 @@ pub struct App {
     /// Popups the compositor closed, by description and output, for the
     /// interface to hear.
     dismissed: Vec<(usize, Option<String>)>,
+    /// Windows the compositor put on the whole screen or took off it since
+    /// the last look: their description, and whether they are on it now.
+    fullscreened: Vec<(usize, bool)>,
     /// `text-input-v3`: an input method composing into the field that has
     /// the keys (CJK, emoji, dictation).
     text_input_manager: Option<ZwpTextInputManagerV3>,
@@ -570,6 +582,7 @@ impl App {
             tokens: Vec::new(),
             input_surface: None,
             dismissed: Vec::new(),
+            fullscreened: Vec::new(),
             text_input_manager: None,
             text_input: None,
             touch: None,
@@ -1082,6 +1095,14 @@ impl App {
                         open.title = title;
                     }
                 }
+                let whole = self.surfaces[i].fullscreen_wish;
+                if let Role::Window(Some(open)) = &mut self.surfaces[i].role
+                    && let Some(whole) = whole
+                    && whole != open.fullscreen_asked
+                {
+                    if whole { open.window.set_fullscreen(None) } else { open.window.unset_fullscreen() }
+                    open.fullscreen_asked = whole;
+                }
             }
             _ => {}
         }
@@ -1118,11 +1139,17 @@ impl App {
         window.set_app_id(spec.app_id.clone());
         window.set_min_size(spec.min);
         window.set_max_size(spec.max);
+        // Asked before the first commit, so it opens on the whole screen
+        // rather than growing to it.
+        let whole = self.surfaces[i].fullscreen_wish == Some(true);
+        if whole {
+            window.set_fullscreen(None);
+        }
         // The first commit carries no buffer: the compositor answers it with
         // the first configure, and the size it gives.
         window.commit();
         let s = &mut self.surfaces[i];
-        s.role = Role::Window(Some(WindowRole { window, fraction, title, maximized: false }));
+        s.role = Role::Window(Some(WindowRole { window, fraction, title, maximized: false, fullscreen: false, fullscreen_asked: whole }));
         s.viewport = viewport;
         s.effect = effect;
         s.logical = spec.size;
@@ -1426,6 +1453,11 @@ impl App {
                 },
             );
         }
+    }
+
+    /// Windows put on the whole screen or taken off it since the last look.
+    pub fn take_fullscreened(&mut self) -> Vec<(usize, bool)> {
+        std::mem::take(&mut self.fullscreened)
     }
 
     /// The tokens the compositor gave since the last look, by request.
@@ -2049,8 +2081,10 @@ impl App {
             let asleep = !wish.present;
             // A popup's anchor moves it at the next batch (sync_popups).
             s.anchor_wish = wish.anchor.clone();
-            // A window's title is set at the next batch (sync_window).
+            // A window's title and whether it wants the whole screen are
+            // asked for at the next batch (sync_window).
             s.title_wish = wish.title.clone();
+            s.fullscreen_wish = wish.fullscreen;
             if s.asleep == asleep && s.reserve_wish == wish.reserve {
                 continue;
             }
@@ -3343,9 +3377,16 @@ impl WindowHandler for App {
         let (w, h) = configure.new_size;
         s.logical = (w.map_or(s.logical.0, |v| v.get()), h.map_or(s.logical.1, |v| v.get()));
         s.wanted = s.logical;
+        let spec = s.spec;
         if let Role::Window(Some(open)) = &mut s.role {
             open.maximized = configure.is_maximized();
+            let whole = configure.is_fullscreen();
+            if whole != open.fullscreen {
+                open.fullscreen = whole;
+                self.fullscreened.push((spec, whole));
+            }
         }
+        let s = &mut self.surfaces[i];
         s.configured = true;
         s.dirty = true;
         // A configure must be answered with a buffer, frame callback or not.

@@ -8,6 +8,15 @@ changes what a shell sees.
 
 ## Unreleased
 
+### Added
+
+- `fullscreen` on `g.window` (a boolean, or a function saying when): the
+  compositor is asked to put the window on the whole screen, or take it
+  off, each time the answer changes; true from the start, it opens there.
+  `on_fullscreen(on)` hears the compositor do it on its own (niri's
+  Mod+Shift+F, a refusal), so a signal behind `fullscreen` can follow and
+  F11 keeps working after either. The showcase takes F11.
+
 ### Changed
 
 - A simulation's `agents` changing no longer starts it again. Those there

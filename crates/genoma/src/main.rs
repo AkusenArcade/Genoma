@@ -1072,6 +1072,9 @@ fn run(dir: PathBuf, entry: Option<String>) {
             for (spec, output) in app.take_dismissed() {
                 script.borrow().dismissed(spec, output);
             }
+            for (spec, whole) in app.take_fullscreened() {
+                script.borrow().fullscreened(spec, whole);
+            }
             for (id, token) in app.take_tokens() {
                 script.borrow().activation_done(id, token);
             }

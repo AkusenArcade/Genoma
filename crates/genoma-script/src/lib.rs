@@ -2121,6 +2121,8 @@ pub struct Script {
     /// By surface description: a popup's `on_dismiss`, called when the
     /// compositor closed it (a press elsewhere).
     dismissers: Vec<Option<Function>>,
+    /// Each window's `on_fullscreen`, by description.
+    fullscreeners: Vec<Option<Function>>,
     sizes: Vec<Option<Signal<(f64, f64)>>>,
 }
 
@@ -2138,11 +2140,14 @@ pub struct Wish {
     pub anchor: Option<String>,
     /// A window's title, when its description gave a function for it.
     pub title: Option<String>,
+    /// Whether a window wants the whole screen, when its description said
+    /// (`fullscreen`, a boolean or a function).
+    pub fullscreen: Option<bool>,
 }
 
 impl Default for Wish {
     fn default() -> Self {
-        Wish { present: true, reserve: None, anchor: None, title: None }
+        Wish { present: true, reserve: None, anchor: None, title: None, fullscreen: None }
     }
 }
 
@@ -2189,6 +2194,7 @@ impl Script {
             load_owner: None,
             fluid: Vec::new(),
             dismissers: Vec::new(),
+            fullscreeners: Vec::new(),
             windows: Vec::new(),
             sizes: Vec::new(),
         }
@@ -2414,6 +2420,17 @@ impl Script {
         }
     }
 
+    /// The compositor put a window (description `spec`, on `output`) on the
+    /// whole screen or took it off: its `on_fullscreen` is told, so what
+    /// the interface wants can follow what the compositor did.
+    pub fn fullscreened(&self, spec: usize, on: bool) {
+        if let Some(Some(f)) = self.fullscreeners.get(spec)
+            && let Err(e) = f.call::<()>(on)
+        {
+            log::error!("g.window on_fullscreen: {e}");
+        }
+    }
+
     /// Whether an interface has required the service (`"clock"`, `"niri"`,
     /// `"vitals"`): a service nobody required has no source running.
     pub fn wants(&self, service: &str) -> bool {
@@ -2507,6 +2524,15 @@ impl Script {
                 t.get::<Option<Function>>(key).ok().flatten()
             })
             .collect();
+        let fullscreeners: Vec<Option<Function>> = surfaces
+            .iter()
+            .map(|t| {
+                if t.get::<Option<bool>>("__window").ok().flatten() != Some(true) {
+                    return None;
+                }
+                t.get::<Option<Function>>("on_fullscreen").ok().flatten()
+            })
+            .collect();
         let (scope, result) = Scope::new(|| -> mlua::Result<(Vec<genoma_scene::NodeId>, Vec<Scope>, Option<usize>, Vec<Option<Signal<(f64, f64)>>>)> {
             let load_owner = current_owner();
             let mut holders = Vec::new();
@@ -2553,7 +2579,11 @@ impl Script {
                     LuaValue::Function(f) if surface.get::<Option<bool>>("__window")? == Some(true) => Some(f),
                     _ => None,
                 };
-                if present.is_none() && reserve.is_none() && anchor.is_none() && title.is_none() {
+                let fullscreen = match surface.get::<LuaValue>("fullscreen")? {
+                    v @ (LuaValue::Function(_) | LuaValue::Boolean(_)) if surface.get::<Option<bool>>("__window")? == Some(true) => Some(v),
+                    _ => None,
+                };
+                if present.is_none() && reserve.is_none() && anchor.is_none() && title.is_none() && fullscreen.is_none() {
                     continue;
                 }
                 let (wishes, changed, output) = (wishes.clone(), wishes_changed.clone(), output.clone());
@@ -2588,7 +2618,14 @@ impl Script {
                             None
                         }
                     });
-                    let wish = Wish { present: is_present, reserve: reserving, anchor: anchoring, title: titled };
+                    let whole = fullscreen.as_ref().map(|v| match v {
+                        LuaValue::Function(f) => f.call::<Option<bool>>(output.clone()).unwrap_or_else(|e| {
+                            log::error!("g.window fullscreen: {e}");
+                            None
+                        }) == Some(true),
+                        other => matches!(other, LuaValue::Boolean(true)),
+                    });
+                    let wish = Wish { present: is_present, reserve: reserving, anchor: anchoring, title: titled, fullscreen: whole };
                     let mut all = wishes.borrow_mut();
                     if let Some(w) = all.get_mut(index) {
                         if *w != wish {
@@ -2606,6 +2643,7 @@ impl Script {
                 self.fluid = fluid;
                 self.windows = windows;
                 self.dismissers = dismissers;
+                self.fullscreeners = fullscreeners;
                 self.target_scopes = target_scopes.into_iter().map(Some).collect();
                 self.load_owner = load_owner;
                 if let Some(old) = self.scope.take() {

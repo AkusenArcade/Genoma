@@ -2356,6 +2356,8 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `max` | `{ number }?` |  |
 | `present` | `(() -> boolean)?` |  |
 | `on_close` | `(() -> ())?` | The compositor asks to close it. With this, it is only told, and goes when `present` lets it go; without, it closes itself for good. |
+| `fullscreen` | `(boolean \| () -> boolean)?` | On the whole screen, or a function saying when: asked of the compositor each time the answer changes (true before it opens, it opens there). The compositor may refuse or end it on its own. |
+| `on_fullscreen` | `((on: boolean) -> ())?` | The compositor put it on the whole screen or took it off (its own key, a refusal): `fullscreen` follows it here, or it is asked again only when its own answer next changes. |
 | `[number]` | `any` |  |
 
 ### Colour
