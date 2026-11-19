@@ -10,6 +10,13 @@ changes what a shell sees.
 
 ### Added
 
+- `g_previous(p)` in a `pass` shader: what that pass drew the time before
+  (transparent the first time and after a change of size), read as
+  `g_backdrop` reads what is under it. A trail is the old picture faded
+  under the new one — Sinestesia's Scia, motion blur. The renderer keeps
+  one picture per pass that reads it; the pass is drawn again only while
+  its clock runs, so a trail rests when its clock does.
+
 - `g.websocket { url, protocols, headers, on_open, on_message(data,
   binary), on_close(code, reason) }`, `ws://` and `wss://` (rustls with
   ring, the server checked against the system's certificates). The name,

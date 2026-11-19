@@ -29,6 +29,11 @@ pub(crate) struct Gpu {
     recent: HashMap<SurfaceId, std::collections::VecDeque<std::time::Instant>>,
     /// The last frame's damage, as `draw_inner` worked it out.
     damaged: crate::Damage,
+    /// What each pass that reads it (`g_previous`) drew the last time, by
+    /// its node and its place among the group's passes: the picture, its
+    /// size, and the pass count when it was drawn.
+    previous: HashMap<(u64, usize), (wgpu::TextureView, [u32; 2], u64)>,
+    passes_drawn: u64,
 }
 
 /// Glyphon's pieces, made once the surface format is known.
@@ -131,6 +136,8 @@ impl Gpu {
             stats,
             recent: HashMap::new(),
             damaged: crate::Damage::Whole,
+            previous: HashMap::new(),
+            passes_drawn: 0,
         })
     }
 
@@ -528,9 +535,12 @@ impl Gpu {
         let shaders = self.shaders.get_or_insert_with(|| shader::Pipeline::new(&self.device, format));
         let clear = self.clear.get_or_insert_with(|| Clear::new(&self.device, format));
         for (i, pass) in group.passes.iter().enumerate() {
-            // The picture this pass reads, named only while it draws.
+            // The picture this pass reads, named only while it draws, with
+            // what it drew last time beside it when it reads that.
             let reading = group.key ^ 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1);
-            shaders.adopt_backdrop(SurfaceId::MAX, &self.device, reading, &stage.view);
+            let remembers = pass.source.contains("g_previous");
+            let before = if remembers { self.previous.get(&(pass.node, i)).filter(|p| p.1 == size).map(|p| &p.0) } else { None };
+            shaders.adopt_pass(&self.device, reading, &stage.view, before);
             let mut drawn = pass.clone();
             drawn.backdrop = Some((reading, pass.backdrop.map_or([0.0; 4], |(_, at)| at)));
             let next = blur::Sheet::new(&self.device, format, size, "post-processing pass");
@@ -563,8 +573,15 @@ impl Gpu {
             }
             self.queue.submit([encoder.finish()]);
             shaders.drop_backdrop(reading);
+            self.passes_drawn += 1;
+            if remembers {
+                self.previous.insert((pass.node, i), (next.texture.create_view(&Default::default()), size, self.passes_drawn));
+            }
             stage = next;
         }
+        // A pass not drawn for a while is gone, or rests: its picture goes.
+        let now = self.passes_drawn;
+        self.previous.retain(|_, p| now - p.2 < 4096);
         stage
     }
 

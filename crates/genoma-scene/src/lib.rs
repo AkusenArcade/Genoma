@@ -4883,6 +4883,7 @@ fn collect_node(
                     },
                     backdrop: out.under.filter(|(n, ..)| *n == node).map(|(_, key, at)| (key, at)),
                     sim,
+                    node: n.uid,
                 });
             }
         }

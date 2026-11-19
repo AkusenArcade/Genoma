@@ -55,6 +55,9 @@ pub struct Shader {
     pub backdrop: Option<(u64, [f32; 4])>,
     /// What it simulates between frames (`compute`), read by its `shade`.
     pub sim: Option<crate::sim::Sim>,
+    /// The node's own key, the same from frame to frame: a pass that reads
+    /// what it drew the frame before (`g_previous`) is kept by it.
+    pub node: u64,
 }
 
 pub const VALUES: usize = 1024;
@@ -189,6 +192,7 @@ struct Shader {
 @group(0) @binding(0) var<uniform> shader: Shader;
 @group(1) @binding(0) var genoma_backdrop: texture_2d<f32>;
 @group(1) @binding(1) var genoma_backdrop_sampler: sampler;
+@group(1) @binding(2) var genoma_previous: texture_2d<f32>;
 @group(2) @binding(0) var genoma_state: texture_2d<f32>;
 @group(2) @binding(1) var<storage, read> genoma_agents: array<vec4<f32>>;
 
@@ -251,6 +255,20 @@ fn g_backdrop(p: vec2<f32>) -> vec4<f32> {
     }
     let uv = (p - b.xy) / b.zw;
     return textureSampleLevel(genoma_backdrop, genoma_backdrop_sampler, uv, 0.0);
+}
+
+// What this pass drew at `p` the last time its picture was drawn, as
+// g_backdrop reads what is under it: a trail is the old picture faded
+// under the new one. Transparent the first time, after a change of size,
+// and for any shader that is not a pass. It moves on only while the pass
+// is drawn again: give the node a clock, or the picture rests.
+fn g_previous(p: vec2<f32>) -> vec4<f32> {
+    let b = shader.backdrop;
+    if (b.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let uv = (p - b.xy) / b.zw;
+    return textureSampleLevel(genoma_previous, genoma_backdrop_sampler, uv, 0.0);
 }
 
 // The pixel before the node's matrix rides beside the position: the
@@ -319,6 +337,8 @@ pub(crate) struct Pipeline {
     sampler: wgpu::Sampler,
     /// A transparent texel, for a shader that reads nothing under it.
     nothing: wgpu::BindGroup,
+    /// The same texel, as a view: a pass's previous picture before it has one.
+    blank: wgpu::TextureView,
     /// What shader nodes simulate (`compute`), and each draw's: its key,
     /// and the agents Genoma draws for it.
     sims: crate::sim::Sims,
@@ -418,6 +438,16 @@ impl Pipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -438,7 +468,8 @@ impl Pipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let nothing = Self::under_group(device, &under_layout, &sampler, &blank.create_view(&Default::default()));
+        let blank = blank.create_view(&Default::default());
+        let nothing = Self::under_group(device, &under_layout, &sampler, &blank, &blank);
         let sims = crate::sim::Sims::new(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader"),
@@ -487,19 +518,27 @@ impl Pipeline {
             under_layout,
             sampler,
             nothing,
+            blank,
             sims,
             draw_sims: Vec::new(),
             agents,
         }
     }
 
-    fn under_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, view: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn under_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        view: &wgpu::TextureView,
+        previous: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shader backdrop"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(previous) },
             ],
         })
     }
@@ -511,9 +550,17 @@ impl Pipeline {
 
     /// What is under a node, drawn into `view`, for the shaders that read it.
     pub(crate) fn adopt_backdrop(&mut self, id: crate::SurfaceId, device: &wgpu::Device, key: u64, view: &wgpu::TextureView) {
-        let group = Self::under_group(device, &self.under_layout, &self.sampler, view);
+        let group = Self::under_group(device, &self.under_layout, &self.sampler, view, &self.blank);
         self.under.insert(key, (group, self.uploads));
         self.owners.insert(key, id);
+    }
+
+    /// A pass's picture to read, with what the pass drew the time before
+    /// (`g_previous`), when it has drawn.
+    pub(crate) fn adopt_pass(&mut self, device: &wgpu::Device, key: u64, view: &wgpu::TextureView, previous: Option<&wgpu::TextureView>) {
+        let group = Self::under_group(device, &self.under_layout, &self.sampler, view, previous.unwrap_or(&self.blank));
+        self.under.insert(key, (group, self.uploads));
+        self.owners.insert(key, crate::SurfaceId::MAX);
     }
 
     /// What is under nodes, drawn for `id`, that its frame no longer reads.

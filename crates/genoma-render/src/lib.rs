@@ -1165,6 +1165,7 @@ mod tests {
             pointer: [x, 20.0, 1.0, 0.0],
             backdrop: None,
             sim: None,
+            node: 1,
         };
         assert!(same_shader(&light(10.0), &light(10.0)));
         assert!(!same_shader(&light(30.0), &light(10.0)), "the pointer is part of what it draws");
