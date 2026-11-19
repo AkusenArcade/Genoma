@@ -7,6 +7,10 @@
 --   theme.set { accent = "#e0a35f", radius = 10 }
 --   theme.follow(t)  -- or the look of a shell's theme (@genoma/theme)
 --
+-- With neither, the kit follows the desktop's theme when a shell has
+-- written one (theme.follow_desktop, below), as GTK apps follow theirs:
+-- an app on Genoma looks like the desktop it runs on, and retints with it.
+--
 -- The times are timing set entries a shell may define before or after
 -- requiring the kit: kit_quick (hover, press), kit_move (colours, a knob
 -- travelling), kit_open (a menu, a tooltip appearing).
@@ -66,6 +70,7 @@ local defaults: Tokens = {
 }
 
 local tokens = g.signal(table.clone(defaults))
+local themes = require("@genoma/theme")
 
 -- A shell's theme the kit takes its look from (theme.follow), and which of
 -- its names gives each token.
@@ -125,6 +130,99 @@ local function from_theme(f: any, name: string): any
     return own
 end
 
+-- ---- The desktop's theme -------------------------------------------------------
+--
+-- A shell writes the desktop's look to one file, and every app on Genoma
+-- follows it: $XDG_CONFIG_HOME/genoma/theme.json (~/.config/… without it).
+--
+--   {
+--     "version": 1,
+--     "dark": true,
+--     "colours": { "background": "#…", "text": "#…", "primary": "#…",
+--                  "secondary": "#…", "alert": "#…" },
+--     "sizes": { "radius": 16, "control_height": 32, "text_size": 14 },
+--     "fonts": { … }
+--   }
+--
+-- `colours.background`, `text` and `primary` are needed, the others are
+-- optional; the kit's tokens are taken from them as theme.follow takes
+-- them from a shell's theme (accent ← primary, danger ← alert, the rest
+-- worked out). `sizes` set the kit's sizes it names. Anything else —
+-- `fonts`, sizes the kit has no token for — is the shell's to say and the
+-- app's to read (theme.desktop()). The file is written whole, atomically;
+-- a change crosses over `kit_move`, so an open app retints with the
+-- desktop. Without the file, or after theme.follow_desktop(false), the
+-- kit's own tokens.
+
+M.desktop_path = (g.env("XDG_CONFIG_HOME") or ((g.env("HOME") or "") .. "/.config")) .. "/genoma/theme.json"
+
+local DESKTOP_ROLES = { "background", "text", "primary", "secondary", "alert" }
+local desktop_data = g.signal(nil :: any)
+local following_desktop = g.signal(true)
+local desktop_theme: any = g.lasting(function()
+    local t = themes.new {
+        roles = {
+            background = string.sub(defaults.background, 1, 7),
+            text = defaults.text,
+            primary = defaults.accent,
+            secondary = defaults.accent,
+            alert = defaults.danger,
+        },
+        dark = function(c: any): boolean
+            local d = desktop_data.value
+            if d and type(d.dark) == "boolean" then return d.dark end
+            return g.colour.luma(c.background) < 0.5
+        end,
+        crossing = "kit_move",
+    }
+    local file = g.file { path = M.desktop_path }
+    local first = true
+    g.effect(function()
+        local text = file.text
+        local data: any = nil
+        if text then
+            local ok, parsed = pcall(g.parse_json, text)
+            local colours = if ok and type(parsed) == "table" then parsed.colours else nil
+            if type(colours) == "table" and g.colour.parse(colours.background or "")
+                and g.colour.parse(colours.text or "") and g.colour.parse(colours.primary or "") then
+                data = parsed
+            end
+        end
+        g.untracked(function()
+            if data then
+                local roles = {}
+                for _, name in DESKTOP_ROLES do
+                    local v = data.colours[name]
+                    if type(v) == "string" and g.colour.parse(v) then roles[name] = v end
+                end
+                -- The first look lands at once: an app does not open in the
+                -- kit's colours and cross to the desktop's.
+                t.immediate.value = first
+                t.set(roles)
+                t.immediate.value = false
+                first = false
+            end
+            desktop_data.value = data
+        end)
+    end)
+    return t
+end)
+
+-- theme.follow_desktop(false): the kit's own tokens (or those theme.set
+-- gives) even where the desktop has a theme; true, the desktop's again.
+-- Without an argument: whether it follows it now.
+function M.follow_desktop(on: boolean?): boolean
+    if on ~= nil then following_desktop.value = on end
+    return following_desktop.value
+end
+
+-- theme.desktop(): the desktop's theme file as the shell wrote it (its
+-- `fonts`, its other sizes), nil when there is none; read where it is
+-- bound, so a binding follows it.
+function M.desktop(): any
+    return desktop_data.value
+end
+
 -- theme.set { … }: the tokens given replace those of the same name.
 function M.set(changes: { [string]: any })
     local next: { [string]: any } = table.clone(g.untracked(function() return tokens.value end)) :: any
@@ -146,6 +244,14 @@ end
 function M.get(name: string): any
     local f = followed.value
     if f then return from_theme(f, name) end
+    local d = if following_desktop.value then desktop_data.value else nil
+    if d then
+        if type((defaults :: any)[name]) == "number" then
+            local v = type(d.sizes) == "table" and d.sizes[name]
+            return if type(v) == "number" then v else (tokens.value :: any)[name]
+        end
+        return from_theme({ theme = desktop_theme }, name)
+    end
     return (tokens.value :: any)[name]
 end
 

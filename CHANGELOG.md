@@ -10,6 +10,14 @@ changes what a shell sees.
 
 ### Added
 
+- The desktop's theme: a shell writes its look to
+  `$XDG_CONFIG_HOME/genoma/theme.json` (`dark`, `colours` background,
+  text, primary and optionally secondary and alert, `sizes`, `fonts`), and
+  the kit follows it by itself, as GTK apps follow theirs: every app on
+  Genoma looks like the desktop and retints with it, crossing over
+  `kit_move` (the first look lands at once). `theme.follow` still wins;
+  `theme.follow_desktop(false)` keeps the kit's own tokens;
+  `theme.desktop()` reads the rest of the file (its fonts, other sizes).
 - `fullscreen` on `g.window` (a boolean, or a function saying when): the
   compositor is asked to put the window on the whole screen, or take it
   off, each time the answer changes; true from the start, it opens there.
