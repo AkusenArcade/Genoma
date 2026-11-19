@@ -10,6 +10,21 @@ changes what a shell sees.
 
 ### Added
 
+- `g.websocket { url, protocols, headers, on_open, on_message(data,
+  binary), on_close(code, reason) }`, `ws://` and `wss://` (rustls with
+  ring, the server checked against the system's certificates). The name,
+  the connection and the handshakes happen on a thread of their own; once
+  open, the socket is non-blocking and read on the loop, so an idle
+  connection costs nothing (0 ticks in 10 s, measured). What arrives with
+  the handshake (OBS's Hello) is read at once.
+- `g.socket` over TCP: `{ host, port, on_open, on_line, on_close }`,
+  connected off the loop; `on_close(error)` says why.
+- `g.sha256(data)`, `g.base64.encode / decode` (standard, or the URL
+  alphabet without padding for PKCE), `g.random_bytes(n)` from the
+  kernel's generator.
+- `f:write(text, { mode = "600" })`; and a write keeps the permissions of
+  the file it replaces, so a private file stays private.
+
 - The desktop's theme: a shell writes its look to
   `$XDG_CONFIG_HOME/genoma/theme.json` (`dark`, `colours` background,
   text, primary and optionally secondary and alert, `sizes`, `fonts`), and

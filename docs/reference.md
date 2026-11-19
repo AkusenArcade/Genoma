@@ -467,10 +467,40 @@ g.folder { path, watch = true, hidden = false, details = false }: what is in a f
 ### `g.socket`
 
 ```luau
-socket: (t: { path: string, on_line: ((line: string) -> ())?, on_close: (() -> ())? }) -> Socket
+socket: (t: { path: string?, host: string?, port: number?, on_open: (() -> ())?, on_line: ((line: string) -> ())?, on_close: ((error: string?) -> ())? }) -> Socket
 ```
 
-g.socket { path, on_line, on_close }: a Unix socket, its input as lines.
+g.socket { path, on_line, on_close }: a Unix socket, its input as lines. g.socket { host, port, on_open, on_line, on_close }: the same over TCP, connected off the loop; on_close(error) says why, when it never opened or broke.
+
+### `g.websocket`
+
+```luau
+websocket: (t: { url: string, protocols: { string }?, headers: { [string]: string }?, on_open: (() -> ())?, on_message: ((data: string, binary: boolean) -> ())?, on_close: ((code: number, reason: string) -> ())? }) -> WebSocket
+```
+
+g.websocket { url, protocols, headers, on_open, on_message, on_close }: ws:// or wss:// (the server checked against the system's certificates). The name, the connection and the handshakes happen off the loop; once open it is read on the loop like any socket. on_message(data, binary); on_close(code, reason): the other side's, or 1006 and why when it never opened or broke.
+
+### `g.sha256`
+
+```luau
+sha256: (data: string) -> string
+```
+
+g.sha256(data): the digest, 32 bytes (a Luau string carries bytes).
+
+### `g.base64`
+
+```luau
+base64: { -- g.base64.encode(data, { url = true }): standard with padding, or -- the URL alphabet without (OAuth's PKCE). encode: (data: string, options: { url: boolean? }?) -> string, -- g.base64.decode(text, { url = true }): the bytes, nil if it is not -- base64 of that alphabet. decode: (text: string, options: { url: boolean? }?) -> string? }
+```
+
+### `g.random_bytes`
+
+```luau
+random_bytes: (n: number) -> string
+```
+
+g.random_bytes(n): n bytes from the kernel's generator (at most 4096), fit for keys and verifiers.
 
 ### `g.json`
 
@@ -2224,7 +2254,7 @@ Something running that can be stopped: a timer, a watch.
 |---|---|---|
 | `text` | `string?` | The content, nil while the file does not exist; a binding that reads it follows the file. |
 | `path` | `string` |  |
-| `write` | `(self: WatchedFile, text: string) -> ()` | f:write(text): atomically, through a file beside it and a rename. |
+| `write` | `(self: WatchedFile, text: string, options: { mode: string? }?) -> ()` | f:write(text, { mode = "600" }): atomically, through a file beside it and a rename. It keeps the permissions of the file it replaces (a private file stays private); `mode`, octal, sets them. |
 | `read` | `(self: WatchedFile) -> string?` | f:read(): read again now, and the content: /proc and /sys say nothing when they change, so a sampler asks. |
 | `stop` | `(self: WatchedFile) -> ()` |  |
 
@@ -2255,6 +2285,14 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `connected` | `boolean` |  |
 | `send` | `(self: Socket, text: string) -> ()` | s:send("text\n"): as given; a line-delimited peer wants the newline. |
 | `close` | `(self: Socket) -> ()` |  |
+
+### WebSocket
+
+| Field | Type | |
+|---|---|---|
+| `state` | `string` | "connecting", "open", "closing" or "closed". |
+| `send` | `(self: WebSocket, data: string, options: { binary: boolean? }?) -> ()` | ws:send(text), or ws:send(bytes, { binary = true }). |
+| `close` | `(self: WebSocket, code: number?, reason: string?) -> ()` | ws:close(code, reason): the closing handshake (1000 by default); on_close follows once the other side answers. |
 
 ### Output
 

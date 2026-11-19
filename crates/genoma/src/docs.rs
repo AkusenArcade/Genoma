@@ -386,7 +386,7 @@ mod tests {
             ("Process", "Process"),
             ("Watched", "WatchedFile"),
             ("Folder", "Folder"),
-            ("Socket", "Socket"),
+            ("Socket", "Socket"), ("WebSocket", "WebSocket"),
             ("Timer", "Stoppable"),
             ("Watch", "Stoppable"),
             ("Auth", "Auth"),

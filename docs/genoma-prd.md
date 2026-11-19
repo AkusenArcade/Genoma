@@ -462,8 +462,12 @@ Bioma writes about 39 services itself, and those keep their shape. Genoma
 provides the same building blocks Quickshell's `Quickshell.Io` does:
 - `g.process` (spawn, stream stdout lines, exit status);
 - `g.dbus` (call, get/set properties, watch signals, on either bus);
-- `g.socket` (Unix sockets, line-delimited);
-- `g.file` (read, watch, write atomically — the counterpart of `FileView`);
+- `g.socket` (Unix sockets and TCP, line-delimited);
+- `g.websocket` (`ws://` and `wss://`, TLS by rustls against the system's
+  certificates), with `g.sha256`, `g.base64` and `g.random_bytes` for the
+  protocols written over it (OBS's, OAuth's PKCE);
+- `g.file` (read, watch, write atomically keeping the permissions of what
+  it replaces — the counterpart of `FileView`);
 - `g.timer`, for the rare value that only polling can give, at a declared
   interval.
 

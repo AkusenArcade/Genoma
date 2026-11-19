@@ -13,6 +13,8 @@ use std::{
     rc::Rc,
 };
 
+mod bytes;
+mod websocket;
 mod auth;
 mod contours;
 mod colour;
@@ -3033,8 +3035,19 @@ impl Script {
                 text.map_err(|e| err(format!("g.to_json: {e}")))
             })?,
         )?;
+        // g.sha256(data), g.base64.encode / decode, g.random_bytes(n):
+        // bytes for protocols written in Luau.
+        g.set("sha256", lua.create_function(bytes::sha256)?)?;
+        let base64_table = lua.create_table()?;
+        base64_table.set("encode", lua.create_function(bytes::encode)?)?;
+        base64_table.set("decode", lua.create_function(bytes::decode)?)?;
+        g.set("base64", base64_table)?;
+        g.set("random_bytes", lua.create_function(bytes::random_bytes)?)?;
         let host = self.host.clone();
         g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
+        // g.websocket { url, … }: ws:// and wss://, read on the loop.
+        let host = self.host.clone();
+        g.set("websocket", lua.create_function(move |lua, t: Table| websocket::connect(&host, lua, t))?)?;
         let host = self.host.clone();
         g.set("greetd", lua.create_function(move |_, t: Table| greetd::connect(&host, t))?)?;
         let dbus_table = lua.create_table()?;

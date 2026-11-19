@@ -70,7 +70,7 @@ fn err(message: impl Into<String>) -> mlua::Error {
 /// made: what it starts (a process when another ends, a watcher in a
 /// D-Bus reply) belongs to the same load and goes with it. Run with none,
 /// it outlived every reload, and a reload at start left two of each.
-fn call(f: &Function, what: &str, args: impl IntoLuaMulti, owner: Option<usize>) {
+pub(crate) fn call(f: &Function, what: &str, args: impl IntoLuaMulti, owner: Option<usize>) {
     // A callback of a load that has been replaced: its state is gone. What
     // a g.watch handler starts is detached, so its timers outlive the load
     // they belong to, and fire into nothing.
@@ -146,6 +146,59 @@ impl Stop {
             also();
         }
     }
+}
+
+/// Work that would hold the loop (a name looked up, a connection made, a
+/// TLS or WebSocket handshake) done on a thread of its own: `done` gets the
+/// result on the main thread, through a pipe the loop watches. Stopped
+/// before then, the result is dropped with the thread's last reference.
+pub(crate) fn off_loop<T: Send + 'static>(
+    host: &HostRef,
+    stop: &Stop,
+    name: &str,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    done: impl FnOnce(Result<T, String>) + 'static,
+) -> mlua::Result<()> {
+    let (reader, writer) = rustix::pipe::pipe().map_err(|e| err(format!("{name}: {e}")))?;
+    let slot: std::sync::Arc<std::sync::Mutex<Option<Result<T, String>>>> = std::sync::Arc::default();
+    let filled = slot.clone();
+    std::thread::Builder::new()
+        .name(format!("genoma-{name}"))
+        .spawn(move || {
+            let result = work();
+            if let Ok(mut s) = filled.lock() {
+                *s = Some(result);
+            }
+            let _ = rustix::io::write(&writer, &[1]);
+        })
+        .map_err(|e| err(format!("{name}: no thread: {e}")))?;
+    let mut done = Some(done);
+    let what = name.to_owned();
+    stop.hold(host.readable(
+        reader,
+        Box::new(move |fd| {
+            let mut byte = [0u8; 1];
+            let read = rustix::io::read(fd, &mut byte);
+            let result = slot.lock().ok().and_then(|mut s| s.take());
+            match (result, read) {
+                (Some(result), _) => {
+                    if let Some(d) = done.take() {
+                        d(result);
+                    }
+                    false
+                }
+                // The thread ended without a word: it panicked.
+                (None, Ok(0)) => {
+                    if let Some(d) = done.take() {
+                        d(Err(format!("{what}: the work stopped")));
+                    }
+                    false
+                }
+                (None, _) => true,
+            }
+        }),
+    ));
+    Ok(())
 }
 
 /// Bytes into lines: what a stream gives is cut wherever the kernel cut it.
@@ -469,10 +522,24 @@ impl UserData for Watched {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // f:write(text): atomically, through a file beside it and a rename,
-        // so a reader never sees half of it.
-        methods.add_method("write", |_, this, text: String| {
-            write_atomically(&this.path, &text).map_err(|e| err(format!("g.file {}: {e}", this.path.display())))?;
+        // f:write(text, { mode = "600" }): atomically, through a file beside
+        // it and a rename, so a reader never sees half of it. The file
+        // keeps the permissions of the one it replaces (a private file
+        // stays private); `mode`, octal, sets them.
+        methods.add_method("write", |_, this, (text, options): (String, Option<Table>)| {
+            let mode = match options {
+                Some(t) => match t.get::<Option<String>>("mode")? {
+                    Some(m) => Some(
+                        u32::from_str_radix(&m, 8)
+                            .ok()
+                            .filter(|m| *m <= 0o7777)
+                            .ok_or_else(|| err(format!("g.file write: mode {m:?} is not octal permissions")))?,
+                    ),
+                    None => None,
+                },
+                None => None,
+            };
+            write_atomically(&this.path, &text, mode).map_err(|e| err(format!("g.file {}: {e}", this.path.display())))?;
             this.text.set(Some(text));
             Ok(())
         });
@@ -490,14 +557,28 @@ impl UserData for Watched {
     }
 }
 
-fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
+fn write_atomically(path: &Path, text: &str, mode: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let temporary = path.with_file_name(format!(".{name}.genoma-{}", std::process::id()));
-    let mut file = File::create(&temporary)?;
+    // The mode asked for, or the one of the file being replaced; a new
+    // file without either takes the usual one.
+    let kept = mode.or_else(|| std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o7777));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Created with no access for others from the start, so a private
+    // file's content is never readable, not even for a moment.
+    if let Some(m) = kept {
+        options.mode(m & 0o700);
+    }
+    let mut file = options.open(&temporary)?;
     file.write_all(text.as_bytes())?;
+    if let Some(m) = kept {
+        file.set_permissions(std::fs::Permissions::from_mode(m))?;
+    }
     file.sync_all()?;
     std::fs::rename(&temporary, path)
 }
@@ -829,8 +910,38 @@ pub fn folder(host: &HostRef, t: Table) -> mlua::Result<Folder> {
 
 // ---- g.socket --------------------------------------------------------------
 
+/// A local or a network connection, read and written alike.
+enum Conn {
+    Unix(UnixStream),
+    Tcp(std::net::TcpStream),
+}
+
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Unix(s) => s.read(buf),
+            Conn::Tcp(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Unix(s) => s.write(buf),
+            Conn::Tcp(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Conn::Unix(s) => s.flush(),
+            Conn::Tcp(s) => s.flush(),
+        }
+    }
+}
+
 pub struct Socket {
-    stream: Rc<RefCell<Option<UnixStream>>>,
+    stream: Rc<RefCell<Option<Conn>>>,
     stop: Rc<Stop>,
 }
 
@@ -843,7 +954,7 @@ impl UserData for Socket {
         // s:send("text\n"): as given; a line-delimited peer wants the newline.
         methods.add_method("send", |_, this, text: LuaString| {
             let mut stream = this.stream.borrow_mut();
-            let Some(stream) = stream.as_mut() else { return Err(err("g.socket: closed")) };
+            let Some(stream) = stream.as_mut() else { return Err(err("g.socket: not connected")) };
             stream.write_all(&text.as_bytes()).map_err(|e| err(format!("g.socket send: {e}")))
         });
         methods.add_method("close", |_, this, ()| {
@@ -853,16 +964,82 @@ impl UserData for Socket {
     }
 }
 
-/// `g.socket { path = "$XDG_RUNTIME_DIR/…", on_line = …, on_close = … }`: a
-/// Unix socket, its input as lines.
+/// `g.socket { path = "$XDG_RUNTIME_DIR/…", on_line, on_close }`: a Unix
+/// socket, its input as lines. `g.socket { host = "127.0.0.1", port =
+/// 4455, on_open, on_line, on_close }`: the same over TCP, connected off
+/// the loop; `on_open()` once it is, `on_close(error)` when it ends (with
+/// why, if it never opened or broke).
 pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
-    let path = expand(&t.get::<String>("path")?);
-    let stream = UnixStream::connect(&path).map_err(|e| err(format!("g.socket {}: {e}", path.display())))?;
-    let watch = OwnedFd::from(stream.try_clone().map_err(|e| err(format!("g.socket: {e}")))?);
     let on_line: Option<Function> = t.get("on_line")?;
     let on_close: Option<Function> = t.get("on_close")?;
-    let stream = Rc::new(RefCell::new(Some(stream)));
+    let on_open: Option<Function> = t.get("on_open")?;
+    let stream: Rc<RefCell<Option<Conn>>> = Rc::new(RefCell::new(None));
     let stop = Stop::new(host);
+    let s = stream.clone();
+    *stop.also.borrow_mut() = Some(Box::new(move || {
+        s.borrow_mut().take();
+    }));
+    if let Some(path) = t.get::<Option<String>>("path")? {
+        let path = expand(&path);
+        let unix = UnixStream::connect(&path).map_err(|e| err(format!("g.socket {}: {e}", path.display())))?;
+        let watch = OwnedFd::from(unix.try_clone().map_err(|e| err(format!("g.socket: {e}")))?);
+        *stream.borrow_mut() = Some(Conn::Unix(unix));
+        listen(host, &stop, &stream, watch, on_line, on_close);
+        return Ok(Socket { stream, stop });
+    }
+    let name: String = t.get::<Option<String>>("host")?.ok_or_else(|| err("g.socket: a path, or a host and a port"))?;
+    let port: u16 = t.get::<Option<u16>>("port")?.ok_or_else(|| err("g.socket: a host needs a port"))?;
+    let address = format!("{name}:{port}");
+    let (h, st, s) = (host.clone(), stop.clone(), stream.clone());
+    let owner = stop.owner;
+    off_loop(host, &stop, "socket", move || connect_tcp(&address), move |result| match result {
+        Ok(tcp) => {
+            let watch = match tcp.set_nonblocking(true).and_then(|()| tcp.try_clone()) {
+                Ok(c) => OwnedFd::from(c),
+                Err(e) => {
+                    if let Some(f) = &on_close {
+                        call(f, "g.socket on_close", format!("g.socket: {e}"), owner);
+                    }
+                    return;
+                }
+            };
+            *s.borrow_mut() = Some(Conn::Tcp(tcp));
+            if let Some(f) = &on_open {
+                call(f, "g.socket on_open", (), owner);
+            }
+            listen(&h, &st, &s, watch, on_line, on_close);
+        }
+        Err(e) => {
+            if let Some(f) = &on_close {
+                call(f, "g.socket on_close", e, owner);
+            }
+        }
+    })?;
+    Ok(Socket { stream, stop })
+}
+
+/// How long a connection, or a handshake on it, may take.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// "host:port" looked up and connected, each address in turn, on a thread.
+pub(crate) fn connect_tcp(address: &str) -> Result<std::net::TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let addresses = address.to_socket_addrs().map_err(|e| format!("{address}: {e}"))?;
+    let mut last = format!("{address}: no address");
+    for a in addresses {
+        match std::net::TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+            Ok(tcp) => {
+                let _ = tcp.set_nodelay(true);
+                return Ok(tcp);
+            }
+            Err(e) => last = format!("{address}: {e}"),
+        }
+    }
+    Err(last)
+}
+
+/// A connected stream's input, read whenever it is readable, as lines.
+fn listen(host: &HostRef, stop: &Stop, stream: &Rc<RefCell<Option<Conn>>>, watch: OwnedFd, on_line: Option<Function>, on_close: Option<Function>) {
     let owner = stop.owner;
     let s = stream.clone();
     let mut lines = Lines::default();
@@ -885,27 +1062,43 @@ pub fn socket(host: &HostRef, t: Table) -> mlua::Result<Socket> {
                     true
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => true,
-                _ => {
+                ended => {
                     lines.finish(&mut each);
                     s.borrow_mut().take();
                     if let Some(f) = &on_close {
-                        call(f, "g.socket on_close", (), owner);
+                        let why = match ended {
+                            Err(e) => Some(format!("g.socket: {e}")),
+                            _ => None,
+                        };
+                        call(f, "g.socket on_close", why, owner);
                     }
                     false
                 }
             }
         }),
     ));
-    let s = stream.clone();
-    *stop.also.borrow_mut() = Some(Box::new(move || {
-        s.borrow_mut().take();
-    }));
-    Ok(Socket { stream, stop })
 }
 
 #[cfg(test)]
 mod watch_tests {
     use super::*;
+
+    #[test]
+    fn a_write_keeps_the_permissions_it_replaces_or_takes_those_asked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("genoma-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("secret.json");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        write_atomically(&path, "{}", Some(0o600)).unwrap();
+        assert_eq!(mode(&path), 0o600, "asked for");
+        write_atomically(&path, "{\"a\":1}", None).unwrap();
+        assert_eq!(mode(&path), 0o600, "kept when rewritten");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        write_atomically(&path, "{}", Some(0o644)).unwrap();
+        assert_eq!(mode(&path), 0o644, "changed when asked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_watch_goes_down_toward_a_folder_made_later() {
