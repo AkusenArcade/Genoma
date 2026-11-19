@@ -488,6 +488,14 @@ http: (t: { url: string, method: string?, headers: { [string]: string }?, body: 
 
 g.http { url, method, headers, body, timeout, on_done(response) }: an HTTP or HTTPS request (the server checked against the system's certificates), run off the loop. The method is GET, or POST with a body; the timeout 30 seconds. One agent for the whole process keeps connections open, so calls to the same server after the first skip the TCP and TLS handshakes. A 404 is an answer (status, ok = false), not an error; gzip is undone.
 
+### `g.serve`
+
+```luau
+serve: (t: { port: number?, on_request: (request: ServedRequest) -> { status: number?, headers: { [string]: string }?, body: string? }? }) -> Server
+```
+
+g.serve { port = 0, on_request(request) -> { status, headers, body } }: a small HTTP server on 127.0.0.1 only, read on the loop: where the browser comes back from an OAuth login. One request a connection, answered and closed; nil from on_request answers 204. Headers up to 16 KB, a body up to 1 MB; a connection that has not finished its request in 10 seconds is closed.
+
 ### `g.sha256`
 
 ```luau
@@ -2339,6 +2347,23 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `body` | `string` | The body's bytes (g.parse_json(r.body) for JSON). |
 | `headers` | `{ [string]: string }` | By lower-case name; several of one name joined with ", ". |
 | `error` | `string?` | Why there is no answer: the name not found, refused, timed out, TLS. |
+
+### Server
+
+| Field | Type | |
+|---|---|---|
+| `port` | `number` | The port listened on: the system's choice when asked for 0. |
+| `close` | `(self: Server) -> ()` |  |
+
+### ServedRequest
+
+| Field | Type | |
+|---|---|---|
+| `method` | `string` |  |
+| `path` | `string` | Decoded: "/callback". |
+| `query` | `{ [string]: string }` | The query's pairs, decoded ("+" a space). |
+| `headers` | `{ [string]: string }` | By lower-case name. |
+| `body` | `string` |  |
 
 ### WebSocket
 

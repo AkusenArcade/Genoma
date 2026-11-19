@@ -97,6 +97,23 @@ export type HttpResponse = {
     error: string?,
 }
 
+export type Server = {
+    -- The port listened on: the system's choice when asked for 0.
+    read port: number,
+    close: (self: Server) -> (),
+}
+
+export type ServedRequest = {
+    method: string,
+    -- Decoded: "/callback".
+    path: string,
+    -- The query's pairs, decoded ("+" a space).
+    query: { [string]: string },
+    -- By lower-case name.
+    headers: { [string]: string },
+    body: string,
+}
+
 export type WebSocket = {
     -- "connecting", "open", "closing" or "closed".
     read state: string,
@@ -413,6 +430,16 @@ export type G = {
         timeout: number?,
         on_done: ((response: HttpResponse) -> ())?,
     }) -> HttpRequest,
+    -- g.serve { port = 0, on_request(request) -> { status, headers, body } }:
+    -- a small HTTP server on 127.0.0.1 only, read on the loop: where the
+    -- browser comes back from an OAuth login. One request a connection,
+    -- answered and closed; nil from on_request answers 204. Headers up to
+    -- 16 KB, a body up to 1 MB; a connection that has not finished its
+    -- request in 10 seconds is closed.
+    serve: (t: {
+        port: number?,
+        on_request: (request: ServedRequest) -> { status: number?, headers: { [string]: string }?, body: string? }?,
+    }) -> Server,
     -- g.sha256(data): the digest, 32 bytes (a Luau string carries bytes).
     sha256: (data: string) -> string,
     base64: {

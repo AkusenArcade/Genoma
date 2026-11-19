@@ -10,6 +10,14 @@ changes what a shell sees.
 
 ### Added
 
+- `g.serve { port, on_request(request) -> response }`: a small HTTP
+  server on 127.0.0.1 only, for the browser coming back from an OAuth
+  login (`/callback?code=…`) or a local tool. Read on the loop like any
+  socket; `server.port` gives the system's choice for port 0; the request
+  comes decoded (`path`, `query`, `headers`, `body`). One request a
+  connection, answered and closed; 16 KB of headers, 1 MB of body, 10 s
+  to finish; a header that would split the answer is dropped.
+
 - `g.http { url, method, headers, body, timeout, on_done(response) }`:
   HTTP and HTTPS run off the loop, answered with `{ status, ok, body,
   headers, error }`. One agent for the process keeps connections open, so

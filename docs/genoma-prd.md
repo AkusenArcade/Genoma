@@ -463,8 +463,9 @@ provides the same building blocks Quickshell's `Quickshell.Io` does:
 - `g.process` (spawn, stream stdout lines, exit status);
 - `g.dbus` (call, get/set properties, watch signals, on either bus);
 - `g.socket` (Unix sockets and TCP, line-delimited);
-- `g.http` (HTTP and HTTPS off the loop, connections kept between calls)
-  and `g.websocket` (`ws://` and `wss://`), TLS by rustls against the
+- `g.http` (HTTP and HTTPS off the loop, connections kept between calls),
+  `g.serve` (a small HTTP server on 127.0.0.1, for an OAuth redirect) and
+  `g.websocket` (`ws://` and `wss://`), TLS by rustls against the
   system's certificates, with `g.sha256`, `g.base64` and `g.random_bytes` for the
   protocols written over it (OBS's, OAuth's PKCE);
 - `g.file` (read, watch, write atomically keeping the permissions of what
