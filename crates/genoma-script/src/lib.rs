@@ -1204,14 +1204,15 @@ impl UserData for AppsRef {
 
 struct SpectrumRef(Rc<Spectrum>);
 
-/// A hold on the spectrum: `:release()` lets it go.
-struct SpectrumHold(Rc<Spectrum>, std::cell::Cell<bool>);
+/// A hold on the spectrum: `:release()` lets it go. The third: whether it
+/// asked for the stereo image.
+struct SpectrumHold(Rc<Spectrum>, std::cell::Cell<bool>, bool);
 
 impl UserData for SpectrumHold {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("release", |_, this, ()| {
             if this.1.replace(false) {
-                this.0.release();
+                this.0.release(this.2);
             }
             Ok(())
         });
@@ -1228,13 +1229,26 @@ impl UserData for SpectrumRef {
         fields.add_field_method_get("level", |_, this| Ok(this.0.level.get()));
         // Whether the capture runs.
         fields.add_field_method_get("running", |_, this| Ok(this.0.wanted.get()));
+        // The stereo image, while a hold asked for it: each band's
+        // direction in radians (0 ahead, +stage the right speaker, -stage
+        // the left), diffuseness and energy, 0…1.
+        fields.add_field_method_get("azimuth", |_, this| Ok(this.0.azimuth.get()));
+        fields.add_field_method_get("diffuseness", |_, this| Ok(this.0.diffuseness.get()));
+        fields.add_field_method_get("energy", |_, this| Ok(this.0.energy.get()));
+        // Half the stereo stage, radians: where a speaker stands.
+        fields.add_field_method_get("stage", |_, _| Ok(genoma_services::spectrum::dsp::STAGE_HALF_ANGLE));
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         // spectrum:hold() → a hold: the capture runs while any is held.
-        methods.add_method("hold", |_, this, ()| {
-            this.0.hold();
-            Ok(SpectrumHold(this.0.clone(), std::cell::Cell::new(true)))
+        // spectrum:hold { imaging = true }: the stereo image with it.
+        methods.add_method("hold", |_, this, options: Option<Table>| {
+            let imaging = match options {
+                Some(t) => t.get::<Option<bool>>("imaging")?.unwrap_or(false),
+                None => false,
+            };
+            this.0.hold(imaging);
+            Ok(SpectrumHold(this.0.clone(), std::cell::Cell::new(true), imaging))
         });
         // spectrum:listen_to("input" | "output"): the microphone or what
         // leaves the machine, from the next start.

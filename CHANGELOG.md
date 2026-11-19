@@ -10,6 +10,16 @@ changes what a shell sees.
 
 ### Added
 
+- The stereo image in `@genoma/spectrum`: `spectrum:hold { imaging = true }`
+  and each band's `azimuth` (radians, 0 ahead, ±`spectrum.stage` = ±30°
+  the speakers), `diffuseness` and `energy`. Sinestesia's
+  `ImagingAnalyzer`, figure for figure: the complex cross-spectrum gives
+  coherence and the time difference, the level difference the rest, mixed
+  by the duplex crossover and placed by the tangent law. `genoma spectrum
+  --imaging` writes three blocks more a line; the capture starts again
+  with or without it as the holders ask, so the two extra transforms run
+  only while something draws the image.
+
 - `g_previous(p)` in a `pass` shader: what that pass drew the time before
   (transparent the first time and after a change of size), read as
   `g_backdrop` reads what is under it. A trail is the old picture faded

@@ -1954,11 +1954,41 @@ read running: boolean
 
 Whether the capture runs.
 
+### `spectrum.azimuth`
+
+```luau
+read azimuth: { number }
+```
+
+The stereo image, while a hold asked for it (Sinestesia's Imaging): each band's direction in radians, 0 straight ahead, +stage the right speaker and -stage the left (the front arc only, within the stage); how diffuse it is, 0 a localised source, 1 a field with no direction; its energy, 0…1. Empty otherwise.
+
+### `spectrum.diffuseness`
+
+```luau
+read diffuseness: { number }
+```
+
+### `spectrum.energy`
+
+```luau
+read energy: { number }
+```
+
+### `spectrum.stage`
+
+```luau
+read stage: number
+```
+
+Half the stereo stage, radians (π/6: the speakers at ±30°).
+
 ### `spectrum:hold`
 
 ```luau
-hold: (self: Spectrum) -> SpectrumHold
+hold: (self: Spectrum, options: { imaging: boolean? }?) -> SpectrumHold
 ```
+
+spectrum:hold(), or spectrum:hold { imaging = true } for the stereo image too (two transforms more while held).
 
 ### `spectrum:listen_to`
 

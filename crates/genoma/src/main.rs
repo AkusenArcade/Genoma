@@ -198,6 +198,11 @@ fn start_spectrum<D: 'static>(
     if spectrum.input.get() {
         command.args(["--source", "input"]);
     }
+    let imaging = spectrum.imaging.get_untracked() == Some(true);
+    if imaging {
+        command.arg("--imaging");
+    }
+    spectrum.imaging_running.set(imaging);
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -245,6 +250,7 @@ fn spectrum_command(args: Vec<String>) {
             "--fps" => options.fps = value().parse::<u32>().unwrap_or(60).clamp(1, 240),
             "--gain" => options.gain = value().parse::<f32>().unwrap_or(1.0).clamp(0.1, 10.0),
             "--source" => options.input = value() == "input",
+            "--imaging" => options.imaging = true,
             other => fail(&format!("genoma spectrum: unknown option {other}")),
         }
     }
@@ -435,13 +441,18 @@ impl Sources {
                     genoma_core::reactive::detached(|| {
                         Effect::new(move || {
                             let wanted = spectrum.wanted.get();
+                            // The image asked for or let go: the capture
+                            // starts again with or without it.
+                            let imaging = spectrum.imaging.get();
                             let mut now = running.borrow_mut();
-                            if wanted && now.is_none() {
-                                *now = start_spectrum(&handle, spectrum.clone());
-                            } else if !wanted && let Some((mut child, token)) = now.take() {
+                            let stale = now.is_some() && spectrum.imaging_running.get() != imaging;
+                            if (!wanted || stale) && let Some((mut child, token)) = now.take() {
                                 handle.remove(token);
                                 let _ = child.kill();
                                 let _ = child.wait();
+                            }
+                            if wanted && now.is_none() {
+                                *now = start_spectrum(&handle, spectrum.clone());
                             }
                         });
                     });
