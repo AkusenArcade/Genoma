@@ -6,6 +6,18 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Changed
+
+- A simulation's `agents` changing no longer starts it again. Those there
+  stay; fewer, the last go; more, each new one is born a copy of one there
+  (agent `i % before`), and for its first step the new `sim.born` (the
+  number there before; `sim.agents` on every other step, 0 on the first)
+  tells `agent` which they are. `genoma:boids` sets a newborn a little way
+  off its parent, turned away from it, so the two part. A grid that
+  changes size still starts again.
+
 ## 0.1.19 — 2026-11-18
 
 ### Added

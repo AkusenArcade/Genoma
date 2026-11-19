@@ -206,6 +206,7 @@ struct GenomaStep {
     agents: i32,
     frame: u32,
     dt: f32,
+    born: u32,
 };
 var<private> sim: GenomaStep;
 

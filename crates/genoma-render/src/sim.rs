@@ -14,8 +14,8 @@
 //! it is, its velocity and four numbers of its own, from what every agent
 //! was a step before (`g_agent(j)`): boids. Both read `sim.frame` (0 the
 //! first step, to set things up), `sim.dt`, `sim.grid`, `sim.agents`,
-//! `shader.size`, `shader.time`, `shader.pointer`, `value(i)` and the `g_`
-//! library.
+//! `sim.born`, `shader.size`, `shader.time`, `shader.pointer`, `value(i)`
+//! and the `g_` library.
 //!
 //! The node's `shade(p)` then shows it: `g_state(p)` is the grid at a point
 //! (logical units from the node's corner, between cells blended),
@@ -24,8 +24,12 @@
 //! them a size.
 //!
 //! Two of each are kept, the one read and the one written, swapped after
-//! every step. A grid or a number of agents that changes starts again from
-//! nothing.
+//! every step. A grid that changes starts again from nothing. A number of
+//! agents that changes does not: those there stay. Fewer, the last go;
+//! more, each new one is born a copy of one there (agent `i % before`),
+//! and for its first step `sim.born` is the number there before, so
+//! `agent` can tell it (`i >= sim.born`) and set it apart from its parent.
+//! Every other step `sim.born` is `sim.agents`; at the first, 0.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -60,6 +64,9 @@ const MOST: u64 = 8;
 /// The step's own numbers are bound at offsets of this many bytes.
 const STEP_STRIDE: u64 = 256;
 
+/// Bytes an agent takes: where it is and its velocity, and its four numbers.
+const AGENT: u64 = 32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Step {
@@ -67,7 +74,8 @@ struct Step {
     agents: i32,
     frame: u32,
     dt: f32,
-    _pad: [f32; 3],
+    born: u32,
+    _pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -94,6 +102,7 @@ struct GenomaStep {
     agents: i32,
     frame: u32,
     dt: f32,
+    born: u32,
 };
 @group(0) @binding(0) var<uniform> shader: GenomaShared;
 @group(0) @binding(1) var<uniform> sim: GenomaStep;
@@ -216,6 +225,11 @@ struct Run {
     grid: [u32; 2],
     agents: u32,
     source_key: u64,
+    /// Its two states, each a grid and the agents: read one, write the other.
+    states: [(wgpu::Texture, wgpu::Buffer); 2],
+    /// After its agents grew, the number there before, until the step that
+    /// sets the new ones up is written.
+    born: Option<u32>,
     /// Which of the two holds the latest.
     current: usize,
     /// Steps taken.
@@ -334,13 +348,18 @@ impl Sims {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
         });
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        (texture, Self::agents(device, agents))
+    }
+
+    /// Room for the agents (at least one), zeroed: copied into when their
+    /// number changes, so those there stay.
+    fn agents(device: &wgpu::Device, agents: u32) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("simulation agents"),
-            size: u64::from(agents.max(1)) * 32,
-            usage: wgpu::BufferUsages::STORAGE,
+            size: u64::from(agents.max(1)) * AGENT,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        (texture, buffer)
+        })
     }
 
     fn shown_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, texture: &wgpu::Texture, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
@@ -381,6 +400,69 @@ impl Sims {
         }
     }
 
+    /// A run on these two states, at its first step, with its numbers and
+    /// its groups made.
+    fn assemble(&self, device: &wgpu::Device, states: [(wgpu::Texture, wgpu::Buffer); 2], s: &Sim) -> Run {
+        let [a, b] = &states;
+        let shared = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("simulation shared"),
+            size: std::mem::size_of::<Shared>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let steps = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("simulation steps"),
+            size: MOST * STEP_STRIDE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let numbers = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("simulation numbers"),
+            layout: &self.numbers_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: shared.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &steps,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<Step>() as u64),
+                    }),
+                },
+            ],
+        });
+        let turn = |from: &(wgpu::Texture, wgpu::Buffer), to: &(wgpu::Texture, wgpu::Buffer)| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("simulation turn"),
+                layout: &self.turn_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&from.0.create_view(&Default::default())) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&to.0.create_view(&Default::default())) },
+                    wgpu::BindGroupEntry { binding: 2, resource: from.1.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: to.1.as_entire_binding() },
+                ],
+            })
+        };
+        let turns = [turn(&a, &b), turn(&b, &a)];
+        let shown = [Self::shown_group(device, &self.shown_layout, &a.0, &a.1), Self::shown_group(device, &self.shown_layout, &b.0, &b.1)];
+        Run {
+            grid: s.grid,
+            agents: s.agents,
+            source_key: s.source_key,
+            states,
+            born: None,
+            current: 0,
+            done: 0,
+            shared,
+            steps,
+            numbers,
+            turns,
+            shown,
+            pending: (0, 0),
+            used: 0,
+        }
+    }
+
     /// The node's simulation made ready for this frame: its state (made
     /// again when its grid or its agents changed), its numbers, and the
     /// steps it is owed. `shared` is what its shader is given.
@@ -391,55 +473,34 @@ impl Sims {
             let compiled = self.compile(device, &s.source);
             self.pipelines.insert(s.source_key, compiled);
         }
-        let fresh = self.runs.get(&s.key).is_none_or(|r| r.grid != s.grid || r.agents != s.agents || r.source_key != s.source_key);
-        if fresh {
-            let a = Self::state(device, s.grid, s.agents);
-            let b = Self::state(device, s.grid, s.agents);
-            let shared = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("simulation shared"),
-                size: std::mem::size_of::<Shared>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let steps = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("simulation steps"),
-                size: MOST * STEP_STRIDE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let numbers = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("simulation numbers"),
-                layout: &self.numbers_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: shared.as_entire_binding() },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &steps,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(std::mem::size_of::<Step>() as u64),
-                        }),
-                    },
-                ],
-            });
-            let turn = |from: &(wgpu::Texture, wgpu::Buffer), to: &(wgpu::Texture, wgpu::Buffer)| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("simulation turn"),
-                    layout: &self.turn_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&from.0.create_view(&Default::default())) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&to.0.create_view(&Default::default())) },
-                        wgpu::BindGroupEntry { binding: 2, resource: from.1.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: to.1.as_entire_binding() },
-                    ],
-                })
-            };
-            let turns = [turn(&a, &b), turn(&b, &a)];
-            let shown = [Self::shown_group(device, &self.shown_layout, &a.0, &a.1), Self::shown_group(device, &self.shown_layout, &b.0, &b.1)];
-            self.runs.insert(
-                s.key,
-                Run { grid: s.grid, agents: s.agents, source_key: s.source_key, current: 0, done: 0, shared, steps, numbers, turns, shown, pending: (0, 0), used: 0 },
-            );
+        let same = self.runs.get(&s.key).map(|r| (r.grid == s.grid && r.source_key == s.source_key, r.agents));
+        match same {
+            Some((true, before)) if before == s.agents => {}
+            // Only the number of agents changed: those there stay.
+            Some((true, before)) if before > 0 && s.agents > 0 => {
+                let old = self.runs.remove(&s.key).expect("looked at above");
+                let Run { states: [(grid_a, agents_a), (grid_b, agents_b)], current, done, born, .. } = old;
+                let fresh = [Self::agents(device, s.agents), Self::agents(device, s.agents)];
+                let from = if current == 0 { &agents_a } else { &agents_b };
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("simulation agents kept") });
+                for (to, count) in kept(before, s.agents) {
+                    encoder.copy_buffer_to_buffer(from, 0, &fresh[current], to * AGENT, count * AGENT);
+                }
+                queue.submit([encoder.finish()]);
+                let [fresh_a, fresh_b] = fresh;
+                let mut run = self.assemble(device, [(grid_a, fresh_a), (grid_b, fresh_b)], s);
+                run.current = current;
+                run.done = done;
+                // Those born at a change not yet stepped are still new: a
+                // second change before that step keeps them so.
+                let born = born.unwrap_or(before).min(before);
+                run.born = (born < s.agents).then_some(born);
+                self.runs.insert(s.key, run);
+            }
+            _ => {
+                let run = self.assemble(device, [Self::state(device, s.grid, s.agents), Self::state(device, s.grid, s.agents)], s);
+                self.runs.insert(s.key, run);
+            }
         }
         let run = self.runs.get_mut(&s.key).expect("made above");
         run.used = self.uploads;
@@ -462,7 +523,14 @@ impl Sims {
                     agents: s.agents as i32,
                     frame: (run.done + i) as u32,
                     dt: s.dt,
-                    _pad: [0.0; 3],
+                    born: if run.done + i == 0 {
+                        0
+                    } else if i == 0 {
+                        run.born.take().unwrap_or(s.agents)
+                    } else {
+                        s.agents
+                    },
+                    _pad: [0.0; 2],
                 };
                 let at = (i * STEP_STRIDE) as usize;
                 bytes[at..at + std::mem::size_of::<Step>()].copy_from_slice(bytemuck::bytes_of(&step));
@@ -522,8 +590,34 @@ impl Sims {
     }
 }
 
+/// The copies that keep `before` agents when there are now `after`: each
+/// as (where it goes, how many), every one read from the first agent on.
+/// Those there keep their places; the new ones after them are copies of
+/// them in order, round again as often as it takes (agent `i % before`).
+fn kept(before: u32, after: u32) -> Vec<(u64, u64)> {
+    let (before, after) = (u64::from(before), u64::from(after));
+    let mut out = Vec::new();
+    if before == 0 {
+        return out;
+    }
+    let mut at = 0;
+    while at < after {
+        let count = before.min(after - at);
+        out.push((at, count));
+        at += count;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agents_kept_and_born_as_copies() {
+        assert_eq!(super::kept(100, 60), vec![(0, 60)], "fewer: the last go");
+        assert_eq!(super::kept(100, 250), vec![(0, 100), (100, 100), (200, 50)], "more: copies, round again");
+        assert!(super::kept(0, 10).is_empty());
+    }
+
     #[test]
     fn every_built_in_simulation_steps_and_shades() {
         for (name, source) in super::BUILT_IN {

@@ -2,7 +2,8 @@
 // way its neighbours go and drifts toward where they are; the pointer
 // pulls them, or with a negative pull scatters them. They wrap round the
 // node's edges. Genoma draws them (give the node an `agent_size`); the
-// node itself shows nothing.
+// node itself shows nothing. More of them than before divide from those
+// there (`sim.born`); fewer, the last go.
 // values: 0 speed (logical units a second), 1 how far one sees, 2 how
 // much it keeps apart, 3 how much it aligns, 4 how much it gathers, 5 the
 // pointer's pull (negative scatters).
@@ -18,6 +19,18 @@ fn agent(i: i32, me: Agent) -> Agent {
         return a;
     }
     let sight = max(value(1), 1.0);
+    // Born this step, a copy of the one it divided from: beside it, a
+    // little way off, and turned away from it, so the two part.
+    if (u32(i) >= sim.born) {
+        let side = g_hash2(vec2<f32>(n * 0.613 + f32(sim.frame) * 0.007, n * 1.271 + 0.9)) - 0.5;
+        let turn = (g_hash(vec2<f32>(n * 2.17 + 0.4, f32(sim.frame) * 0.011)) - 0.5) * 1.6;
+        let cs = cos(turn);
+        let sn = sin(turn);
+        a.velocity = vec2<f32>(me.velocity.x * cs - me.velocity.y * sn, me.velocity.x * sn + me.velocity.y * cs);
+        a.at = me.at + side * sight * 0.25;
+        a.at = a.at - shader.size * floor(a.at / shader.size);
+        return a;
+    }
     var apart = vec2<f32>(0.0);
     var heading = vec2<f32>(0.0);
     var centre = vec2<f32>(0.0);
