@@ -7,8 +7,8 @@
 //! its own ([`crate::io::off_loop`]), which hands the open connection over
 //! and ends.
 //!
-//! TLS is rustls (ring), checking the server against the system's
-//! certificates, read once.
+//! TLS is the script's (`crate::tls`): rustls with ring, the server
+//! checked against the system's certificates.
 
 use std::{
     cell::RefCell,
@@ -16,7 +16,6 @@ use std::{
     net::TcpStream,
     os::fd::OwnedFd,
     rc::Rc,
-    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -73,31 +72,6 @@ impl Write for Stream {
     }
 }
 
-/// The system's certificates, read the first time a `wss://` is opened.
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
-    static CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            let found = rustls_native_certs::load_native_certs();
-            for e in &found.errors {
-                log::warn!("g.websocket: system certificates: {e}");
-            }
-            let (added, _) = roots.add_parsable_certificates(found.certs);
-            if added == 0 {
-                return Err("no system certificates to check a server with".into());
-            }
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let config = rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .map_err(|e| e.to_string())?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Ok(Arc::new(config))
-        })
-        .clone()
-}
-
 /// What the thread hands over: the open socket.
 type Opened = tungstenite::WebSocket<Stream>;
 
@@ -128,7 +102,7 @@ fn open(url: &str, protocols: &[String], headers: &[(String, String)]) -> Result
     tcp.set_write_timeout(Some(CONNECT_TIMEOUT)).map_err(|e| e.to_string())?;
     let stream = if secure {
         let server = rustls::pki_types::ServerName::try_from(name.clone()).map_err(|e| format!("{name}: {e}"))?;
-        let connection = rustls::ClientConnection::new(tls_config()?, server).map_err(|e| format!("{name}: {e}"))?;
+        let connection = rustls::ClientConnection::new(crate::tls::client_config()?, server).map_err(|e| format!("{name}: {e}"))?;
         Stream::Tls(Box::new(rustls::StreamOwned::new(connection, tcp)))
     } else {
         Stream::Plain(tcp)

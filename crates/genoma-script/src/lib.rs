@@ -14,6 +14,8 @@ use std::{
 };
 
 mod bytes;
+mod http;
+mod tls;
 mod websocket;
 mod auth;
 mod contours;
@@ -3059,6 +3061,9 @@ impl Script {
         g.set("random_bytes", lua.create_function(bytes::random_bytes)?)?;
         let host = self.host.clone();
         g.set("socket", lua.create_function(move |_, t: Table| io::socket(&host, t))?)?;
+        // g.http { url, … }: a request off the loop, connections kept.
+        let host = self.host.clone();
+        g.set("http", lua.create_function(move |lua, t: Table| http::request(&host, lua, t))?)?;
         // g.websocket { url, … }: ws:// and wss://, read on the loop.
         let host = self.host.clone();
         g.set("websocket", lua.create_function(move |lua, t: Table| websocket::connect(&host, lua, t))?)?;

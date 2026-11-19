@@ -480,6 +480,14 @@ websocket: (t: { url: string, protocols: { string }?, headers: { [string]: strin
 
 g.websocket { url, protocols, headers, on_open, on_message, on_close }: ws:// or wss:// (the server checked against the system's certificates). The name, the connection and the handshakes happen off the loop; once open it is read on the loop like any socket. on_message(data, binary); on_close(code, reason): the other side's, or 1006 and why when it never opened or broke.
 
+### `g.http`
+
+```luau
+http: (t: { url: string, method: string?, headers: { [string]: string }?, body: string?, timeout: number?, on_done: ((response: HttpResponse) -> ())? }) -> HttpRequest
+```
+
+g.http { url, method, headers, body, timeout, on_done(response) }: an HTTP or HTTPS request (the server checked against the system's certificates), run off the loop. The method is GET, or POST with a body; the timeout 30 seconds. One agent for the whole process keeps connections open, so calls to the same server after the first skip the TCP and TLS handshakes. A 404 is an answer (status, ok = false), not an error; gzip is undone.
+
 ### `g.sha256`
 
 ```luau
@@ -2315,6 +2323,22 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `connected` | `boolean` |  |
 | `send` | `(self: Socket, text: string) -> ()` | s:send("text\n"): as given; a line-delimited peer wants the newline. |
 | `close` | `(self: Socket) -> ()` |  |
+
+### HttpRequest
+
+| Field | Type | |
+|---|---|---|
+| `cancel` | `(self: HttpRequest) -> ()` | r:cancel(): its answer goes unheard. A request already sent still reaches the server. |
+
+### HttpResponse
+
+| Field | Type | |
+|---|---|---|
+| `status` | `number` | The status, or 0 when there was no answer (see `error`). |
+| `ok` | `boolean` | 2xx. |
+| `body` | `string` | The body's bytes (g.parse_json(r.body) for JSON). |
+| `headers` | `{ [string]: string }` | By lower-case name; several of one name joined with ", ". |
+| `error` | `string?` | Why there is no answer: the name not found, refused, timed out, TLS. |
 
 ### WebSocket
 

@@ -10,6 +10,15 @@ changes what a shell sees.
 
 ### Added
 
+- `g.http { url, method, headers, body, timeout, on_done(response) }`:
+  HTTP and HTTPS run off the loop, answered with `{ status, ok, body,
+  headers, error }`. One agent for the process keeps connections open, so
+  a run of calls to one server pays for its handshakes once (where a
+  `curl` per call paid every time); gzip undone; a 404 is an answer, not
+  an error; `:cancel()` lets the answer go unheard. Built on ureq with
+  the same TLS as `g.websocket` (now shared, `tls.rs`): rustls and ring,
+  no OpenSSL, no aws-lc.
+
 - The stereo image in `@genoma/spectrum`: `spectrum:hold { imaging = true }`
   and each band's `azimuth` (radians, 0 ahead, ±`spectrum.stage` = ±30°
   the speakers), `diffuseness` and `energy`. Sinestesia's

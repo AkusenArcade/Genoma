@@ -78,6 +78,25 @@ export type Socket = {
     close: (self: Socket) -> (),
 }
 
+export type HttpRequest = {
+    -- r:cancel(): its answer goes unheard. A request already sent still
+    -- reaches the server.
+    cancel: (self: HttpRequest) -> (),
+}
+
+export type HttpResponse = {
+    -- The status, or 0 when there was no answer (see `error`).
+    status: number,
+    -- 2xx.
+    ok: boolean,
+    -- The body's bytes (g.parse_json(r.body) for JSON).
+    body: string,
+    -- By lower-case name; several of one name joined with ", ".
+    headers: { [string]: string },
+    -- Why there is no answer: the name not found, refused, timed out, TLS.
+    error: string?,
+}
+
 export type WebSocket = {
     -- "connecting", "open", "closing" or "closed".
     read state: string,
@@ -379,6 +398,21 @@ export type G = {
         on_message: ((data: string, binary: boolean) -> ())?,
         on_close: ((code: number, reason: string) -> ())?,
     }) -> WebSocket,
+    -- g.http { url, method, headers, body, timeout, on_done(response) }:
+    -- an HTTP or HTTPS request (the server checked against the system's
+    -- certificates), run off the loop. The method is GET, or POST with a
+    -- body; the timeout 30 seconds. One agent for the whole process keeps
+    -- connections open, so calls to the same server after the first skip
+    -- the TCP and TLS handshakes. A 404 is an answer (status, ok = false),
+    -- not an error; gzip is undone.
+    http: (t: {
+        url: string,
+        method: string?,
+        headers: { [string]: string }?,
+        body: string?,
+        timeout: number?,
+        on_done: ((response: HttpResponse) -> ())?,
+    }) -> HttpRequest,
     -- g.sha256(data): the digest, 32 bytes (a Luau string carries bytes).
     sha256: (data: string) -> string,
     base64: {
