@@ -1142,6 +1142,7 @@ version = "0.1.19"
 dependencies = [
  "base64",
  "calloop",
+ "futures-channel",
  "futures-util",
  "genoma-core",
  "genoma-render",

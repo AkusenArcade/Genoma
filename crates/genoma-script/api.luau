@@ -114,6 +114,17 @@ export type ServedRequest = {
     body: string,
 }
 
+export type Served = {
+    -- obj:emit(interface, signal, …): the arguments in the signature the
+    -- description gives that signal.
+    emit: (self: Served, interface: string, signal: string, ...any) -> (),
+    -- obj:changed(interface, { "PlaybackStatus", … }): PropertiesChanged,
+    -- with each one's value now.
+    changed: (self: Served, interface: string, names: { string }) -> (),
+    -- obj:close(): off the bus, its name let go.
+    close: (self: Served) -> (),
+}
+
 export type WebSocket = {
     -- "connecting", "open", "closing" or "closed".
     read state: string,
@@ -516,6 +527,14 @@ export type G = {
         watch: (t: { [string]: any }) -> Stoppable,
         -- g.dbus.variant("y", 2): a value with the type it takes in a `v`.
         variant: (signature: string, value: any) -> any,
+        -- g.dbus.serve { bus, name, path, interfaces, on_error }: an object
+        -- on the bus (MPRIS, FileManager1), on a connection of its own.
+        -- interfaces = { ["org.x.Y"] = { methods = { Name = { args = "s",
+        -- returns = "su", call = fn } }, properties = { Name = { signature
+        -- = "d", get = fn, set = fn? } }, signals = { Name = "x" } } }.
+        -- Introspect, Ping and the Properties interface are answered from
+        -- it; an error raised in `call` goes back to the caller.
+        serve: (t: { [string]: any }) -> Served,
     },
     pam: {
         -- g.pam.start { service, directory, user, on_prompt(message, echo),

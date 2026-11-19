@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 base64 = "0.23.1"
 calloop = "0.14.5"
+futures-channel = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 genoma-core = { path = "../genoma-core" }
 genoma-scene = { path = "../genoma-scene" }

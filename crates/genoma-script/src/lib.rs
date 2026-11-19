@@ -24,6 +24,7 @@ mod colour;
 mod scroll;
 mod profile;
 pub mod dbus;
+mod dbus_serve;
 mod greetd;
 mod list;
 mod values;
@@ -3093,6 +3094,9 @@ impl Script {
         dbus_table.set("set", lua.create_function(move |_, t: Table| dbus::set_from(&f()?, t))?)?;
         let f = get_dbus.clone();
         dbus_table.set("watch", lua.create_function(move |_, t: Table| dbus::watch_from(&f()?, t))?)?;
+        // g.dbus.serve { … }: an object of the interface's on the bus.
+        let f = get_dbus.clone();
+        dbus_table.set("serve", lua.create_function(move |lua, t: Table| dbus_serve::serve(&f()?, lua, t))?)?;
         // g.contours { … }: a picture's outlines, from a thread, through the
         // same channel into the loop.
         let f = get_dbus.clone();

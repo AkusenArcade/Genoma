@@ -691,7 +691,7 @@ A token from the compositor for a program about to start, in answer to the press
 ### `g.dbus`
 
 ```luau
-dbus: { -- g.dbus.call { bus, destination, path, interface, method, -- signature, args, reply = function(ok, …) end }. call: (t: { [string]: any }) -> (), -- g.dbus.get { bus, destination, path, interface, property, reply }. get: (t: { [string]: any }) -> (), -- g.dbus.set { bus, destination, path, interface, property, -- signature, value, reply }. set: (t: { [string]: any }) -> (), -- g.dbus.watch { bus, sender, path, interface, member, on_signal }. watch: (t: { [string]: any }) -> Stoppable, -- g.dbus.variant("y", 2): a value with the type it takes in a `v`. variant: (signature: string, value: any) -> any }
+dbus: { -- g.dbus.call { bus, destination, path, interface, method, -- signature, args, reply = function(ok, …) end }. call: (t: { [string]: any }) -> (), -- g.dbus.get { bus, destination, path, interface, property, reply }. get: (t: { [string]: any }) -> (), -- g.dbus.set { bus, destination, path, interface, property, -- signature, value, reply }. set: (t: { [string]: any }) -> (), -- g.dbus.watch { bus, sender, path, interface, member, on_signal }. watch: (t: { [string]: any }) -> Stoppable, -- g.dbus.variant("y", 2): a value with the type it takes in a `v`. variant: (signature: string, value: any) -> any, -- g.dbus.serve { bus, name, path, interfaces, on_error }: an object -- on the bus (MPRIS, FileManager1), on a connection of its own. -- interfaces = { ["org.x.Y"] = { methods = { Name = { args = "s", -- returns = "su", call = fn } }, properties = { Name = { signature -- = "d", get = fn, set = fn? } }, signals = { Name = "x" } } }. -- Introspect, Ping and the Properties interface are answered from -- it; an error raised in `call` goes back to the caller. serve: (t: { [string]: any }) -> Served }
 ```
 
 ### `g.pam`
@@ -2364,6 +2364,14 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `query` | `{ [string]: string }` | The query's pairs, decoded ("+" a space). |
 | `headers` | `{ [string]: string }` | By lower-case name. |
 | `body` | `string` |  |
+
+### Served
+
+| Field | Type | |
+|---|---|---|
+| `emit` | `(self: Served, interface: string, signal: string, ...any) -> ()` | obj:emit(interface, signal, …): the arguments in the signature the description gives that signal. |
+| `changed` | `(self: Served, interface: string, names: { string }) -> ()` | obj:changed(interface, { "PlaybackStatus", … }): PropertiesChanged, with each one's value now. |
+| `close` | `(self: Served) -> ()` | obj:close(): off the bus, its name let go. |
 
 ### WebSocket
 

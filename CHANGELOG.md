@@ -10,6 +10,17 @@ changes what a shell sees.
 
 ### Added
 
+- `g.dbus.serve { bus, name, path, interfaces, on_error }`: an object on
+  the bus written in Luau — methods (`args`, `returns`, `call`),
+  properties (`signature`, `get`, `set`), signals — on a connection of its
+  own (the shared one runs zbus's object server for Genoma's services).
+  `Introspect` and `Peer` are answered on the bus thread from the
+  description; `Properties.Get/GetAll/Set` from the properties; an error
+  raised in a method goes back to the caller as
+  `org.freedesktop.DBus.Error.Failed`. `obj:emit(interface, signal, …)`,
+  `obj:changed(interface, { names })` for `PropertiesChanged`,
+  `obj:close()`. MPRIS for a player, FileManager1 for a file manager.
+
 - `g.serve { port, on_request(request) -> response }`: a small HTTP
   server on 127.0.0.1 only, for the browser coming back from an OAuth
   login (`/callback?code=…`) or a local tool. Read on the loop like any

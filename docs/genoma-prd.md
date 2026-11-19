@@ -461,7 +461,8 @@ Bioma's port from Prisma reliable.
 Bioma writes about 39 services itself, and those keep their shape. Genoma
 provides the same building blocks Quickshell's `Quickshell.Io` does:
 - `g.process` (spawn, stream stdout lines, exit status);
-- `g.dbus` (call, get/set properties, watch signals, on either bus);
+- `g.dbus` (call, get/set properties, watch signals, on either bus; and
+  `g.dbus.serve`, an object of the interface's own — MPRIS, FileManager1);
 - `g.socket` (Unix sockets and TCP, line-delimited);
 - `g.http` (HTTP and HTTPS off the loop, connections kept between calls),
   `g.serve` (a small HTTP server on 127.0.0.1, for an OAuth redirect) and

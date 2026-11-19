@@ -56,7 +56,7 @@ fn err(message: impl Into<String>) -> mlua::Error {
 
 // ---- Luau ↔ Dyn, on the main thread ----------------------------------------
 
-fn from_lua(v: &LuaValue) -> Dyn {
+pub(crate) fn from_lua(v: &LuaValue) -> Dyn {
     match v {
         LuaValue::Boolean(b) => Dyn::Bool(*b),
         LuaValue::Integer(i) => Dyn::Int(*i),
@@ -79,7 +79,7 @@ fn from_lua(v: &LuaValue) -> Dyn {
     }
 }
 
-fn to_lua(lua: &Lua, d: &Dyn) -> mlua::Result<LuaValue> {
+pub(crate) fn to_lua(lua: &Lua, d: &Dyn) -> mlua::Result<LuaValue> {
     Ok(match d {
         Dyn::Nil => LuaValue::Nil,
         Dyn::Bool(b) => LuaValue::Boolean(*b),
@@ -234,7 +234,7 @@ fn from_wire(v: &Variant<'_>) -> Dyn {
 /// A message's arguments, in order. A body of one argument is read as a
 /// structure of one field: on the wire the two are the same bytes, since a
 /// body starts aligned.
-fn arguments(message: &zbus::Message) -> Result<Vec<Dyn>, String> {
+pub(crate) fn arguments(message: &zbus::Message) -> Result<Vec<Dyn>, String> {
     let body = message.body();
     let signature = match body.signature() {
         Signature::Unit => return Ok(Vec::new()),
@@ -248,7 +248,7 @@ fn arguments(message: &zbus::Message) -> Result<Vec<Dyn>, String> {
 
 /// The arguments as one body: a structure of them, which zbus sends as the
 /// arguments themselves.
-fn body(signature: &str, args: &[Dyn]) -> Result<Option<Structure<'static>>, String> {
+pub(crate) fn body(signature: &str, args: &[Dyn]) -> Result<Option<Structure<'static>>, String> {
     if signature.is_empty() {
         return if args.is_empty() { Ok(None) } else { Err("arguments without a signature".into()) };
     }
@@ -287,8 +287,8 @@ async fn call(c: Call) -> Result<Vec<Dyn>, String> {
 
 /// The callbacks waiting for the bus, by number, and the channel back.
 pub struct Dbus {
-    bus: Bus,
-    sender: Sender<Delivery>,
+    pub(crate) bus: Bus,
+    pub(crate) sender: Sender<Delivery>,
     /// Each with whether it answers once, and the owner it was asked under:
     /// what its answer starts belongs to the same load.
     waiting: RefCell<HashMap<u64, (Function, bool, Option<usize>)>>,
@@ -348,7 +348,7 @@ impl Dbus {
     }
 
     /// A number for `f`, dropped with the load that asked.
-    fn wait(self: &Rc<Self>, f: Function, once: bool) -> u64 {
+    pub(crate) fn wait(self: &Rc<Self>, f: Function, once: bool) -> u64 {
         let id = self.next.get();
         self.next.set(id + 1);
         self.waiting.borrow_mut().insert(id, (f, once, current_owner()));
@@ -381,7 +381,7 @@ impl Dbus {
     }
 }
 
-fn which_bus(t: &Table) -> mlua::Result<bool> {
+pub(crate) fn which_bus(t: &Table) -> mlua::Result<bool> {
     match t.get::<Option<String>>("bus")?.as_deref().unwrap_or("session") {
         "system" => Ok(true),
         "session" => Ok(false),
