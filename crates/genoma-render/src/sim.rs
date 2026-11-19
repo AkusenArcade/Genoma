@@ -55,6 +55,9 @@ pub struct Sim {
     /// and in what colour (straight RGBA).
     pub agent_size: f32,
     pub agent_color: [f32; 4],
+    /// 1: each agent in its own colour (its data, straight RGBA); 2: as a
+    /// glowing round dot; added.
+    pub agent_mode: u32,
 }
 
 /// Steps taken at most in one frame: a surface that slept does not catch

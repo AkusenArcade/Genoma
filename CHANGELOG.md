@@ -6,6 +6,16 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `agent_colors` and `agent_glow` on a simulation's shader: each agent
+  Genoma draws takes its colour from its own four numbers (`data`,
+  straight RGBA), and is drawn as a round glowing dot rather than a dash
+  along its velocity. A field of lights that fade and brighten each on its
+  own (Sinestesia's Nebulosa), without a `shade` looping over them.
+
 ## 0.1.20 — 2026-11-19
 
 ### Added

@@ -150,7 +150,8 @@ struct Uniforms {
     alpha: f32,
     fade_end: f32,
     fade_span: f32,
-    _pad: f32,
+    /// How Genoma draws its agents: 1 their own colours, 2 glowing dots.
+    agent_mode: f32,
     pointer: [f32; 4],
     backdrop: [f32; 4],
     /// Its simulation: cells across and down, agents, how large they are
@@ -176,6 +177,9 @@ struct Shader {
     alpha: f32,
     fade_end: f32,
     fade_span: f32,
+    // How Genoma draws its agents: 1 each in its own colour (its data, as
+    // straight RGBA), 2 as a glowing round dot; added.
+    agent_mode: f32,
     // The pointer: x, y from the node's corner, logical units; z 1 while it
     // is over the surface; w 1 while a button is held.
     pointer: vec4<f32>,
@@ -362,6 +366,7 @@ struct AgentVaryings {
     @location(0) unturned: vec2<f32>,
     @location(1) local: vec2<f32>,
     @location(2) @interpolate(flat) half: vec2<f32>,
+    @location(3) @interpolate(flat) colour: vec4<f32>,
 };
 
 @vertex
@@ -374,7 +379,11 @@ fn genoma_agent_vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) 
         along = a.zw / speed;
     }
     let across = vec2<f32>(-along.y, along.x);
-    let half = vec2<f32>(size, size * 0.5);
+    let mode = u32(shader.agent_mode);
+    var half = vec2<f32>(size, size * 0.5);
+    if ((mode & 2u) != 0u) {
+        half = vec2<f32>(size * 0.5, size * 0.5);
+    }
     let corner = vec2<f32>(f32(vertex & 1u), f32((vertex >> 1u) & 1u)) * 2.0 - 1.0;
     let local = corner * (half + vec2<f32>(1.0));
     let pixel = shader.origin + a.xy * shader.scale + along * local.x + across * local.y;
@@ -385,6 +394,11 @@ fn genoma_agent_vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) 
     out.unturned = pixel;
     out.local = local;
     out.half = half;
+    var colour = shader.agent_color;
+    if ((mode & 1u) != 0u) {
+        colour = genoma_agents[i * 2u + 1u];
+    }
+    out.colour = colour;
     return out;
 }
 
@@ -395,11 +409,16 @@ fn genoma_agent_fs(in: AgentVaryings) -> @location(0) vec4<f32> {
     if (q.x < c.x || q.y < c.y || q.x >= c.z || q.y >= c.w) {
         discard;
     }
+    let colour = in.colour;
+    if ((u32(shader.agent_mode) & 2u) != 0u) {
+        // A glow: bright in the middle, gone at the edge.
+        let g = smoothstep(1.0, 0.0, length(in.local) / max(in.half.x, 0.5)) * shader.alpha;
+        return vec4<f32>(colour.rgb * colour.a, colour.a) * g;
+    }
     // A capsule along x: a segment as long as it is longer than wide.
     let reach = in.half.x - in.half.y;
     let d = length(vec2<f32>(max(abs(in.local.x) - reach, 0.0), in.local.y));
     let cover = clamp(in.half.y - d + 0.5, 0.0, 1.0) * shader.alpha;
-    let colour = shader.agent_color;
     return vec4<f32>(colour.rgb * colour.a, colour.a) * cover;
 }
 "#;
@@ -690,11 +709,12 @@ impl Pipeline {
                 values[j / 4][j % 4] = *v;
             }
             // Its simulation made ready, and what its shader reads of it.
-            let (mut sim, mut agent_color) = ([0.0; 4], [0.0; 4]);
+            let (mut sim, mut agent_color, mut agent_mode) = ([0.0; 4], [0.0; 4], 0.0);
             if let Some(m) = &s.sim {
                 self.sims.upload(device, queue, m, s.size, s.time, s.scale, s.pointer, &s.values);
                 sim = [m.grid[0] as f32, m.grid[1] as f32, m.agents as f32, m.agent_size];
                 agent_color = m.agent_color;
+                agent_mode = m.agent_mode as f32;
                 let drawn = if m.agent_size > 0.0 { m.agents } else { 0 };
                 self.draw_sims.push(Some((m.key, drawn)));
             } else {
@@ -710,7 +730,7 @@ impl Pipeline {
                 alpha: s.alpha,
                 fade_end: s.fade[0],
                 fade_span: s.fade[1],
-                _pad: 0.0,
+                agent_mode,
                 pointer: s.pointer,
                 backdrop: s.backdrop.map_or([0.0; 4], |(_, b)| b),
                 sim,

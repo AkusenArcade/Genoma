@@ -337,6 +337,8 @@ pub struct Node {
     grid: Option<[u32; 2]>,
     agents: u32,
     agent_size: f32,
+    /// Agents in their own colours (1), as glowing dots (2).
+    agent_mode: u32,
     steps_rate: f32,
     /// A clocked shader's frames a second; 0 is every refresh.
     fps: f32,
@@ -538,6 +540,7 @@ impl Node {
             grid: None,
             agents: 0,
             agent_size: 0.0,
+            agent_mode: 0,
             steps_rate: 60.0,
             fps: 0.0,
             steps_taken: 0,
@@ -2265,6 +2268,14 @@ impl Scene {
             }
             Prop::Agents => n.agents = take!(number).clamp(0.0, 65536.0) as u32,
             Prop::AgentSize => n.agent_size = take!(number).max(0.0),
+            Prop::AgentColors => {
+                let on = take!(flag);
+                n.agent_mode = if on { n.agent_mode | 1 } else { n.agent_mode & !1 };
+            }
+            Prop::AgentGlow => {
+                let on = take!(flag);
+                n.agent_mode = if on { n.agent_mode | 2 } else { n.agent_mode & !2 };
+            }
             Prop::Steps => n.steps_rate = take!(number).clamp(0.0, 960.0),
             Prop::Fps => n.fps = take!(number).max(0.0),
             Prop::Src => {
@@ -4859,6 +4870,7 @@ fn collect_node(
                     dt: 1.0 / n.steps_rate.max(1.0),
                     agent_size: n.agent_size * scale,
                     agent_color: fade(n.fill),
+                    agent_mode: n.agent_mode,
                 }
             });
             if let Some((source, key)) = shaded {
