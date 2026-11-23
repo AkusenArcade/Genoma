@@ -530,6 +530,9 @@ impl UserData for CompositorRef {
         fields.add_field_method_get("name", |_, this| Ok(this.0.name()));
         // compositor.can_minimize → whether :minimize_window does anything.
         fields.add_field_method_get("can_minimize", |_, this| Ok(this.0.can_minimize()));
+        // compositor.can_power_monitors → whether :power_monitors does
+        // anything: niri, Hyprland and Umbriel.
+        fields.add_field_method_get("can_power_monitors", |_, this| Ok(this.0.can_power_monitors()));
         // compositor.title → the focused window's title, or nil.
         fields.add_field_method_get("title", |_, this| Ok(this.0.title.get()));
         // compositor.focused_output → "DP-1": where a shortcut means.
@@ -618,6 +621,10 @@ impl UserData for CompositorRef {
         methods.add_method("minimize_window", |_, this, (id, minimized): (LuaValue, Option<bool>)| {
             this.0.minimize_window(&id_arg(id)?, minimized.unwrap_or(true)).map_err(err)
         });
+        // compositor:power_monitors(on): every monitor off (false) or back
+        // on (true), through DPMS. Only where compositor.can_power_monitors;
+        // elsewhere an error.
+        methods.add_method("power_monitors", |_, this, on: bool| this.0.power_monitors(on).map_err(err));
     }
 }
 

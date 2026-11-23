@@ -6,6 +6,19 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `compositor:power_monitors(on)` and `compositor.can_power_monitors`:
+  every monitor off or back on through DPMS, the session running on —
+  niri's `PowerOffMonitors`/`PowerOnMonitors`, Hyprland's `dpms` (in both
+  the Lua and the hyprlang dispatch), Umbriel's `dpms-off`/`dpms-on`. niri
+  brings the monitors back by itself at the first input; Hyprland and
+  Umbriel wait for `power_monitors(true)`. Not through the standard
+  protocols: an error there. Screens blanked after a time idle, with
+  `@genoma/idle`.
+
 ## 0.1.21 — 2026-11-20
 
 ### Added

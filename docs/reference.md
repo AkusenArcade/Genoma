@@ -814,6 +814,14 @@ read can_minimize: boolean
 
 Whether minimize_window does anything: only through the protocols.
 
+### `compositor.can_power_monitors`
+
+```luau
+read can_power_monitors: boolean
+```
+
+Whether power_monitors does anything: niri, Hyprland and Umbriel.
+
 ### `compositor.title`
 
 ```luau
@@ -907,6 +915,14 @@ switch_layout: (self: Compositor, to: "next" | "prev" | number) -> ()
 ```
 
 "next", "prev", or a place in keyboard.layouts, from 1.
+
+### `compositor:power_monitors`
+
+```luau
+power_monitors: (self: Compositor, on: boolean) -> ()
+```
+
+Every monitor off (false) or back on (true), through DPMS, the session running on. niri brings them back by itself at the first input; Hyprland and Umbriel wait for power_monitors(true).
 
 ## Vitals
 

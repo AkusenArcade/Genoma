@@ -763,6 +763,31 @@ impl Compositor {
         }
     }
 
+    /// Whether [`Compositor::power_monitors`] does anything: through each
+    /// compositor's IPC, not through the protocols.
+    pub fn can_power_monitors(&self) -> bool {
+        !matches!(self.backend, Backend::Wayland { .. })
+    }
+
+    /// Every monitor's power, through DPMS: off blanks them with the session
+    /// still running, on brings them back. niri brings them back by itself
+    /// at the first input; Hyprland and Umbriel wait to be asked.
+    pub fn power_monitors(&self, on: bool) -> Result<(), String> {
+        match &self.backend {
+            Backend::Niri { socket, .. } => {
+                Self::niri_action(socket, if on { "{\"PowerOnMonitors\":{}}" } else { "{\"PowerOffMonitors\":{}}" })
+            }
+            Backend::Hyprland { .. } => {
+                let (lua, classic) = if on { ("enable", "on") } else { ("disable", "off") };
+                self.hyprland_dispatch(&format!("hl.dsp.dpms({{ action = \"{lua}\" }})"), &format!("dpms {classic}"))
+            }
+            Backend::Umbriel { .. } => {
+                self.umbriel_action(serde_json::json!({ "action": if on { "dpms-on" } else { "dpms-off" } }))
+            }
+            Backend::Wayland { .. } => Err(format!("{} does not power monitors", self.name())),
+        }
+    }
+
     pub fn close_window(&self, id: &str) -> Result<(), String> {
         match &self.backend {
             Backend::Niri { socket, .. } => {
@@ -910,6 +935,67 @@ mod tests {
             Keyboard { layouts: vec!["us".into(), "it".into()], current: Some(1), name: Some("Italian".into()) }
         );
         assert_eq!(hyprland_keyboard_of(&Value::Null), Keyboard::default());
+    }
+
+    /// A socket that answers each connection with `reply` and hands back
+    /// what it was sent, one request a connection.
+    fn listener(path: &std::path::Path, reply: &'static str, count: usize) -> std::thread::JoinHandle<Vec<String>> {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            (0..count)
+                .map(|_| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = String::new();
+                    BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    request.trim_end().to_owned()
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn monitors_power_off_and_on_in_each_tongue() {
+        let dir = std::env::temp_dir().join(format!("genoma-power-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let socket = dir.join("niri.sock");
+        let said = listener(&socket, "{\"Ok\":\"Handled\"}\n", 2);
+        let c = Compositor::new(Backend::Niri { socket, model: Niri::model() });
+        assert!(c.can_power_monitors());
+        assert_eq!((c.power_monitors(false), c.power_monitors(true)), (Ok(()), Ok(())));
+        assert_eq!(said.join().unwrap(), ["{\"Action\":{\"PowerOffMonitors\":{}}}", "{\"Action\":{\"PowerOnMonitors\":{}}}"]);
+
+        let socket = dir.join("umbriel.sock");
+        let said = listener(&socket, "{\"ok\":true}\n", 1);
+        let c = Compositor::new(Backend::Umbriel { socket });
+        assert_eq!(c.power_monitors(false), Ok(()));
+        let sent: Value = serde_json::from_str(&said.join().unwrap()[0]).unwrap();
+        assert_eq!(sent, serde_json::json!({ "cmd": "action", "action": "dpms-off" }));
+
+        // Hyprland in hyprlang refuses the Lua form, then takes the classic.
+        let hypr = dir.join("hypr");
+        std::fs::create_dir_all(&hypr).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(hypr.join(".socket.sock")).unwrap();
+        let said = std::thread::spawn(move || {
+            ["unknown request", "ok"]
+                .iter()
+                .map(|reply| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut buf = [0u8; 256];
+                    let n = stream.read(&mut buf).unwrap();
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    String::from_utf8_lossy(&buf[..n]).into_owned()
+                })
+                .collect::<Vec<_>>()
+        });
+        let c = Compositor::new(Backend::Hyprland { dir: hypr });
+        assert_eq!(c.power_monitors(true), Ok(()));
+        assert_eq!(said.join().unwrap(), ["dispatch hl.dsp.dpms({ action = \"enable\" })", "dispatch dpms on"]);
+
+        assert!(!Compositor::wayland().can_power_monitors());
+        assert_eq!(Compositor::wayland().power_monitors(false), Err("wayland does not power monitors".into()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -624,6 +624,8 @@ export type Compositor = {
     read name: string,
     -- Whether minimize_window does anything: only through the protocols.
     read can_minimize: boolean,
+    -- Whether power_monitors does anything: niri, Hyprland and Umbriel.
+    read can_power_monitors: boolean,
     -- The focused window's title, or nil.
     read title: string?,
     -- Where a shortcut means.
@@ -647,6 +649,10 @@ export type Compositor = {
     minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> (),
     -- "next", "prev", or a place in keyboard.layouts, from 1.
     switch_layout: (self: Compositor, to: "next" | "prev" | number) -> (),
+    -- Every monitor off (false) or back on (true), through DPMS, the session
+    -- running on. niri brings them back by itself at the first input;
+    -- Hyprland and Umbriel wait for power_monitors(true).
+    power_monitors: (self: Compositor, on: boolean) -> (),
 }
 
 -- @genoma/niri: niri's own model, with niri's numeric ids.
