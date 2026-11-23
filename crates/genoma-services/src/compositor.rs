@@ -22,6 +22,7 @@
 
 use std::{
     cell::RefCell,
+    collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -47,6 +48,8 @@ pub struct Workspace {
     /// No window on it.
     pub vacant: bool,
     pub urgent: bool,
+    /// The window that has, or last had, the focus on it.
+    pub active_window: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -60,6 +63,40 @@ pub struct Window {
     pub output: Option<String>,
     /// Minimized: only the protocols report it, and only they minimize.
     pub minimized: bool,
+    /// The program's process, where the compositor says.
+    pub pid: Option<i64>,
+    pub floating: bool,
+    /// Asking for attention.
+    pub urgent: bool,
+}
+
+/// Where a window is laid out, in logical units on its output.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Layout {
+    /// The corner, in the output's own coordinates; none when the
+    /// compositor does not say (niri says it of floating windows only).
+    pub pos: Option<(f64, f64)>,
+    pub size: (f64, f64),
+    /// Column and row, from 1, where the layout is made of columns (niri,
+    /// Umbriel's scrolling layout); none when floating or elsewhere.
+    pub column: Option<u64>,
+    pub row: Option<u64>,
+}
+
+/// The screen being captured, as the compositor reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cast {
+    pub id: String,
+    /// Frames are flowing (niri reports a cast paused too).
+    pub active: bool,
+    /// The program receiving it, where the compositor says.
+    pub pid: Option<i64>,
+    /// Its PipeWire node, where the compositor says.
+    pub node: Option<u64>,
+    /// What is captured: an output by name, or a window by id; neither when
+    /// the compositor does not say which.
+    pub output: Option<String>,
+    pub window: Option<String>,
 }
 
 /// The keyboard's layouts, as the compositor reports them.
@@ -142,6 +179,23 @@ pub struct Compositor {
     pub title: Memo<Option<String>>,
     /// The keyboard layouts: niri and Hyprland say; empty elsewhere.
     pub keyboard: Signal<Keyboard>,
+    /// Each window's layout, by id: apart from `windows`, because it
+    /// changes on every frame of a resize and a title must not follow it.
+    pub layouts: Signal<HashMap<String, Layout>>,
+    /// The compositor's overview is open (niri, Umbriel).
+    pub overview: Signal<bool>,
+    pub casts: Signal<Vec<Cast>>,
+    /// The screenshots the compositor took itself since the start, and the
+    /// last one's path, when it saved it (niri).
+    pub screenshot: Signal<(u64, Option<String>)>,
+    /// Hyprland's windows asking for attention, until they are focused:
+    /// its clients do not say, only an event.
+    hyprland_urgent: RefCell<Vec<String>>,
+    /// Umbriel's outputs' corners, by name, and its last window list: its
+    /// windows are placed in the whole layout's coordinates, and either may
+    /// come first.
+    umbriel_outputs: RefCell<HashMap<String, (f64, f64)>>,
+    umbriel_windows: RefCell<Value>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -186,7 +240,21 @@ impl Compositor {
             let id = focused.get()?;
             windows.get().into_iter().find(|w| w.id == id)?.title
         });
-        Compositor { backend, workspaces: Signal::new(Vec::new()), windows, focused, title, keyboard: Signal::new(Keyboard::default()) }
+        Compositor {
+            backend,
+            workspaces: Signal::new(Vec::new()),
+            windows,
+            focused,
+            title,
+            keyboard: Signal::new(Keyboard::default()),
+            layouts: Signal::new(HashMap::new()),
+            overview: Signal::new(false),
+            casts: Signal::new(Vec::new()),
+            screenshot: Signal::new((0, None)),
+            hyprland_urgent: RefCell::new(Vec::new()),
+            umbriel_outputs: RefCell::new(HashMap::new()),
+            umbriel_windows: RefCell::new(Value::Null),
+        }
     }
 
     /// Finds the compositor and opens its event stream. The caller reads
@@ -214,7 +282,7 @@ impl Compositor {
         });
         if let Some(socket) = umbriel {
             let mut stream = UnixStream::connect(&socket)?;
-            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\"]}\n")?;
+            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\",\"outputs\",\"overview\"]}\n")?;
             return Ok((Compositor::new(Backend::Umbriel { socket }), stream));
         }
         Err(unknown())
@@ -252,6 +320,9 @@ impl Compositor {
                     self.niri_keyboard(line);
                     return;
                 }
+                if self.niri_extra(line) {
+                    return;
+                }
                 model.line(line);
                 self.take_niri(model);
             }
@@ -278,7 +349,8 @@ impl Compositor {
                 active: w.is_active,
                 focused: w.is_focused,
                 vacant: w.vacant,
-                urgent: false,
+                urgent: w.is_urgent,
+                active_window: w.active_window_id.map(|i| i.to_string()),
             })
             .collect();
         let windows: Vec<Window> = model
@@ -291,15 +363,70 @@ impl Compositor {
                 title: w.title,
                 app_id: w.app_id,
                 workspace: w.workspace_id.map(|i| i.to_string()),
+                pid: w.pid,
+                floating: w.is_floating,
+                urgent: w.is_urgent,
                 ..Window::default()
             })
             .collect();
         let focused = model.focused.get_untracked().flatten().map(|i| i.to_string());
+        let layouts = model
+            .layouts
+            .get_untracked()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, l)| (id.to_string(), Layout { pos: l.pos, size: l.size, column: l.column, row: l.row }))
+            .collect();
         batch(|| {
             self.set_workspaces(workspaces);
             self.set_windows(windows);
             self.set_focused(focused);
+            self.set_layouts(layouts);
         });
+    }
+
+    /// What niri says that only the compositor service follows: the
+    /// overview, screencasts and its own screenshots. True when the line
+    /// was one of them.
+    fn niri_extra(&self, line: &str) -> bool {
+        if !(line.contains("\"Overview") || line.contains("\"Cast") || line.contains("\"ScreenshotCaptured")) {
+            return false;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else { return false };
+        let Some((kind, body)) = event.as_object().and_then(|o| o.iter().next()) else { return false };
+        let cast = |v: &Value| -> Option<Cast> {
+            let target = v.get("target");
+            Some(Cast {
+                id: id_of(v.get("stream_id")?)?,
+                active: v.get("is_active").and_then(Value::as_bool).unwrap_or(true),
+                pid: v.get("pid").and_then(Value::as_i64),
+                node: v.get("pw_node_id").and_then(Value::as_u64),
+                output: target.and_then(|t| text(t.get("Output")?, "name")),
+                window: target.and_then(|t| id_of(t.get("Window")?.get("id")?)),
+            })
+        };
+        match kind.as_str() {
+            "OverviewOpenedOrClosed" => self.set_overview(body.get("is_open").and_then(Value::as_bool).unwrap_or(false)),
+            "CastsChanged" => {
+                self.set_casts(body.get("casts").and_then(Value::as_array).into_iter().flatten().filter_map(cast).collect())
+            }
+            "CastStartedOrChanged" => {
+                let Some(c) = body.get("cast").and_then(cast) else { return true };
+                let mut list: Vec<Cast> = self.casts.get_untracked().unwrap_or_default().into_iter().filter(|o| o.id != c.id).collect();
+                list.push(c);
+                self.set_casts(list);
+            }
+            "CastStopped" => {
+                let Some(id) = body.get("stream_id").and_then(id_of) else { return true };
+                self.set_casts(self.casts.get_untracked().unwrap_or_default().into_iter().filter(|o| o.id != id).collect());
+            }
+            "ScreenshotCaptured" => {
+                let (n, _) = self.screenshot.get_untracked().unwrap_or_default();
+                self.screenshot.set((n + 1, text(body, "path")));
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// `KeyboardLayoutsChanged` carries the whole list, `KeyboardLayoutSwitched`
@@ -351,6 +478,14 @@ impl Compositor {
         };
         let focused_output =
             monitors.iter().find(|m| m.get("focused").and_then(Value::as_bool) == Some(true)).and_then(|m| text(m, "name"));
+        // Each monitor's corner, by its number: clients are placed in the
+        // whole layout's coordinates.
+        let corner = |monitor: i64| {
+            monitors
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_i64) == Some(monitor))
+                .map(|m| (m.get("x").and_then(Value::as_f64).unwrap_or(0.0), m.get("y").and_then(Value::as_f64).unwrap_or(0.0)))
+        };
         let mut workspaces: Vec<Workspace> = spaces
             .as_array()
             .into_iter()
@@ -373,6 +508,7 @@ impl Compositor {
                     active,
                     vacant: w.get("windows").and_then(Value::as_u64).unwrap_or(0) == 0,
                     urgent: false,
+                    active_window: text(w, "lastwindow").filter(|a| a.trim_start_matches("0x").bytes().any(|b| b != b'0')),
                 })
             })
             .collect();
@@ -388,26 +524,42 @@ impl Compositor {
             n += 1;
             w.idx = n;
         }
-        let windows: Vec<Window> = clients
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|c| c.get("mapped").and_then(Value::as_bool) != Some(false))
+        let mapped: Vec<&Value> =
+            clients.as_array().into_iter().flatten().filter(|c| c.get("mapped").and_then(Value::as_bool) != Some(false)).collect();
+        let focused = text(&active, "address");
+        // A window focused is a window answered.
+        let urgent: Vec<String> =
+            self.hyprland_urgent.borrow().iter().filter(|a| Some(*a) != focused.as_ref()).cloned().collect();
+        *self.hyprland_urgent.borrow_mut() = urgent.clone();
+        let windows: Vec<Window> = mapped
+            .iter()
             .filter_map(|c| {
+                let id = text(c, "address")?;
                 Some(Window {
-                    id: text(c, "address")?,
+                    urgent: urgent.contains(&id),
+                    id,
                     title: text(c, "title"),
                     app_id: text(c, "class"),
                     workspace: c.get("workspace")?.get("id")?.as_i64().map(|i| i.to_string()),
+                    pid: c.get("pid").and_then(Value::as_i64).filter(|p| *p > 0),
+                    floating: c.get("floating").and_then(Value::as_bool).unwrap_or(false),
                     ..Window::default()
                 })
             })
             .collect();
-        let focused = text(&active, "address");
+        let layouts = mapped
+            .iter()
+            .filter_map(|c| {
+                let (x, y) = pair(c.get("at"))?;
+                let (ox, oy) = corner(c.get("monitor")?.as_i64()?)?;
+                Some((text(c, "address")?, Layout { pos: Some((x - ox, y - oy)), size: pair(c.get("size"))?, column: None, row: None }))
+            })
+            .collect();
         batch(|| {
             self.set_workspaces(workspaces);
             self.set_windows(windows);
             self.set_focused(focused);
+            self.set_layouts(layouts);
         });
         self.hyprland_keyboard();
     }
@@ -424,7 +576,27 @@ impl Compositor {
         match name {
             "activewindowv2" => {
                 let id = (!data.is_empty() && data != ",").then(|| format!("0x{}", data.trim_start_matches("0x")));
+                if let Some(id) = &id
+                    && self.hyprland_urgent.borrow().contains(id)
+                {
+                    self.hyprland_urgent.borrow_mut().retain(|a| a != id);
+                    self.windows.update(|list| list.iter().map(|w| if &w.id == id { Window { urgent: false, ..w.clone() } } else { w.clone() }).collect());
+                }
                 self.set_focused(id);
+            }
+            "urgent" => {
+                let id = format!("0x{}", data.trim_start_matches("0x"));
+                if self.focused.get_untracked().flatten().as_ref() == Some(&id) || self.hyprland_urgent.borrow().contains(&id) {
+                    return;
+                }
+                self.hyprland_urgent.borrow_mut().push(id.clone());
+                self.windows.update(|list| list.iter().map(|w| if w.id == id { Window { urgent: true, ..w.clone() } } else { w.clone() }).collect());
+            }
+            // `screencast>>STATE,OWNER`: one cast at a time, of a monitor
+            // (owner 0) or a window (1), with no more said.
+            "screencast" => {
+                let on = data.split(',').next() == Some("1");
+                self.set_casts(if on { vec![Cast { id: "hyprland".into(), active: true, ..Cast::default() }] } else { Vec::new() });
             }
             "windowtitlev2" => {
                 let Some((address, title)) = data.split_once(',') else { return };
@@ -439,7 +611,8 @@ impl Compositor {
             // Opening and closing a window are said once, without a v2.
             "activelayout" => self.hyprland_keyboard(),
             "workspacev2" | "focusedmonv2" | "createworkspacev2" | "destroyworkspacev2" | "moveworkspacev2" | "renameworkspace"
-            | "openwindow" | "closewindow" | "movewindowv2" | "monitoraddedv2" | "monitorremovedv2" | "configreloaded" => {
+            | "openwindow" | "closewindow" | "movewindowv2" | "monitoraddedv2" | "monitorremovedv2" | "configreloaded"
+            | "changefloatingmode" | "fullscreen" => {
                 self.hyprland_refresh()
             }
             _ => {}
@@ -467,6 +640,7 @@ impl Compositor {
                             focused: w.get("focused").and_then(Value::as_bool).unwrap_or(false),
                             vacant: w.get("occupied").and_then(Value::as_bool) == Some(false),
                             urgent: w.get("urgent").and_then(Value::as_bool).unwrap_or(false),
+                            active_window: w.get("focused_window").and_then(id_of),
                         })
                     })
                     .collect();
@@ -482,6 +656,9 @@ impl Compositor {
                             title: text(w, "title"),
                             app_id: text(w, "app_id"),
                             workspace: w.get("workspace").and_then(id_of),
+                            pid: w.get("pid").and_then(Value::as_i64).filter(|p| *p > 0),
+                            floating: w.get("floating").and_then(Value::as_bool).unwrap_or(false),
+                            urgent: w.get("urgent").and_then(Value::as_bool).unwrap_or(false),
                             ..Window::default()
                         })
                     })
@@ -489,13 +666,61 @@ impl Compositor {
                 // `active` is the window holding the keyboard; `focused` only
                 // its workspace's remembered one.
                 let focused = list.iter().find(|w| w.get("active").and_then(Value::as_bool) == Some(true)).and_then(|w| id_of(w.get("id")?));
+                *self.umbriel_windows.borrow_mut() = Value::Array(list);
                 batch(|| {
                     self.set_windows(windows);
                     self.set_focused(focused);
+                    self.umbriel_layouts();
                 });
+            }
+            Some("outputs") => {
+                let corners = data
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| {
+                        let p = o.get("position")?;
+                        Some((text(o, "name")?, (p.get("x")?.as_f64()?, p.get("y")?.as_f64()?)))
+                    })
+                    .collect();
+                *self.umbriel_outputs.borrow_mut() = corners;
+                self.umbriel_layouts();
+            }
+            Some("overview") => {
+                self.set_overview(data.and_then(|d| d.get("open")).and_then(Value::as_bool).unwrap_or(false));
             }
             _ => {}
         }
+    }
+
+    /// The windows' places, on their outputs: x and y come in the whole
+    /// layout's coordinates, column and row from 0 (-1 floating).
+    fn umbriel_layouts(&self) {
+        let corners = self.umbriel_outputs.borrow();
+        let layouts = self
+            .umbriel_windows
+            .borrow()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| {
+                let number = |key: &str| w.get(key).and_then(Value::as_f64);
+                let (ox, oy) = text(w, "output").and_then(|o| corners.get(&o).copied()).unwrap_or((0.0, 0.0));
+                let place = |key: &str| w.get(key).and_then(Value::as_i64).filter(|n| *n >= 0).map(|n| n as u64 + 1);
+                let floating = w.get("floating").and_then(Value::as_bool) == Some(true);
+                Some((
+                    id_of(w.get("id")?)?,
+                    Layout {
+                        pos: Some((number("x")? - ox, number("y")? - oy)),
+                        size: (number("w")?, number("h")?),
+                        column: place("column").filter(|_| !floating),
+                        row: place("row").filter(|_| !floating),
+                    },
+                ))
+            })
+            .collect();
+        drop(corners);
+        self.set_layouts(layouts);
     }
 
     fn umbriel_action(&self, action: Value) -> Result<(), String> {
@@ -527,6 +752,7 @@ impl Compositor {
                 workspace: None,
                 output: t.outputs.first().cloned(),
                 minimized: t.minimized,
+                ..Window::default()
             })
             .collect();
         let focused = toplevels.iter().find(|t| t.activated).map(|t| t.id.clone());
@@ -558,6 +784,7 @@ impl Compositor {
                     focused: active && w.output.is_some() && w.output == focused_output,
                     vacant: false,
                     urgent: w.state & 2 != 0,
+                    active_window: None,
                 }
             })
             .collect();
@@ -616,6 +843,29 @@ impl Compositor {
         if self.windows.get_untracked().as_ref() != Some(&list) {
             self.windows.set(list);
         }
+    }
+
+    fn set_layouts(&self, layouts: HashMap<String, Layout>) {
+        if self.layouts.get_untracked().as_ref() != Some(&layouts) {
+            self.layouts.set(layouts);
+        }
+    }
+
+    fn set_overview(&self, open: bool) {
+        if self.overview.get_untracked() != Some(open) {
+            self.overview.set(open);
+        }
+    }
+
+    fn set_casts(&self, list: Vec<Cast>) {
+        if self.casts.get_untracked().as_ref() != Some(&list) {
+            self.casts.set(list);
+        }
+    }
+
+    /// Where `id` is laid out, when the compositor says.
+    pub fn layout(&self, id: &str) -> Option<Layout> {
+        self.layouts.get().get(id).cloned()
     }
 
     fn set_keyboard(&self, keyboard: Keyboard) {
@@ -732,6 +982,38 @@ impl Compositor {
         }
     }
 
+    /// The workspace `delta` places on from the one shown on `output` (the
+    /// focused output without one): down is positive. Focusing it there
+    /// moves the keyboard to that output, as a wheel over its workspaces
+    /// means. Past the first or the last, nothing happens: niri keeps an
+    /// empty one at the end, the others do not make one.
+    pub fn step_workspace(&self, output: Option<&str>, delta: i64) -> Result<(), String> {
+        let spaces = self.workspaces.get_untracked().unwrap_or_default();
+        let output = match output {
+            Some(o) => o.to_owned(),
+            None => spaces.iter().find(|w| w.focused).and_then(|w| w.output.clone()).ok_or("no focused output")?,
+        };
+        let mut on: Vec<&Workspace> = spaces.iter().filter(|w| w.output.as_deref() == Some(output.as_str())).collect();
+        on.sort_by_key(|w| w.idx);
+        let Some(at) = on.iter().position(|w| w.active) else { return Err(format!("no workspace shown on {output}")) };
+        let to = at as i64 + delta;
+        if to < 0 || to >= on.len() as i64 || delta == 0 {
+            return Ok(());
+        }
+        self.focus_workspace(&on[to as usize].id.clone())
+    }
+
+    /// Centres the focused window on its screen (niri, Umbriel; Hyprland
+    /// centres a floating one only).
+    pub fn center_window(&self) -> Result<(), String> {
+        match &self.backend {
+            Backend::Niri { socket, .. } => Self::niri_action(socket, "{\"CenterWindow\":{\"id\":null}}"),
+            Backend::Hyprland { .. } => self.hyprland_dispatch("hl.dsp.window.center()", "centerwindow"),
+            Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "window-center" })),
+            Backend::Wayland { .. } => Err(format!("{} does not centre windows", self.name())),
+        }
+    }
+
     /// Switches the keyboard layout. niri and Hyprland only; the new one
     /// comes back through the event stream as [`Compositor::keyboard`].
     pub fn switch_layout(&self, target: LayoutTarget) -> Result<(), String> {
@@ -825,6 +1107,11 @@ fn hyprland_address(id: &str) -> Result<&str, String> {
         return Err(format!("no Hyprland window {id}"));
     }
     Ok(id)
+}
+
+fn pair(v: Option<&Value>) -> Option<(f64, f64)> {
+    let a = v?.as_array()?;
+    Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
 }
 
 /// An id as a string, whether the compositor sent a string or a number.
@@ -935,6 +1222,89 @@ mod tests {
             Keyboard { layouts: vec!["us".into(), "it".into()], current: Some(1), name: Some("Italian".into()) }
         );
         assert_eq!(hyprland_keyboard_of(&Value::Null), Keyboard::default());
+    }
+
+    #[test]
+    fn niri_says_pids_floating_urgency_layouts_and_the_rest() {
+        let c = Compositor::new(Backend::Niri { socket: PathBuf::from("/nonexistent"), model: Niri::model() });
+        c.line(r#"{"WorkspacesChanged":{"workspaces":[{"id":5,"idx":1,"output":"DP-1","is_active":true,"is_focused":true,"active_window_id":9},{"id":6,"idx":2,"output":"DP-1","is_active":false,"is_focused":false,"active_window_id":null}]}}"#);
+        c.line(r#"{"WindowsChanged":{"windows":[{"id":9,"title":"t","app_id":"a","pid":42,"workspace_id":5,"is_focused":true,"is_floating":false,"is_urgent":false,"layout":{"pos_in_scrolling_layout":[2,1],"tile_size":[800.0,1000.0],"window_size":[796,996],"tile_pos_in_workspace_view":[16.0,50.0],"window_offset_in_tile":[2,2]}}]}}"#);
+        let w = c.focused_window().unwrap();
+        assert_eq!((w.pid, w.floating, w.urgent), (Some(42), false, false));
+        assert_eq!(c.active("DP-1").and_then(|w| w.active_window).as_deref(), Some("9"));
+        assert_eq!(c.layout("9"), Some(Layout { pos: Some((16.0, 50.0)), size: (800.0, 1000.0), column: Some(2), row: Some(1) }));
+
+        // A resize moves the layout and nothing else.
+        let windows = c.windows.get_untracked();
+        c.line(r#"{"WindowLayoutsChanged":{"changes":[[9,{"pos_in_scrolling_layout":null,"tile_size":[400.0,300.0],"window_size":[400,300],"tile_pos_in_workspace_view":null,"window_offset_in_tile":[0,0]}]]}}"#);
+        assert_eq!(c.layout("9"), Some(Layout { pos: None, size: (400.0, 300.0), column: None, row: None }));
+        assert_eq!(c.windows.get_untracked(), windows);
+
+        c.line(r#"{"WindowUrgencyChanged":{"id":9,"urgent":true}}"#);
+        c.line(r#"{"WorkspaceUrgencyChanged":{"id":6,"urgent":true}}"#);
+        assert!(c.focused_window().unwrap().urgent && c.on_output(Some("DP-1"))[1].urgent);
+        c.line(r#"{"WorkspaceActiveWindowChanged":{"workspace_id":5,"active_window_id":null}}"#);
+        assert!(c.active("DP-1").is_some_and(|w| w.active_window.is_none() && w.vacant));
+
+        c.line(r#"{"OverviewOpenedOrClosed":{"is_open":true}}"#);
+        assert!(c.overview.get_untracked().unwrap());
+        c.line(r#"{"CastsChanged":{"casts":[{"stream_id":3,"session_id":1,"kind":"PipeWire","target":{"Output":{"name":"DP-1"}},"is_active":true,"pid":77,"pw_node_id":120}]}}"#);
+        c.line(r#"{"CastStartedOrChanged":{"cast":{"stream_id":4,"target":{"Window":{"id":9}},"is_active":false}}}"#);
+        let casts = c.casts.get_untracked().unwrap();
+        assert_eq!(casts[0], Cast { id: "3".into(), active: true, pid: Some(77), node: Some(120), output: Some("DP-1".into()), window: None });
+        assert_eq!((casts[1].window.as_deref(), casts[1].active), (Some("9"), false));
+        c.line(r#"{"CastStopped":{"stream_id":3}}"#);
+        assert_eq!(c.casts.get_untracked().unwrap().len(), 1);
+        c.line(r#"{"ScreenshotCaptured":{"path":"/tmp/s.png"}}"#);
+        assert_eq!(c.screenshot.get_untracked().unwrap(), (1, Some("/tmp/s.png".into())));
+        c.line(r#"{"WindowClosed":{"id":9}}"#);
+        assert_eq!(c.layout("9"), None);
+    }
+
+    #[test]
+    fn hyprland_urgency_lasts_until_the_focus() {
+        let c = Compositor::new(Backend::Hyprland { dir: PathBuf::from("/nonexistent") });
+        c.windows.set(vec![Window { id: "0x1".into(), ..Window::default() }, Window { id: "0x2".into(), ..Window::default() }]);
+        c.line("activewindowv2>>1\n");
+        c.line("urgent>>1\n");
+        assert!(!c.windows.get_untracked().unwrap()[0].urgent, "the focused window is not asking");
+        c.line("urgent>>2\n");
+        assert!(c.windows.get_untracked().unwrap()[1].urgent);
+        c.line("activewindowv2>>2\n");
+        assert!(!c.windows.get_untracked().unwrap()[1].urgent);
+        c.line("screencast>>1,0\n");
+        assert_eq!(c.casts.get_untracked().unwrap().len(), 1);
+        c.line("screencast>>0,0\n");
+        assert!(c.casts.get_untracked().unwrap().is_empty());
+    }
+
+    #[test]
+    fn umbriel_places_windows_on_their_outputs() {
+        let c = umbriel();
+        // As Umbriel 0.1.0 sends them: x and y across the whole layout,
+        // column and row from 0, -1 floating.
+        c.line(r#"{"event":"windows","data":[{"id":"a","output":"B","x":1608,"y":10,"w":624,"h":700,"column":0,"row":0,"floating":false,"pid":7,"urgent":true,"active":true},{"id":"f","output":"A","x":328,"y":18,"w":624,"h":700,"column":-1,"row":-1,"floating":true}]}"#);
+        c.line(r#"{"event":"outputs","data":[{"name":"A","position":{"x":0,"y":0}},{"name":"B","position":{"x":1280,"y":0}}]}"#);
+        assert_eq!(c.layout("a"), Some(Layout { pos: Some((328.0, 10.0)), size: (624.0, 700.0), column: Some(1), row: Some(1) }));
+        assert_eq!(c.layout("f").map(|l| (l.pos, l.column, l.row)), Some((Some((328.0, 18.0)), None, None)));
+        let a = c.focused_window().unwrap();
+        assert_eq!((a.pid, a.urgent, a.floating), (Some(7), true, false));
+        c.line(r#"{"event":"overview","data":{"open":true}}"#);
+        assert!(c.overview.get_untracked().unwrap());
+        c.line(r#"{"event":"workspaces","data":[{"id":"B:1","index":1,"output":"B","active":true,"focused":true,"focused_window":"a"},{"id":"B:2","index":2,"output":"B","active":false,"focused":false,"focused_window":""}]}"#);
+        assert_eq!(c.on_output(Some("B")).iter().map(|w| w.active_window.clone()).collect::<Vec<_>>(), [Some("a".into()), None]);
+    }
+
+    #[test]
+    fn a_workspace_step_stays_on_its_output_and_inside_the_list() {
+        let c = Compositor::wayland();
+        let space = |id: &str, state, output: &str, place| ProtocolWorkspace { id: id.into(), state, output: Some(output.into()), place, ..ProtocolWorkspace::default() };
+        c.take_wayland(&[space("1", 1, "A", 0), space("2", 0, "A", 1), space("3", 1, "B", 0), space("4", 0, "B", 1)], &[]);
+        assert_eq!(c.step_workspace(Some("B"), 1), Ok(()));
+        assert_eq!(c.step_workspace(Some("B"), -1), Ok(()), "past the first: nothing");
+        assert_eq!(c.step_workspace(Some("A"), 5), Ok(()), "past the last: nothing");
+        assert_eq!(c.take_requests(), [Request::FocusWorkspace("4".into())]);
+        assert_eq!(c.step_workspace(Some("C"), 1), Err("no workspace shown on C".into()));
     }
 
     /// A socket that answers each connection with `reply` and hands back

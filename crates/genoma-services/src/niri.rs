@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use std::collections::HashMap;
+
 use genoma_core::reactive::{Memo, Signal, batch};
 use serde_json::Value;
 
@@ -21,6 +23,9 @@ pub struct Workspace {
     pub is_focused: bool,
     /// No window on it: the free place.
     pub vacant: bool,
+    pub is_urgent: bool,
+    /// The window that has, or last had, the focus on it.
+    pub active_window_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +34,22 @@ pub struct Window {
     pub title: Option<String>,
     pub app_id: Option<String>,
     pub workspace_id: Option<u64>,
+    pub pid: Option<i64>,
+    pub is_floating: bool,
+    pub is_urgent: bool,
+}
+
+/// Where a window is laid out: its tile, in logical units.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Layout {
+    /// The tile's corner in its workspace's view, the output's own
+    /// coordinates: niri gives it for floating windows only.
+    pub pos: Option<(f64, f64)>,
+    /// The tile's size, the window and its border.
+    pub size: (f64, f64),
+    /// Column and row in the scrolling layout, from 1; none when floating.
+    pub column: Option<u64>,
+    pub row: Option<u64>,
 }
 
 pub struct Niri {
@@ -37,6 +58,24 @@ pub struct Niri {
     pub focused: Signal<Option<u64>>,
     /// The focused window's title, or nothing when no window has focus.
     pub title: Memo<Option<String>>,
+    /// Each window's layout, by id: apart from `windows`, because it
+    /// changes on every frame of a resize and a title must not follow it.
+    pub layouts: Signal<HashMap<u64, Layout>>,
+}
+
+fn pair(v: Option<&Value>) -> Option<(f64, f64)> {
+    let a = v?.as_array()?;
+    Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?))
+}
+
+fn layout(v: &Value) -> Option<Layout> {
+    let grid = v.get("pos_in_scrolling_layout").and_then(Value::as_array);
+    Some(Layout {
+        pos: pair(v.get("tile_pos_in_workspace_view")),
+        size: pair(v.get("tile_size"))?,
+        column: grid.and_then(|g| g.first()?.as_u64()),
+        row: grid.and_then(|g| g.get(1)?.as_u64()),
+    })
 }
 
 fn workspace(v: &Value) -> Option<Workspace> {
@@ -48,6 +87,8 @@ fn workspace(v: &Value) -> Option<Workspace> {
         is_active: v.get("is_active").and_then(Value::as_bool).unwrap_or(false),
         is_focused: v.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
         vacant: v.get("active_window_id").is_none_or(Value::is_null),
+        is_urgent: v.get("is_urgent").and_then(Value::as_bool).unwrap_or(false),
+        active_window_id: v.get("active_window_id").and_then(Value::as_u64),
     })
 }
 
@@ -58,6 +99,9 @@ fn window(v: &Value) -> Option<(Window, bool)> {
             title: v.get("title").and_then(Value::as_str).map(str::to_owned),
             app_id: v.get("app_id").and_then(Value::as_str).map(str::to_owned),
             workspace_id: v.get("workspace_id").and_then(Value::as_u64),
+            pid: v.get("pid").and_then(Value::as_i64),
+            is_floating: v.get("is_floating").and_then(Value::as_bool).unwrap_or(false),
+            is_urgent: v.get("is_urgent").and_then(Value::as_bool).unwrap_or(false),
         },
         v.get("is_focused").and_then(Value::as_bool).unwrap_or(false),
     ))
@@ -84,7 +128,7 @@ impl Niri {
             let id = focused.get()?;
             windows.get().into_iter().find(|w| w.id == id)?.title
         });
-        Niri { workspaces, windows, focused, title }
+        Niri { workspaces, windows, focused, title, layouts: Signal::new(HashMap::new()) }
     }
 
     /// The output the keyboard is pointed at: the focused workspace's.
@@ -140,6 +184,12 @@ impl Niri {
         (ws.output.as_deref() == Some(output)).then_some(window)
     }
 
+    fn set_layouts(&self, layouts: HashMap<u64, Layout>) {
+        if self.layouts.get_untracked().as_ref() != Some(&layouts) {
+            self.layouts.set(layouts);
+        }
+    }
+
     /// One line of the event stream.
     pub fn line(&self, line: &str) {
         let Ok(event) = serde_json::from_str::<Value>(line) else { return };
@@ -178,11 +228,23 @@ impl Niri {
                 if let Some((w, _)) = parsed.iter().find(|(_, f)| *f) {
                     self.focused.set(Some(w.id));
                 }
+                // The records carry their layout; later changes come apart.
+                let layouts = list
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| Some((v.get("id")?.as_u64()?, layout(v.get("layout")?)?)))
+                    .collect();
+                self.set_layouts(layouts);
                 self.windows.set(parsed.into_iter().map(|(w, _)| w).collect());
             }
             "WindowOpenedOrChanged" => {
                 let Some((w, focused)) = body.get("window").and_then(window) else { return };
                 let id = w.id;
+                if let Some(l) = body.get("window").and_then(|v| v.get("layout")).and_then(layout) {
+                    let mut layouts = self.layouts.get_untracked().unwrap_or_default();
+                    layouts.insert(id, l);
+                    self.set_layouts(layouts);
+                }
                 self.windows.update(|list| {
                     let mut list: Vec<_> = list.iter().filter(|x| x.id != id).cloned().collect();
                     list.push(w);
@@ -195,11 +257,52 @@ impl Niri {
             "WindowClosed" => {
                 let Some(id) = body.get("id").and_then(Value::as_u64) else { return };
                 self.windows.update(|list| list.iter().filter(|x| x.id != id).cloned().collect());
+                let mut layouts = self.layouts.get_untracked().unwrap_or_default();
+                if layouts.remove(&id).is_some() {
+                    self.set_layouts(layouts);
+                }
                 if self.focused.get_untracked() == Some(Some(id)) {
                     self.focused.set(None);
                 }
             }
             "WindowFocusChanged" => self.focused.set(body.get("id").and_then(Value::as_u64)),
+            "WindowLayoutsChanged" => {
+                let mut layouts = self.layouts.get_untracked().unwrap_or_default();
+                for change in body.get("changes").and_then(Value::as_array).into_iter().flatten() {
+                    let (Some(id), Some(l)) = (change.get(0).and_then(Value::as_u64), change.get(1).and_then(layout)) else {
+                        continue;
+                    };
+                    layouts.insert(id, l);
+                }
+                self.set_layouts(layouts);
+            }
+            "WindowUrgencyChanged" => {
+                let (Some(id), urgent) = (body.get("id").and_then(Value::as_u64), body.get("urgent").and_then(Value::as_bool).unwrap_or(false))
+                else {
+                    return;
+                };
+                self.windows.update(|list| {
+                    list.iter().map(|w| if w.id == id { Window { is_urgent: urgent, ..w.clone() } } else { w.clone() }).collect()
+                });
+            }
+            "WorkspaceUrgencyChanged" => {
+                let (Some(id), urgent) = (body.get("id").and_then(Value::as_u64), body.get("urgent").and_then(Value::as_bool).unwrap_or(false))
+                else {
+                    return;
+                };
+                self.workspaces.update(|list| {
+                    list.iter().map(|w| if w.id == id { Workspace { is_urgent: urgent, ..w.clone() } } else { w.clone() }).collect()
+                });
+            }
+            "WorkspaceActiveWindowChanged" => {
+                let Some(id) = body.get("workspace_id").and_then(Value::as_u64) else { return };
+                let window = body.get("active_window_id").and_then(Value::as_u64);
+                self.workspaces.update(|list| {
+                    list.iter()
+                        .map(|w| if w.id == id { Workspace { active_window_id: window, vacant: window.is_none(), ..w.clone() } } else { w.clone() })
+                        .collect()
+                });
+            }
             _ => {}
         });
     }

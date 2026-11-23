@@ -520,6 +520,23 @@ fn window_table(lua: &Lua, c: &Compositor, w: genoma_services::compositor::Windo
     t.set("app_id", w.app_id)?;
     t.set("workspace", w.workspace)?;
     t.set("minimized", w.minimized)?;
+    t.set("pid", w.pid)?;
+    t.set("floating", w.floating)?;
+    t.set("urgent", w.urgent)?;
+    Ok(t)
+}
+
+fn workspace_table(lua: &Lua, w: genoma_services::compositor::Workspace) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", w.id)?;
+    t.set("idx", w.idx)?;
+    t.set("name", w.name)?;
+    t.set("output", w.output)?;
+    t.set("active", w.active)?;
+    t.set("focused", w.focused)?;
+    t.set("vacant", w.vacant)?;
+    t.set("urgent", w.urgent)?;
+    t.set("active_window", w.active_window)?;
     Ok(t)
 }
 
@@ -553,8 +570,36 @@ impl UserData for CompositorRef {
             t.set("name", k.name)?;
             Ok(t)
         });
+        // compositor.overview → whether the compositor's overview is open
+        // (niri, Umbriel).
+        fields.add_field_method_get("overview", |_, this| Ok(this.0.overview.get()));
+        // compositor.casts → { { id, active, pid, node, output, window }, … }:
+        // the screen being captured.
+        fields.add_field_method_get("casts", |lua, this| {
+            let list = lua.create_table()?;
+            for (i, c) in this.0.casts.get().into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.set("id", c.id)?;
+                t.set("active", c.active)?;
+                t.set("pid", c.pid)?;
+                t.set("node", c.node)?;
+                t.set("output", c.output)?;
+                t.set("window", c.window)?;
+                list.set(i + 1, t)?;
+            }
+            Ok(list)
+        });
+        // compositor.screenshot → { count, path }: the screenshots the
+        // compositor took itself (niri), and where the last went.
+        fields.add_field_method_get("screenshot", |lua, this| {
+            let (count, path) = this.0.screenshot.get();
+            let t = lua.create_table()?;
+            t.set("count", count)?;
+            t.set("path", path)?;
+            Ok(t)
+        });
         // compositor.windows → { { id, title, app_id, workspace, output,
-        // minimized }, … }
+        // minimized, pid, floating, urgent }, … }
         fields.add_field_method_get("windows", |lua, this| {
             let list = lua.create_table()?;
             for (i, w) in this.0.windows.get().into_iter().enumerate() {
@@ -570,28 +615,38 @@ impl UserData for CompositorRef {
         methods.add_method("workspaces", |lua, this, output: Option<String>| {
             let list = lua.create_table()?;
             for (i, w) in this.0.on_output(output.as_deref()).into_iter().enumerate() {
-                let t = lua.create_table()?;
-                t.set("id", w.id)?;
-                t.set("idx", w.idx)?;
-                t.set("name", w.name)?;
-                t.set("output", w.output)?;
-                t.set("active", w.active)?;
-                t.set("focused", w.focused)?;
-                t.set("vacant", w.vacant)?;
-                t.set("urgent", w.urgent)?;
-                list.set(i + 1, t)?;
+                list.set(i + 1, workspace_table(lua, w)?)?;
             }
             Ok(list)
         });
-        // compositor:active("DP-1") → { id, idx, name } or nil
-        methods.add_method("active", |lua, this, output: String| {
-            let Some(w) = this.0.active(&output) else { return Ok(LuaValue::Nil) };
+        // compositor:active("DP-1") → the workspace shown there, or nil.
+        methods.add_method("active", |lua, this, output: String| match this.0.active(&output) {
+            Some(w) => Ok(LuaValue::Table(workspace_table(lua, w)?)),
+            None => Ok(LuaValue::Nil),
+        });
+        // compositor:layout(id) → { x, y, w, h, column, row } or nil: the
+        // window's tile on its output, logical units; x and y nil where the
+        // compositor does not say (niri: tiled windows), column and row
+        // where it has none.
+        methods.add_method("layout", |lua, this, id: LuaValue| {
+            let Some(l) = this.0.layout(&id_arg(id)?) else { return Ok(LuaValue::Nil) };
             let t = lua.create_table()?;
-            t.set("id", w.id)?;
-            t.set("idx", w.idx)?;
-            t.set("name", w.name)?;
+            t.set("x", l.pos.map(|p| p.0))?;
+            t.set("y", l.pos.map(|p| p.1))?;
+            t.set("w", l.size.0)?;
+            t.set("h", l.size.1)?;
+            t.set("column", l.column)?;
+            t.set("row", l.row)?;
             Ok(LuaValue::Table(t))
         });
+        // compositor:step_workspace(output, delta): the workspace delta
+        // places down (up, negative) from the one shown on output (the
+        // focused one when nil), focused; past the ends nothing happens.
+        methods.add_method("step_workspace", |_, this, (output, delta): (Option<String>, i64)| {
+            this.0.step_workspace(output.as_deref().filter(|o| !o.is_empty()), delta).map_err(err)
+        });
+        // compositor:center_window(): the focused window centred.
+        methods.add_method("center_window", |_, this, ()| this.0.center_window().map_err(err));
         // compositor:focused_on("DP-1") → the focused window if it is there.
         methods.add_method("focused_on", |lua, this, output: String| match this.0.focused_on(&output) {
             Some(w) => Ok(LuaValue::Table(window_table(lua, &this.0, w)?)),

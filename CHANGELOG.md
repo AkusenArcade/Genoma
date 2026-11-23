@@ -19,6 +19,24 @@ changes what a shell sees.
   protocols: an error there. Screens blanked after a time idle, with
   `@genoma/idle`.
 
+- `@genoma/compositor` says more, on niri, Hyprland and Umbriel alike:
+  - a window's `pid`, `floating` and `urgent` (Hyprland's from its
+    `urgent` event, until the window is focused);
+  - a workspace's `active_window`, the one that has or last had the focus
+    there; `compositor:active(output)` now returns the whole workspace;
+  - `compositor:layout(id)`: the window's tile on its output — `x`, `y`,
+    `w`, `h` in logical units and, where the layout is made of columns
+    (niri, Umbriel), `column` and `row` from 1. A signal of its own, so a
+    resize does not wake what reads titles. niri places only floating
+    windows, so a tiled one has no `x`, `y`;
+  - `compositor.overview` (niri, Umbriel), `compositor.casts` (niri, and
+    Hyprland's one cast without details), `compositor.screenshot`
+    (`count`, `path`: niri's own screenshots).
+  - `compositor:step_workspace(output, delta)`: the next or previous
+    workspace on an output, focused there; `compositor:center_window()`.
+- `@genoma/niri`'s model keeps workspace urgency and active window,
+  window pid, floating and urgency, and `layouts` apart.
+
 ## 0.1.21 — 2026-11-20
 
 ### Added

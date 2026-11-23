@@ -604,6 +604,36 @@ export type Window = {
     output: string?,
     -- Only the standard protocols report it.
     minimized: boolean,
+    -- The program's process: niri, Hyprland and Umbriel say.
+    pid: number?,
+    floating: boolean,
+    -- Asking for attention.
+    urgent: boolean,
+}
+-- Where a window is laid out: its tile on its output, logical units.
+export type WindowLayout = {
+    -- The corner in the output's own coordinates; nil where the compositor
+    -- does not say (niri says it of floating windows only: a tiled one is
+    -- placed by its column and row).
+    x: number?,
+    y: number?,
+    w: number,
+    h: number,
+    -- Column and row from 1, where the layout is made of columns (niri,
+    -- Umbriel); nil when floating, and on Hyprland.
+    column: number?,
+    row: number?,
+}
+-- A screen being captured. Hyprland says only that one is.
+export type Cast = {
+    id: string,
+    active: boolean,
+    -- The program receiving it, and its PipeWire node, where said.
+    pid: number?,
+    node: number?,
+    -- What is captured: an output by name, or a window by id.
+    output: string?,
+    window: string?,
 }
 export type Workspace = {
     id: string,
@@ -615,6 +645,8 @@ export type Workspace = {
     -- Always false through the standard protocols, which do not say.
     vacant: boolean,
     urgent: boolean,
+    -- The window that has, or last had, the focus on it.
+    active_window: string?,
 }
 
 -- @genoma/compositor: niri, Hyprland or Umbriel, whichever runs; any other
@@ -636,15 +668,31 @@ export type Compositor = {
     -- names them as xkb describes them ("English (US)"), Hyprland by code
     -- ("us"); `name` is the one in use, in full, on both.
     read keyboard: { layouts: { string }, current: number?, name: string? },
+    -- The compositor's overview is open: niri and Umbriel.
+    read overview: boolean,
+    -- The screen being captured now: niri and Hyprland.
+    read casts: { Cast },
+    -- The screenshots the compositor took itself (niri's own), counted
+    -- since the start, and the path the last was saved to.
+    read screenshot: { count: number, path: string? },
     -- compositor:workspaces("DP-1"), every output's without one, in order.
     workspaces: (self: Compositor, output: string?) -> { Workspace },
     -- compositor:active("DP-1") → the workspace shown there.
-    active: (self: Compositor, output: string) -> { id: string, idx: number, name: string? }?,
+    active: (self: Compositor, output: string) -> Workspace?,
+    -- compositor:layout(id) → where the window is laid out, or nil. Apart
+    -- from windows: it changes on every frame of a resize.
+    layout: (self: Compositor, id: string | number) -> WindowLayout?,
     -- compositor:focused_on("DP-1") → the focused window if it is there.
     focused_on: (self: Compositor, output: string) -> Window?,
     focus_workspace: (self: Compositor, id: string | number) -> (),
     focus_window: (self: Compositor, id: string | number) -> (),
     close_window: (self: Compositor, id: string | number) -> (),
+    -- The workspace delta places down (negative: up) from the one shown on
+    -- output (the focused output when nil), focused; past the first or the
+    -- last nothing happens.
+    step_workspace: (self: Compositor, output: string?, delta: number) -> (),
+    -- The focused window centred on its screen (Hyprland: a floating one).
+    center_window: (self: Compositor) -> (),
     -- Minimizes (or, with false, brings back) a window.
     minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> (),
     -- "next", "prev", or a place in keyboard.layouts, from 1.

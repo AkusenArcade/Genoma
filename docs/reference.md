@@ -858,6 +858,30 @@ read keyboard: { layouts: { string }, current: number?, name: string? }
 
 The keyboard layouts, niri's and Hyprland's; empty elsewhere. niri names them as xkb describes them ("English (US)"), Hyprland by code ("us"); `name` is the one in use, in full, on both.
 
+### `compositor.overview`
+
+```luau
+read overview: boolean
+```
+
+The compositor's overview is open: niri and Umbriel.
+
+### `compositor.casts`
+
+```luau
+read casts: { Cast }
+```
+
+The screen being captured now: niri and Hyprland.
+
+### `compositor.screenshot`
+
+```luau
+read screenshot: { count: number, path: string? }
+```
+
+The screenshots the compositor took itself (niri's own), counted since the start, and the path the last was saved to.
+
 ### `compositor:workspaces`
 
 ```luau
@@ -869,10 +893,18 @@ compositor:workspaces("DP-1"), every output's without one, in order.
 ### `compositor:active`
 
 ```luau
-active: (self: Compositor, output: string) -> { id: string, idx: number, name: string? }?
+active: (self: Compositor, output: string) -> Workspace?
 ```
 
 compositor:active("DP-1") → the workspace shown there.
+
+### `compositor:layout`
+
+```luau
+layout: (self: Compositor, id: string | number) -> WindowLayout?
+```
+
+compositor:layout(id) → where the window is laid out, or nil. Apart from windows: it changes on every frame of a resize.
 
 ### `compositor:focused_on`
 
@@ -899,6 +931,22 @@ focus_window: (self: Compositor, id: string | number) -> ()
 ```luau
 close_window: (self: Compositor, id: string | number) -> ()
 ```
+
+### `compositor:step_workspace`
+
+```luau
+step_workspace: (self: Compositor, output: string?, delta: number) -> ()
+```
+
+The workspace delta places down (negative: up) from the one shown on output (the focused output when nil), focused; past the first or the last nothing happens.
+
+### `compositor:center_window`
+
+```luau
+center_window: (self: Compositor) -> ()
+```
+
+The focused window centred on its screen (Hyprland: a floating one).
 
 ### `compositor:minimize_window`
 
@@ -2543,6 +2591,35 @@ g.colour: arithmetic on "#rrggbb[aa]", as Qt does it (HSL, HSV, rounding), so a 
 | `workspace` | `string?` | nil through the standard protocols, which do not say. |
 | `output` | `string?` |  |
 | `minimized` | `boolean` | Only the standard protocols report it. |
+| `pid` | `number?` | The program's process: niri, Hyprland and Umbriel say. |
+| `floating` | `boolean` |  |
+| `urgent` | `boolean` | Asking for attention. |
+
+### WindowLayout
+
+Where a window is laid out: its tile on its output, logical units.
+
+| Field | Type | |
+|---|---|---|
+| `x` | `number?` | The corner in the output's own coordinates; nil where the compositor does not say (niri says it of floating windows only: a tiled one is placed by its column and row). |
+| `y` | `number?` |  |
+| `w` | `number` |  |
+| `h` | `number` |  |
+| `column` | `number?` | Column and row from 1, where the layout is made of columns (niri, Umbriel); nil when floating, and on Hyprland. |
+| `row` | `number?` |  |
+
+### Cast
+
+A screen being captured. Hyprland says only that one is.
+
+| Field | Type | |
+|---|---|---|
+| `id` | `string` |  |
+| `active` | `boolean` |  |
+| `pid` | `number?` | The program receiving it, and its PipeWire node, where said. |
+| `node` | `number?` |  |
+| `output` | `string?` | What is captured: an output by name, or a window by id. |
+| `window` | `string?` |  |
 
 ### Workspace
 
@@ -2556,6 +2633,7 @@ g.colour: arithmetic on "#rrggbb[aa]", as Qt does it (HSL, HSV, rounding), so a 
 | `focused` | `boolean` |  |
 | `vacant` | `boolean` | Always false through the standard protocols, which do not say. |
 | `urgent` | `boolean` |  |
+| `active_window` | `string?` | The window that has, or last had, the focus on it. |
 
 ### DisplayMode
 
