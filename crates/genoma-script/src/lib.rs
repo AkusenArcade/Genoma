@@ -598,6 +598,20 @@ impl UserData for CompositorRef {
             t.set("path", path)?;
             Ok(t)
         });
+        // compositor.gaps → { top, right, bottom, left } or nil: how far
+        // windows stay from the screen's edges, where the compositor says
+        // (Hyprland).
+        fields.add_field_method_get("gaps", |lua, this| match this.0.gaps.get() {
+            Some([top, right, bottom, left]) => {
+                let t = lua.create_table()?;
+                t.set("top", top)?;
+                t.set("right", right)?;
+                t.set("bottom", bottom)?;
+                t.set("left", left)?;
+                Ok(LuaValue::Table(t))
+            }
+            None => Ok(LuaValue::Nil),
+        });
         // compositor.windows → { { id, title, app_id, workspace, output,
         // minimized, pid, floating, urgent }, … }
         fields.add_field_method_get("windows", |lua, this| {
@@ -647,6 +661,14 @@ impl UserData for CompositorRef {
         });
         // compositor:center_window(): the focused window centred.
         methods.add_method("center_window", |_, this, ()| this.0.center_window().map_err(err));
+        // compositor:refresh(): the state asked again now (Hyprland moves and
+        // resizes windows without an event); nothing elsewhere.
+        methods.add_method("refresh", |_, this, ()| {
+            this.0.refresh();
+            Ok(())
+        });
+        // compositor:quit(): the session ends, without the compositor asking.
+        methods.add_method("quit", |_, this, ()| this.0.quit().map_err(err));
         // compositor:focused_on("DP-1") → the focused window if it is there.
         methods.add_method("focused_on", |lua, this, output: String| match this.0.focused_on(&output) {
             Some(w) => Ok(LuaValue::Table(window_table(lua, &this.0, w)?)),

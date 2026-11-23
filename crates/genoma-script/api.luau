@@ -675,6 +675,9 @@ export type Compositor = {
     -- The screenshots the compositor took itself (niri's own), counted
     -- since the start, and the path the last was saved to.
     read screenshot: { count: number, path: string? },
+    -- How far windows stay from each edge of the screen, logical units,
+    -- where the compositor says (Hyprland's gaps_out); nil elsewhere.
+    read gaps: { top: number, right: number, bottom: number, left: number }?,
     -- compositor:workspaces("DP-1"), every output's without one, in order.
     workspaces: (self: Compositor, output: string?) -> { Workspace },
     -- compositor:active("DP-1") → the workspace shown there.
@@ -693,6 +696,12 @@ export type Compositor = {
     step_workspace: (self: Compositor, output: string?, delta: number) -> (),
     -- The focused window centred on its screen (Hyprland: a floating one).
     center_window: (self: Compositor) -> (),
+    -- The state asked again now: Hyprland moves and resizes windows without
+    -- saying so, so a window's place read for an action is asked first.
+    -- Nothing to do on niri and Umbriel, which say every change.
+    refresh: (self: Compositor) -> (),
+    -- The session ends: the compositor quits, without asking.
+    quit: (self: Compositor) -> (),
     -- Minimizes (or, with false, brings back) a window.
     minimize_window: (self: Compositor, id: string | number, minimized: boolean?) -> (),
     -- "next", "prev", or a place in keyboard.layouts, from 1.

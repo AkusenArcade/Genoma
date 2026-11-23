@@ -882,6 +882,14 @@ read screenshot: { count: number, path: string? }
 
 The screenshots the compositor took itself (niri's own), counted since the start, and the path the last was saved to.
 
+### `compositor.gaps`
+
+```luau
+read gaps: { top: number, right: number, bottom: number, left: number }?
+```
+
+How far windows stay from each edge of the screen, logical units, where the compositor says (Hyprland's gaps_out); nil elsewhere.
+
 ### `compositor:workspaces`
 
 ```luau
@@ -947,6 +955,22 @@ center_window: (self: Compositor) -> ()
 ```
 
 The focused window centred on its screen (Hyprland: a floating one).
+
+### `compositor:refresh`
+
+```luau
+refresh: (self: Compositor) -> ()
+```
+
+The state asked again now: Hyprland moves and resizes windows without saying so, so a window's place read for an action is asked first. Nothing to do on niri and Umbriel, which say every change.
+
+### `compositor:quit`
+
+```luau
+quit: (self: Compositor) -> ()
+```
+
+The session ends: the compositor quits, without asking.
 
 ### `compositor:minimize_window`
 

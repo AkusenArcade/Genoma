@@ -34,6 +34,15 @@ changes what a shell sees.
     (`count`, `path`: niri's own screenshots).
   - `compositor:step_workspace(output, delta)`: the next or previous
     workspace on an output, focused there; `compositor:center_window()`.
+- `compositor.gaps` (`top`, `right`, `bottom`, `left`): how far windows
+  stay from the screen's edges, where the compositor says (Hyprland's
+  `general:gaps_out`, read again on `configreloaded`); nil elsewhere.
+- `compositor:quit()`: the session ends without the compositor asking
+  (niri's `Quit`, Hyprland's `exit`, Umbriel's `session-quit`).
+- `compositor:refresh()`: Hyprland's state asked again now. Hyprland moves
+  and resizes windows without an event, so a window's place read for an
+  action is asked for first; its `openlayer` and `closelayer` (a zone
+  reserved or let go) now refresh the model too.
 - `@genoma/niri`'s model keeps workspace urgency and active window,
   window pid, floating and urgency, and `layouts` apart.
 

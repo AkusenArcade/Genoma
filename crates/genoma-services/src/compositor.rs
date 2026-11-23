@@ -188,6 +188,10 @@ pub struct Compositor {
     /// The screenshots the compositor took itself since the start, and the
     /// last one's path, when it saved it (niri).
     pub screenshot: Signal<(u64, Option<String>)>,
+    /// How far windows stay from each edge of the screen (top, right,
+    /// bottom, left), logical units, where the compositor says over IPC
+    /// (Hyprland's `general:gaps_out`); none elsewhere.
+    pub gaps: Signal<Option<[f64; 4]>>,
     /// Hyprland's windows asking for attention, until they are focused:
     /// its clients do not say, only an event.
     hyprland_urgent: RefCell<Vec<String>>,
@@ -251,6 +255,7 @@ impl Compositor {
             overview: Signal::new(false),
             casts: Signal::new(Vec::new()),
             screenshot: Signal::new((0, None)),
+            gaps: Signal::new(None),
             hyprland_urgent: RefCell::new(Vec::new()),
             umbriel_outputs: RefCell::new(HashMap::new()),
             umbriel_windows: RefCell::new(Value::Null),
@@ -274,6 +279,7 @@ impl Compositor {
             let stream = UnixStream::connect(dir.join(".socket2.sock"))?;
             let compositor = Compositor::new(Backend::Hyprland { dir });
             compositor.hyprland_refresh();
+            compositor.hyprland_gaps();
             return Ok((compositor, stream));
         }
         let umbriel = env("UMBRIEL_SOCKET").map(PathBuf::from).or_else(|| {
@@ -564,6 +570,16 @@ impl Compositor {
         self.hyprland_keyboard();
     }
 
+    /// `general:gaps_out`, as CSS: one to four numbers, top first.
+    fn hyprland_gaps(&self) {
+        let option = self.hyprland_json("getoption general:gaps_out");
+        let css = option.get("css").and_then(Value::as_str).map(str::to_owned).or_else(|| option.get("int").map(Value::to_string));
+        let gaps = css.and_then(|c| css_sides(&c));
+        if self.gaps.get_untracked() != Some(gaps) {
+            self.gaps.set(gaps);
+        }
+    }
+
     /// The main keyboard's layouts, asked again.
     fn hyprland_keyboard(&self) {
         self.set_keyboard(hyprland_keyboard_of(&self.hyprland_json("devices")));
@@ -611,9 +627,16 @@ impl Compositor {
             // Opening and closing a window are said once, without a v2.
             "activelayout" => self.hyprland_keyboard(),
             "workspacev2" | "focusedmonv2" | "createworkspacev2" | "destroyworkspacev2" | "moveworkspacev2" | "renameworkspace"
-            | "openwindow" | "closewindow" | "movewindowv2" | "monitoraddedv2" | "monitorremovedv2" | "configreloaded"
-            | "changefloatingmode" | "fullscreen" => {
+            | "openwindow" | "closewindow" | "movewindowv2" | "monitoraddedv2" | "monitorremovedv2"
+            | "changefloatingmode" | "fullscreen"
+            // A layer surface reserving a zone, or letting it go, moves and
+            // resizes the windows without saying so.
+            | "openlayer" | "closelayer" => {
                 self.hyprland_refresh()
+            }
+            "configreloaded" => {
+                self.hyprland_refresh();
+                self.hyprland_gaps();
             }
             _ => {}
         }
@@ -1003,6 +1026,27 @@ impl Compositor {
         self.focus_workspace(&on[to as usize].id.clone())
     }
 
+    /// The state asked again now, where the compositor does not say every
+    /// change: Hyprland moves and resizes windows without an event, so a
+    /// window's place read for an action (a capture of it) is asked first.
+    /// niri and Umbriel say each change; nothing to do there.
+    pub fn refresh(&self) {
+        if let Backend::Hyprland { .. } = self.backend {
+            self.hyprland_refresh();
+        }
+    }
+
+    /// Ends the session: the compositor quits, without asking (the shell
+    /// asked already).
+    pub fn quit(&self) -> Result<(), String> {
+        match &self.backend {
+            Backend::Niri { socket, .. } => Self::niri_action(socket, "{\"Quit\":{\"skip_confirmation\":true}}"),
+            Backend::Hyprland { .. } => self.hyprland_dispatch("hl.dsp.exit()", "exit"),
+            Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "session-quit" })),
+            Backend::Wayland { .. } => Err(format!("{} cannot be asked to quit", self.name())),
+        }
+    }
+
     /// Centres the focused window on its screen (niri, Umbriel; Hyprland
     /// centres a floating one only).
     pub fn center_window(&self) -> Result<(), String> {
@@ -1107,6 +1151,19 @@ fn hyprland_address(id: &str) -> Result<&str, String> {
         return Err(format!("no Hyprland window {id}"));
     }
     Ok(id)
+}
+
+/// CSS sides: "a" all four, "a b" vertical and horizontal, "a b c" top,
+/// horizontal, bottom, "a b c d" clockwise from the top.
+fn css_sides(css: &str) -> Option<[f64; 4]> {
+    let n: Vec<f64> = css.split_whitespace().map(str::parse).collect::<Result<_, _>>().ok()?;
+    Some(match n.as_slice() {
+        [a] => [*a; 4],
+        [v, h] => [*v, *h, *v, *h],
+        [t, h, b] => [*t, *h, *b, *h],
+        [t, r, b, l] => [*t, *r, *b, *l],
+        _ => return None,
+    })
 }
 
 fn pair(v: Option<&Value>) -> Option<(f64, f64)> {
@@ -1262,6 +1319,16 @@ mod tests {
     }
 
     #[test]
+    fn css_gaps_in_every_form() {
+        assert_eq!(css_sides("20"), Some([20.0; 4]));
+        assert_eq!(css_sides("5 10"), Some([5.0, 10.0, 5.0, 10.0]));
+        assert_eq!(css_sides("1 2 3"), Some([1.0, 2.0, 3.0, 2.0]));
+        assert_eq!(css_sides("20 20 20 20"), Some([20.0; 4]));
+        assert_eq!(css_sides("x"), None);
+        assert_eq!(css_sides(""), None);
+    }
+
+    #[test]
     fn hyprland_urgency_lasts_until_the_focus() {
         let c = Compositor::new(Backend::Hyprland { dir: PathBuf::from("/nonexistent") });
         c.windows.set(vec![Window { id: "0x1".into(), ..Window::default() }, Window { id: "0x2".into(), ..Window::default() }]);
@@ -1365,6 +1432,23 @@ mod tests {
 
         assert!(!Compositor::wayland().can_power_monitors());
         assert_eq!(Compositor::wayland().power_monitors(false), Err("wayland does not power monitors".into()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quitting_in_each_tongue() {
+        let dir = std::env::temp_dir().join(format!("genoma-quit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("niri.sock");
+        let said = listener(&socket, "{\"Ok\":\"Handled\"}\n", 1);
+        assert_eq!(Compositor::new(Backend::Niri { socket, model: Niri::model() }).quit(), Ok(()));
+        assert_eq!(said.join().unwrap(), ["{\"Action\":{\"Quit\":{\"skip_confirmation\":true}}}"]);
+        let socket = dir.join("umbriel.sock");
+        let said = listener(&socket, "{\"ok\":true}\n", 1);
+        assert_eq!(Compositor::new(Backend::Umbriel { socket }).quit(), Ok(()));
+        let sent: Value = serde_json::from_str(&said.join().unwrap()[0]).unwrap();
+        assert_eq!(sent, serde_json::json!({ "cmd": "action", "action": "session-quit" }));
+        assert!(Compositor::wayland().quit().is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
