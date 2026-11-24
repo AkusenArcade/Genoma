@@ -3667,7 +3667,9 @@ impl OutputHandler for App {
         }
     }
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.displays_changed();
+    }
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
         if self.specs.iter().any(|s| s.all_outputs || s.outputs.is_some() || s.layer == "lock") {

@@ -5,12 +5,13 @@
 //! interface asks for is planned against the heads of that moment, every
 //! head named, and the compositor's answer goes back to the service.
 
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use genoma_services::displays::{Displays, Head, Mode, ModeChoice, Outcome, Planned, Request, plan, transform_name};
 use smithay_client_toolkit::{
     dispatch2::Dispatch2,
     reexports::{
+        calloop::timer::{TimeoutAction, Timer},
         client::{Connection, Proxy, QueueHandle, WEnum, protocol::wl_output::Transform},
         protocols_wlr::output_management::v1::client::{
             zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
@@ -30,7 +31,14 @@ pub(super) struct Dm {
     /// cancelled.
     serial: u32,
     heads: Vec<HeadState>,
+    /// The first `done` has come: before it, the heads are half described.
+    announced: bool,
+    /// A change waits to be published without a `done`.
+    unsettled: bool,
 }
+
+/// How long a change may go without its `done` before it is taken as whole.
+const SETTLE: Duration = Duration::from_millis(50);
 
 struct HeadState {
     handle: ZwlrOutputHeadV1,
@@ -70,7 +78,7 @@ impl App {
         }
         let manager = self.globals.bind::<ZwlrOutputManagerV1, _, _>(&self.qh, 1..=4, DmData).ok();
         service.available.set(manager.is_some());
-        self.dm = Some(Dm { service, manager, serial: 0, heads: Vec::new() });
+        self.dm = Some(Dm { service, manager, serial: 0, heads: Vec::new(), announced: false, unsettled: false });
     }
 
     /// The configurations asked for since the last turn, sent.
@@ -86,7 +94,7 @@ impl App {
                 failed("failed");
                 continue;
             };
-            let values: Vec<Head> = dm.heads.iter().map(HeadState::value).collect();
+            let values = self.heads_now();
             // Planned again: the heads may have changed since the interface
             // asked.
             let planned = match plan(&values, &changes) {
@@ -129,9 +137,43 @@ impl App {
         let _ = self.conn.flush();
     }
 
+    /// The heads, each where its output says it is: Hyprland (0.57.2) moves
+    /// a monitor without telling its head, and says so only to the output.
+    fn heads_now(&self) -> Vec<Head> {
+        let Some(dm) = &self.dm else { return Vec::new() };
+        let places: Vec<_> = self.outputs.outputs().filter_map(|o| self.outputs.info(&o)).collect();
+        let mut heads: Vec<Head> = dm.heads.iter().map(HeadState::value).collect();
+        for head in heads.iter_mut().filter(|h| h.enabled) {
+            let info = places.iter().find(|i| i.name.as_deref() == Some(head.name.as_str()));
+            if let Some((x, y)) = info.and_then(|i| i.logical_position) {
+                (head.x, head.y) = (x, y);
+            }
+        }
+        heads
+    }
+
+    /// Hyprland (0.57.2) sends a head's new scale and mode without the
+    /// `done` that closes them, so a change is published a moment after it
+    /// comes whether or not one follows.
+    pub(super) fn displays_changed(&mut self) {
+        let (Some(dm), Some(handle)) = (self.dm.as_mut(), self.handle.as_ref()) else { return };
+        if !dm.announced || dm.unsettled {
+            return;
+        }
+        dm.unsettled = handle
+            .insert_source(Timer::from_duration(SETTLE), |_, _, app| {
+                if let Some(dm) = app.dm.as_mut() {
+                    dm.unsettled = false;
+                }
+                app.publish_displays();
+                TimeoutAction::Drop
+            })
+            .is_ok();
+    }
+
     fn publish_displays(&self) {
         if let Some(dm) = &self.dm {
-            dm.service.set_heads(dm.heads.iter().map(HeadState::value).collect());
+            dm.service.set_heads(self.heads_now());
         }
     }
 }
@@ -145,6 +187,7 @@ impl Dispatch2<ZwlrOutputManagerV1, App> for DmData {
             }
             zwlr_output_manager_v1::Event::Done { serial } => {
                 dm.serial = serial;
+                dm.announced = true;
                 app.publish_displays();
             }
             zwlr_output_manager_v1::Event::Finished => {
@@ -168,7 +211,7 @@ impl Dispatch2<ZwlrOutputHeadV1, App> for DmData {
         let Some(i) = dm.heads.iter().position(|h| &h.handle == handle) else { return };
         let state = &mut dm.heads[i];
         let head = &mut state.head;
-        // Applied at the manager's `done`.
+        // Published at the manager's `done`, or a moment after.
         match event {
             zwlr_output_head_v1::Event::Name { name } => head.name = name,
             zwlr_output_head_v1::Event::Description { description } => head.description = description,
@@ -201,6 +244,7 @@ impl Dispatch2<ZwlrOutputHeadV1, App> for DmData {
             }
             _ => {}
         }
+        app.displays_changed();
     }
 
     smithay_client_toolkit::reexports::client::event_created_child!(App, ZwlrOutputHeadV1, [
@@ -229,6 +273,7 @@ impl Dispatch2<ZwlrOutputModeV1, App> for DmData {
             }
             _ => {}
         }
+        app.displays_changed();
     }
 }
 
