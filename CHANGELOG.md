@@ -6,6 +6,13 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## 0.1.24 — 2026-11-25
+
+### Added
+
+- `g.modifiers()`: the modifiers held now, to read a press or a wheel step
+  with; reactive, so a release is seen too.
+
 ## 0.1.23 — 2026-11-25
 
 ### Fixed
