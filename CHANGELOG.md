@@ -6,7 +6,9 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
-## Unreleased
+## 0.1.23 — 2026-11-25
+
+### Fixed
 
 - `@genoma/displays` follows Hyprland: a changed scale or mode is published
   without waiting for a `done` Hyprland (0.57.2) does not send, and a
