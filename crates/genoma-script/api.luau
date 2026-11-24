@@ -664,9 +664,10 @@ export type Compositor = {
     read focused_output: string?,
     read focused: Window?,
     read windows: { Window },
-    -- The keyboard layouts, niri's and Hyprland's; empty elsewhere. niri
-    -- names them as xkb describes them ("English (US)"), Hyprland by code
-    -- ("us"); `name` is the one in use, in full, on both.
+    -- The keyboard layouts, niri's, Hyprland's and Umbriel's; empty
+    -- elsewhere. niri and Umbriel name them as xkb describes them
+    -- ("English (US)"), Hyprland by code ("us"); `name` is the one in use,
+    -- in full, on all three.
     read keyboard: { layouts: { string }, current: number?, name: string? },
     -- The compositor's overview is open: niri and Umbriel.
     read overview: boolean,

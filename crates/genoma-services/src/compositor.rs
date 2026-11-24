@@ -102,7 +102,7 @@ pub struct Cast {
 /// The keyboard's layouts, as the compositor reports them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keyboard {
-    /// In the compositor's order and words: niri gives xkb's descriptions
+    /// In the compositor's order and words: niri and Umbriel give xkb's descriptions
     /// ("English (US)"), Hyprland the layout codes of its main keyboard
     /// ("us", "it").
     pub layouts: Vec<String>,
@@ -177,7 +177,7 @@ pub struct Compositor {
     pub focused: Signal<Option<String>>,
     /// The focused window's title, or nothing when no window has focus.
     pub title: Memo<Option<String>>,
-    /// The keyboard layouts: niri and Hyprland say; empty elsewhere.
+    /// The keyboard layouts: niri, Hyprland and Umbriel say; empty elsewhere.
     pub keyboard: Signal<Keyboard>,
     /// Each window's layout, by id: apart from `windows`, because it
     /// changes on every frame of a resize and a title must not follow it.
@@ -289,7 +289,7 @@ impl Compositor {
         });
         if let Some(socket) = umbriel {
             let mut stream = UnixStream::connect(&socket)?;
-            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\",\"outputs\",\"overview\",\"theme\"]}\n")?;
+            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\",\"outputs\",\"overview\",\"theme\",\"keyboard_layout\"]}\n")?;
             let compositor = Compositor::new(Backend::Umbriel { socket });
             compositor.umbriel_gaps();
             return Ok((compositor, stream));
@@ -718,6 +718,19 @@ impl Compositor {
             // Its configuration read again changes the colours it mirrors,
             // sometimes: the only sign of a reload there is.
             Some("theme") => self.umbriel_gaps(),
+            // The layouts by name, as xkb describes them, and the one on.
+            Some("keyboard_layout") => {
+                let layouts: Vec<String> = data
+                    .and_then(|d| d.get("names"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| n.as_str().map(str::to_owned))
+                    .collect();
+                let current = data.and_then(|d| d.get("current_index")).and_then(Value::as_u64).map(|i| i as usize).filter(|i| *i < layouts.len());
+                let name = current.map(|i| layouts[i].clone());
+                self.set_keyboard(Keyboard { layouts, current, name });
+            }
             _ => {}
         }
     }
@@ -1132,6 +1145,21 @@ impl Compositor {
                 let reply = self.hyprland(&format!("switchxkblayout all {to}"))?;
                 if reply.trim() == "ok" { Ok(()) } else { Err(reply.trim().to_owned()) }
             }
+            // Umbriel goes to the next only: the others are that, repeated.
+            Backend::Umbriel { .. } => {
+                let keyboard = self.keyboard.get_untracked().unwrap_or_default();
+                let count = keyboard.layouts.len().max(1);
+                let at = keyboard.current.unwrap_or(0);
+                let steps = match target {
+                    LayoutTarget::Next => 1,
+                    LayoutTarget::Prev => count - 1,
+                    LayoutTarget::Index(i) => (i + count - at) % count,
+                };
+                for _ in 0..steps {
+                    self.umbriel_action(serde_json::json!({ "action": "keyboard-layout-next" }))?;
+                }
+                Ok(())
+            }
             _ => Err(format!("{} does not switch keyboard layouts", self.name())),
         }
     }
@@ -1255,6 +1283,11 @@ mod tests {
         // Another workspace, empty, focused: nothing is.
         c.line(r#"{"event":"workspaces","data":[{"id":"ws-1","index":1,"output":"DP-1","active":false,"focused":false},{"id":"ws-2","index":2,"output":"DP-1","active":true,"focused":true}]}"#);
         assert_eq!(c.title.get(), None);
+
+        // Its layouts, as a nested Umbriel 0.1.0 says them.
+        c.line(r#"{"data":{"current_index":1,"names":["English (US)","Italian"]},"event":"keyboard_layout"}"#);
+        let k = c.keyboard.get_untracked().unwrap();
+        assert_eq!((k.layouts.len(), k.current, k.name.as_deref()), (2, Some(1), Some("Italian")));
     }
 
     #[test]

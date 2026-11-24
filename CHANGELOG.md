@@ -48,6 +48,10 @@ changes what a shell sees.
   action is asked for first; its `openlayer` and `closelayer` (a zone
   reserved or let go) now refresh the model too. On Umbriel, its gaps.
 
+- Umbriel's keyboard layouts in `compositor.keyboard` (its
+  `keyboard_layout` event: xkb's names and the one on), and
+  `compositor:switch_layout` there, as `keyboard-layout-next` repeated.
+
 ### Changed
 
 - Umbriel: while a layer surface holds the keyboard (a launcher), the
