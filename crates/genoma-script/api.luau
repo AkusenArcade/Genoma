@@ -670,13 +670,16 @@ export type Compositor = {
     read keyboard: { layouts: { string }, current: number?, name: string? },
     -- The compositor's overview is open: niri and Umbriel.
     read overview: boolean,
-    -- The screen being captured now: niri and Hyprland.
+    -- The screen being captured now: niri and Hyprland. Umbriel's IPC
+    -- says only which target its portal is to share, not that a share
+    -- runs: its casts are PipeWire nodes named "umbriel-screen-capture".
     read casts: { Cast },
     -- The screenshots the compositor took itself (niri's own), counted
     -- since the start, and the path the last was saved to.
     read screenshot: { count: number, path: string? },
     -- How far windows stay from each edge of the screen, logical units,
-    -- where the compositor says (Hyprland's gaps_out); nil elsewhere.
+    -- where the compositor says (Hyprland's gaps_out, Umbriel's layout.gap
+    -- plus its struts); nil elsewhere.
     read gaps: { top: number, right: number, bottom: number, left: number }?,
     -- compositor:workspaces("DP-1"), every output's without one, in order.
     workspaces: (self: Compositor, output: string?) -> { Workspace },
@@ -698,7 +701,7 @@ export type Compositor = {
     center_window: (self: Compositor) -> (),
     -- The state asked again now: Hyprland moves and resizes windows without
     -- saying so, so a window's place read for an action is asked first.
-    -- Nothing to do on niri and Umbriel, which say every change.
+    -- Umbriel's gaps are asked again: it does not say when they change.
     refresh: (self: Compositor) -> (),
     -- The session ends: the compositor quits, without asking.
     quit: (self: Compositor) -> (),

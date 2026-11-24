@@ -190,7 +190,8 @@ pub struct Compositor {
     pub screenshot: Signal<(u64, Option<String>)>,
     /// How far windows stay from each edge of the screen (top, right,
     /// bottom, left), logical units, where the compositor says over IPC
-    /// (Hyprland's `general:gaps_out`); none elsewhere.
+    /// (Hyprland's `general:gaps_out`, Umbriel's `layout.gap` plus its
+    /// struts); none elsewhere.
     pub gaps: Signal<Option<[f64; 4]>>,
     /// Hyprland's windows asking for attention, until they are focused:
     /// its clients do not say, only an event.
@@ -288,8 +289,10 @@ impl Compositor {
         });
         if let Some(socket) = umbriel {
             let mut stream = UnixStream::connect(&socket)?;
-            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\",\"outputs\",\"overview\"]}\n")?;
-            return Ok((Compositor::new(Backend::Umbriel { socket }), stream));
+            stream.write_all(b"{\"cmd\":\"subscribe\",\"events\":[\"workspaces\",\"windows\",\"outputs\",\"overview\",\"theme\"]}\n")?;
+            let compositor = Compositor::new(Backend::Umbriel { socket });
+            compositor.umbriel_gaps();
+            return Ok((compositor, stream));
         }
         Err(unknown())
     }
@@ -667,7 +670,10 @@ impl Compositor {
                         })
                     })
                     .collect();
-                self.set_workspaces(workspaces);
+                batch(|| {
+                    self.set_workspaces(workspaces);
+                    self.umbriel_focus();
+                });
             }
             Some("windows") => {
                 let list = data.and_then(Value::as_array).cloned().unwrap_or_default();
@@ -686,13 +692,10 @@ impl Compositor {
                         })
                     })
                     .collect();
-                // `active` is the window holding the keyboard; `focused` only
-                // its workspace's remembered one.
-                let focused = list.iter().find(|w| w.get("active").and_then(Value::as_bool) == Some(true)).and_then(|w| id_of(w.get("id")?));
                 *self.umbriel_windows.borrow_mut() = Value::Array(list);
                 batch(|| {
                     self.set_windows(windows);
-                    self.set_focused(focused);
+                    self.umbriel_focus();
                     self.umbriel_layouts();
                 });
             }
@@ -712,8 +715,29 @@ impl Compositor {
             Some("overview") => {
                 self.set_overview(data.and_then(|d| d.get("open")).and_then(Value::as_bool).unwrap_or(false));
             }
+            // Its configuration read again changes the colours it mirrors,
+            // sometimes: the only sign of a reload there is.
+            Some("theme") => self.umbriel_gaps(),
             _ => {}
         }
+    }
+
+    /// The focused window. `active` is the one holding the keyboard,
+    /// `focused` only its workspace's remembered one; while a layer surface
+    /// holds the keyboard (a launcher) none is active, and the focused
+    /// workspace's own is the focused window, as niri says.
+    fn umbriel_focus(&self) {
+        let on_focused = self.workspaces.get_untracked().unwrap_or_default().into_iter().find(|w| w.focused).map(|w| w.id);
+        let windows = self.umbriel_windows.borrow();
+        let list = windows.as_array().map(Vec::as_slice).unwrap_or_default();
+        let flag = |w: &Value, key: &str| w.get(key).and_then(Value::as_bool) == Some(true);
+        let focused = list
+            .iter()
+            .find(|w| flag(w, "active"))
+            .or_else(|| list.iter().find(|w| flag(w, "focused") && on_focused.is_some() && w.get("workspace").and_then(id_of) == on_focused))
+            .and_then(|w| id_of(w.get("id")?));
+        drop(windows);
+        self.set_focused(focused);
     }
 
     /// The windows' places, on their outputs: x and y come in the whole
@@ -744,6 +768,26 @@ impl Compositor {
             .collect();
         drop(corners);
         self.set_layouts(layouts);
+    }
+
+    /// `layout.gap` between windows and the screen's edges too, and
+    /// `layout.struts` added at each edge: niri's model. Umbriel says
+    /// nothing when its configuration is reloaded, so they are asked again
+    /// on [`refresh`](Compositor::refresh) and on a theme change.
+    fn umbriel_gaps(&self) {
+        let Backend::Umbriel { socket } = &self.backend else { return };
+        let get = |key: &str| {
+            let reply = ask_line(socket, &format!("{}\n", serde_json::json!({ "cmd": "config-get", "args": [key] }))).ok()?;
+            serde_json::from_str::<Value>(&reply).ok()?.get("ok")?.get("value").cloned()
+        };
+        let gaps = get("layout.gap").and_then(|g| g.as_f64()).map(|gap| {
+            let struts = get("layout.struts").unwrap_or(Value::Null);
+            let side = |key: &str| gap + struts.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+            [side("top"), side("right"), side("bottom"), side("left")]
+        });
+        if self.gaps.get_untracked() != Some(gaps) {
+            self.gaps.set(gaps);
+        }
     }
 
     fn umbriel_action(&self, action: Value) -> Result<(), String> {
@@ -1029,10 +1073,13 @@ impl Compositor {
     /// The state asked again now, where the compositor does not say every
     /// change: Hyprland moves and resizes windows without an event, so a
     /// window's place read for an action (a capture of it) is asked first.
-    /// niri and Umbriel say each change; nothing to do there.
+    /// niri and Umbriel say each change of their windows; Umbriel's gaps,
+    /// which it does not, are asked again.
     pub fn refresh(&self) {
-        if let Backend::Hyprland { .. } = self.backend {
-            self.hyprland_refresh();
+        match self.backend {
+            Backend::Hyprland { .. } => self.hyprland_refresh(),
+            Backend::Umbriel { .. } => self.umbriel_gaps(),
+            _ => {}
         }
     }
 
@@ -1042,7 +1089,7 @@ impl Compositor {
         match &self.backend {
             Backend::Niri { socket, .. } => Self::niri_action(socket, "{\"Quit\":{\"skip_confirmation\":true}}"),
             Backend::Hyprland { .. } => self.hyprland_dispatch("hl.dsp.exit()", "exit"),
-            Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "session-quit" })),
+            Backend::Umbriel { .. } => self.umbriel_action(serde_json::json!({ "action": "session-quit", "skip_confirmation": true })),
             Backend::Wayland { .. } => Err(format!("{} cannot be asked to quit", self.name())),
         }
     }
@@ -1201,6 +1248,13 @@ mod tests {
         assert_eq!(c.title.get().as_deref(), Some("~"));
         assert_eq!(c.focused_on("DP-1").map(|w| w.app_id), Some(Some("foot".into())));
         assert_eq!(c.focused_on("HDMI-A-1"), None);
+
+        // A launcher holds the keyboard: the workspace's own stays focused.
+        c.line(r#"{"event":"windows","data":[{"id":"w1","app_id":"foot","title":"~","workspace":"ws-1","active":false,"focused":true}]}"#);
+        assert_eq!(c.title.get().as_deref(), Some("~"));
+        // Another workspace, empty, focused: nothing is.
+        c.line(r#"{"event":"workspaces","data":[{"id":"ws-1","index":1,"output":"DP-1","active":false,"focused":false},{"id":"ws-2","index":2,"output":"DP-1","active":true,"focused":true}]}"#);
+        assert_eq!(c.title.get(), None);
     }
 
     #[test]
@@ -1329,6 +1383,33 @@ mod tests {
     }
 
     #[test]
+    fn umbriel_gaps_add_the_struts() {
+        let dir = std::env::temp_dir().join(format!("genoma-umbriel-gaps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("umbriel.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let said = std::thread::spawn(move || {
+            ["{\"ok\":{\"override\":false,\"value\":8}}\n", "{\"ok\":{\"override\":false,\"value\":{\"bottom\":0,\"left\":4,\"right\":0,\"top\":40}}}\n"]
+                .iter()
+                .map(|reply| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = String::new();
+                    BufReader::new(stream.try_clone().unwrap()).read_line(&mut request).unwrap();
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    request.trim_end().to_owned()
+                })
+                .collect::<Vec<_>>()
+        });
+        let c = Compositor::new(Backend::Umbriel { socket });
+        c.refresh();
+        let asked: Vec<Value> = said.join().unwrap().iter().map(|r| serde_json::from_str(r).unwrap()).collect();
+        assert_eq!(asked[0], serde_json::json!({ "cmd": "config-get", "args": ["layout.gap"] }));
+        assert_eq!(asked[1], serde_json::json!({ "cmd": "config-get", "args": ["layout.struts"] }));
+        assert_eq!(c.gaps.get_untracked(), Some(Some([48.0, 8.0, 8.0, 12.0])));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn hyprland_urgency_lasts_until_the_focus() {
         let c = Compositor::new(Backend::Hyprland { dir: PathBuf::from("/nonexistent") });
         c.windows.set(vec![Window { id: "0x1".into(), ..Window::default() }, Window { id: "0x2".into(), ..Window::default() }]);
@@ -1447,7 +1528,7 @@ mod tests {
         let said = listener(&socket, "{\"ok\":true}\n", 1);
         assert_eq!(Compositor::new(Backend::Umbriel { socket }).quit(), Ok(()));
         let sent: Value = serde_json::from_str(&said.join().unwrap()[0]).unwrap();
-        assert_eq!(sent, serde_json::json!({ "cmd": "action", "action": "session-quit" }));
+        assert_eq!(sent, serde_json::json!({ "cmd": "action", "action": "session-quit", "skip_confirmation": true }));
         assert!(Compositor::wayland().quit().is_err());
         std::fs::remove_dir_all(&dir).ok();
     }

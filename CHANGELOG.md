@@ -36,13 +36,25 @@ changes what a shell sees.
     workspace on an output, focused there; `compositor:center_window()`.
 - `compositor.gaps` (`top`, `right`, `bottom`, `left`): how far windows
   stay from the screen's edges, where the compositor says (Hyprland's
-  `general:gaps_out`, read again on `configreloaded`); nil elsewhere.
+  `general:gaps_out`, read again on `configreloaded`; Umbriel's
+  `layout.gap` plus its `layout.struts` at each edge, through
+  `config-get`, read again on a `theme` event and on `refresh()`, since
+  Umbriel says nothing when its configuration reloads); nil elsewhere.
 - `compositor:quit()`: the session ends without the compositor asking
-  (niri's `Quit`, Hyprland's `exit`, Umbriel's `session-quit`).
+  (niri's `Quit`, Hyprland's `exit`, Umbriel's `session-quit` with
+  `skip_confirmation`).
 - `compositor:refresh()`: Hyprland's state asked again now. Hyprland moves
   and resizes windows without an event, so a window's place read for an
   action is asked for first; its `openlayer` and `closelayer` (a zone
-  reserved or let go) now refresh the model too.
+  reserved or let go) now refresh the model too. On Umbriel, its gaps.
+
+### Changed
+
+- Umbriel: while a layer surface holds the keyboard (a launcher), the
+  focused window is the focused workspace's own, as niri says, instead of
+  none. Umbriel's `screencast` events are the portal's target commands,
+  not shares, so `compositor.casts` stays empty there: its shares are
+  PipeWire nodes named `umbriel-screen-capture`.
 - `@genoma/niri`'s model keeps workspace urgency and active window,
   window pid, floating and urgency, and `layouts` apart.
 

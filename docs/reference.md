@@ -872,7 +872,7 @@ The compositor's overview is open: niri and Umbriel.
 read casts: { Cast }
 ```
 
-The screen being captured now: niri and Hyprland.
+The screen being captured now: niri and Hyprland. Umbriel's IPC says only which target its portal is to share, not that a share runs: its casts are PipeWire nodes named "umbriel-screen-capture".
 
 ### `compositor.screenshot`
 
@@ -888,7 +888,7 @@ The screenshots the compositor took itself (niri's own), counted since the start
 read gaps: { top: number, right: number, bottom: number, left: number }?
 ```
 
-How far windows stay from each edge of the screen, logical units, where the compositor says (Hyprland's gaps_out); nil elsewhere.
+How far windows stay from each edge of the screen, logical units, where the compositor says (Hyprland's gaps_out, Umbriel's layout.gap plus its struts); nil elsewhere.
 
 ### `compositor:workspaces`
 
@@ -962,7 +962,7 @@ The focused window centred on its screen (Hyprland: a floating one).
 refresh: (self: Compositor) -> ()
 ```
 
-The state asked again now: Hyprland moves and resizes windows without saying so, so a window's place read for an action is asked first. Nothing to do on niri and Umbriel, which say every change.
+The state asked again now: Hyprland moves and resizes windows without saying so, so a window's place read for an action is asked first. Umbriel's gaps are asked again: it does not say when they change.
 
 ### `compositor:quit`
 
