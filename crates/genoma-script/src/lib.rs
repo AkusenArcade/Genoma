@@ -220,6 +220,16 @@ pub enum FocusRequest {
     Clear,
 }
 
+/// The modifiers held now, as the surface with the keyboard is told them
+/// (`g.modifiers()`): none while the keyboard is on no surface of the shell's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub logo: bool,
+}
+
 /// The requests waiting, and whether a node has the focus now.
 pub type FocusQueue = (Rc<RefCell<Vec<FocusRequest>>>, Rc<std::cell::Cell<bool>>);
 
@@ -2204,6 +2214,7 @@ pub struct Script {
     wishes: Rc<RefCell<Vec<Wish>>>,
     wishes_changed: Rc<std::cell::Cell<bool>>,
     focus: FocusQueue,
+    modifiers: Signal<Modifiers>,
     /// Modules to give in place of `@genoma/…` ones (`genoma snapshot
     /// --mock`): a test's fake service, by name, read from this path.
     mocks: Rc<RefCell<HashMap<String, PathBuf>>>,
@@ -2289,6 +2300,7 @@ impl Script {
             wishes: Rc::default(),
             wishes_changed: Rc::default(),
             focus: (Rc::default(), Rc::default()),
+            modifiers: detached(|| Signal::new(Modifiers::default())),
             mocks: Rc::default(),
             activation: Rc::default(),
             activation_waiting: Rc::default(),
@@ -2340,6 +2352,11 @@ impl Script {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// Where the runtime says which modifiers are held.
+    pub fn modifiers(&self) -> Signal<Modifiers> {
+        self.modifiers
     }
 
     /// Every target's wish, once something changed since the last call.
@@ -2800,6 +2817,21 @@ impl Script {
         })?)?;
         let held = self.focus.1.clone();
         g.set("has_focus", lua.create_function(move |_, ()| Ok(held.get()))?)?;
+        // g.modifiers() → { ctrl, shift, alt, logo }: held now, for a press or
+        // a wheel step to be read with; reactive, so a release is seen too.
+        let modifiers = self.modifiers;
+        g.set(
+            "modifiers",
+            lua.create_function(move |lua, ()| {
+                let m = modifiers.get();
+                let t = lua.create_table()?;
+                t.set("ctrl", m.ctrl)?;
+                t.set("shift", m.shift)?;
+                t.set("alt", m.alt)?;
+                t.set("logo", m.logo)?;
+                Ok(t)
+            })?,
+        )?;
         // g.activation_token { app_id = "…", on_token = function(token) … end }:
         // a token from the compositor for a program about to start, its
         // window then given the focus (XDG_ACTIVATION_TOKEN in its

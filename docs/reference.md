@@ -656,6 +656,14 @@ quit: (code: number?) -> ()
 
 g.quit(code): the interface is done and the process ends.
 
+### `g.modifiers`
+
+```luau
+modifiers: () -> { ctrl: boolean, shift: boolean, alt: boolean, logo: boolean }
+```
+
+The modifiers held now, to read a press or a wheel step with: none while the keyboard is on no surface of the interface's. Reactive.
+
 ### `g.focus_move`
 
 ```luau

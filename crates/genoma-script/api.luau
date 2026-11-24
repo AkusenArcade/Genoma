@@ -503,6 +503,10 @@ export type G = {
     -- g.quit(code): the interface is done and the process ends.
     quit: (code: number?) -> (),
 
+    -- The modifiers held now, to read a press or a wheel step with: none
+    -- while the keyboard is on no surface of the interface's. Reactive.
+    modifiers: () -> { ctrl: boolean, shift: boolean, alt: boolean, logo: boolean },
+
     -- The keyboard's way through the open surface's buttons and sliders.
     focus_move: (by: number) -> (),
     focus_press: () -> (),

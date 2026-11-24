@@ -416,6 +416,8 @@ pub struct App {
     /// script's answer.
     pans: Option<Box<dyn Fn(usize, NodeId) -> Option<NodeId>>>,
     focus: Option<genoma_script::FocusQueue>,
+    /// What the interface reads `g.modifiers()` from.
+    modifiers_told: Option<genoma_core::reactive::Signal<genoma_script::Modifiers>>,
     /// Surfaces the compositor gave another area than their trees were
     /// built for (another surface took or let go of a zone): each is built
     /// again on its own, the rest of the interface untouched.
@@ -549,6 +551,7 @@ impl App {
             input: None,
             pans: None,
             focus: None,
+            modifiers_told: None,
             drag: None,
             areas_changed: Vec::new(),
             outputs_changed: false,
@@ -1463,6 +1466,19 @@ impl App {
     /// The tokens the compositor gave since the last look, by request.
     pub fn take_tokens(&mut self) -> Vec<(u64, Option<String>)> {
         std::mem::take(&mut self.tokens)
+    }
+
+    /// Where the interface reads the modifiers held now.
+    pub fn on_modifiers(&mut self, told: genoma_core::reactive::Signal<genoma_script::Modifiers>) {
+        self.modifiers_told = Some(told);
+    }
+
+    fn tell_modifiers(&self, m: Modifiers) {
+        let Some(told) = self.modifiers_told else { return };
+        let now = genoma_script::Modifiers { ctrl: m.ctrl, shift: m.shift, alt: m.alt, logo: m.logo };
+        if told.get_untracked() != Some(now) {
+            told.set(now);
+        }
     }
 
     /// Where `g.focus_*` leaves its requests.
@@ -3500,6 +3516,7 @@ impl KeyboardHandler for App {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, wl: &wl_surface::WlSurface, _: u32) {
         if self.keyboard_on.as_ref() == Some(wl) {
             self.keyboard_on = None;
+            self.tell_modifiers(Modifiers::default());
         }
         log::debug!("keyboard off surface {:?}", self.by_wl(wl).map(|i| self.surfaces[i].id));
     }
@@ -3517,6 +3534,7 @@ impl KeyboardHandler for App {
 
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, modifiers: Modifiers, _: RawModifiers, _: u32) {
         self.modifiers = modifiers;
+        self.tell_modifiers(modifiers);
     }
 }
 
