@@ -74,6 +74,15 @@ changes what a shell sees.
 
 ### Fixed
 
+- A surface resized while it animates no longer draws more and more frames
+  for each one shown. Every configure drew without retiring the frame
+  callback already in flight, and both were answered from then on: one more
+  chain of frames at each resize, until the render thread fell behind with
+  no limit (gigabytes of waiting frames, motion in slow motion and going on
+  after its data stopped, old pictures stretched over the new size).
+  Only the last frame callback is answered now, it and the size go with the
+  frame they were asked for with, and a frame still waiting when the next
+  one comes is dropped.
 - Files dragged and dropped on the same interface: more of them than a pipe
   holds stopped it for good. A program slow to take what it is dropped no
   longer holds the loop either.

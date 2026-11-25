@@ -10,7 +10,7 @@
 //! draws it and presents. Nothing flows back but the adapter's description.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::c_void,
     ptr::NonNull,
     sync::{Arc, Mutex, mpsc},
@@ -882,9 +882,16 @@ struct Raw(NonNull<c_void>);
 // `Renderer::create_target` guarantees the lifetime.
 unsafe impl Send for Raw {}
 
+/// What a frame's commit carries, requested on the render thread right
+/// before it presents (`true`), so it goes with that frame's buffer and not
+/// with one still waiting behind it. `false` when there was no buffer to
+/// present: whatever commits the rest is then its own to do. A frame a later
+/// one replaced never calls it.
+pub type Commit = Box<dyn FnOnce(bool) + Send>;
+
 enum Message {
     Create { id: SurfaceId, display: Raw, surface: Raw },
-    Draw { id: SurfaceId, width: u32, height: u32, list: Box<DrawList> },
+    Draw { id: SurfaceId, width: u32, height: u32, list: Box<DrawList>, commit: Commit },
     /// With a sender, answered once the swapchain is gone.
     Destroy { id: SurfaceId, done: Option<std::sync::mpsc::Sender<()>> },
     /// Drawn into a texture of its own and read back: straight RGBA.
@@ -919,6 +926,21 @@ pub struct Stats {
 
 pub(crate) type SharedStats = Arc<Mutex<Stats>>;
 
+/// Whether the frame of `id` at the head of the line is already replaced: a
+/// later one of the same surface waits behind it, with the surface neither
+/// made nor destroyed in between. Drawn late it would only show what is no
+/// longer so, and hold up the one that is.
+fn replaced(id: SurfaceId, waiting: &VecDeque<Message>) -> bool {
+    for message in waiting {
+        match message {
+            Message::Draw { id: other, .. } if *other == id => return true,
+            Message::Create { id: other, .. } | Message::Destroy { id: other, .. } if *other == id => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The main thread's handle on the render thread.
 pub struct Renderer {
     tx: mpsc::Sender<Message>,
@@ -947,16 +969,29 @@ impl Renderer {
                         return;
                     }
                 };
-                // Blocks between messages: no message, no work.
-                for message in rx {
+                // Blocks between messages: no message, no work. What waits
+                // is looked at before each is taken, so a surface asked for
+                // faster than it can be drawn skips frames rather than
+                // falling behind.
+                let mut waiting: VecDeque<Message> = VecDeque::new();
+                loop {
+                    if waiting.is_empty() {
+                        match rx.recv() {
+                            Ok(message) => waiting.push_back(message),
+                            Err(_) => return,
+                        }
+                    }
+                    waiting.extend(rx.try_iter());
+                    let Some(message) = waiting.pop_front() else { continue };
                     match message {
                         Message::Create { id, display, surface } => {
                             if let Err(e) = unsafe { gpu.create_target(id, display.0, surface.0) } {
                                 log::error!("surface {id}: {e}");
                             }
                         }
-                        Message::Draw { id, width, height, list } => {
-                            gpu.draw(id, width, height, *list)
+                        Message::Draw { id, .. } if replaced(id, &waiting) => {}
+                        Message::Draw { id, width, height, list, commit } => {
+                            gpu.draw(id, width, height, *list, commit)
                         }
                         Message::Snapshot { width, height, list, reply } => {
                             let _ = reply.send(gpu.snapshot(width, height, &list));
@@ -994,10 +1029,11 @@ impl Renderer {
     }
 
     /// Draws `list` on the surface at `width`×`height` physical pixels.
-    /// Whatever the surface's state must say with this frame (a frame
-    /// callback, a viewport) has to be requested before this call.
-    pub fn draw(&self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
-        let _ = self.tx.send(Message::Draw { id, width, height, list: Box::new(list) });
+    /// What the surface's state must say with exactly this frame (a frame
+    /// callback, a viewport) is requested by `commit`. A frame still waiting
+    /// when the next one comes is dropped, `commit` and all.
+    pub fn draw(&self, id: SurfaceId, width: u32, height: u32, list: DrawList, commit: Commit) {
+        let _ = self.tx.send(Message::Draw { id, width, height, list: Box::new(list), commit });
     }
 
     /// `list` drawn at this size into a texture rather than a surface, and
@@ -1108,6 +1144,19 @@ mod tests {
             mask: None,
             blend: 0,
         }
+    }
+
+    #[test]
+    fn a_frame_with_a_later_one_behind_it_is_dropped() {
+        let draw = |id| Message::Draw { id, width: 1, height: 1, list: Box::default(), commit: Box::new(|_| {}) };
+        let line = |messages: Vec<Message>| VecDeque::from(messages);
+        assert!(!replaced(1, &line(vec![])));
+        assert!(replaced(1, &line(vec![draw(1)])));
+        assert!(replaced(1, &line(vec![draw(2), draw(1)])));
+        assert!(!replaced(1, &line(vec![draw(2)])));
+        // A popup closed and opened again has its name: another surface.
+        assert!(!replaced(1, &line(vec![Message::Destroy { id: 1, done: None }, draw(1)])));
+        assert!(replaced(1, &line(vec![Message::Destroy { id: 2, done: None }, draw(1)])));
     }
 
     #[test]

@@ -28,7 +28,7 @@ use smithay_client_toolkit::{
 };
 use smithay_client_toolkit::{
     background_effect::{BackgroundEffectHandler, BackgroundEffectState},
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_registry,
     dispatch2::Dispatch2,
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
@@ -43,7 +43,7 @@ use smithay_client_toolkit::{
         client::{
             Connection, EventQueue, Proxy, QueueHandle,
             globals::registry_queue_init,
-            protocol::{wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
+            protocol::{wl_buffer, wl_callback, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
         },
         protocols::{
             ext::{
@@ -209,6 +209,11 @@ struct Surface {
     configured: bool,
     dirty: bool,
     frame_pending: bool,
+    /// The last frame callback asked for: the only one that is answered. A
+    /// configure draws without waiting for the one in flight, and that one
+    /// answered too would be a second beat, drawing beside the first from
+    /// then on: one more at every resize.
+    frame_asked: u64,
     frames: u64,
     /// Frames and build time since the last minute's account (debug log).
     tally: (u64, Duration, Instant),
@@ -321,6 +326,7 @@ impl Surface {
             configured: false,
             dirty: false,
             frame_pending: false,
+            frame_asked: 0,
             frames: 0,
             tally: (0, Duration::ZERO, Instant::now()),
             built_ms: 0.0,
@@ -2450,10 +2456,6 @@ impl App {
 
         let width = (s.logical.0 as f64 * s.scale).round() as u32;
         let height = (s.logical.1 as f64 * s.scale).round() as u32;
-        match &s.viewport {
-            Some(viewport) => viewport.set_destination(s.logical.0 as i32, s.logical.1 as i32),
-            None => surface.set_buffer_scale(s.scale.ceil() as i32),
-        }
         let motion = s.scene.borrow_mut().advance(Instant::now(), s.scale as f32);
         s.scene.borrow_mut().layout(if window { Some(s.logical.0 as f32) } else { spans.then_some(s.logical.0 as f32) }, window.then_some(s.logical.1 as f32));
         let mut list = s.scene.borrow_mut().draw_list(s.scale as f32);
@@ -2592,10 +2594,32 @@ impl App {
         s.scene.borrow_mut().take_dirty();
 
         // Asked for with this frame's commit, so the next change waits for
-        // the compositor instead of racing it.
-        surface.frame(qh, FrameCallbackData(surface.clone()));
+        // the compositor instead of racing it. The render thread asks, as it
+        // presents: from here both would go with whatever frame is committed
+        // first, and one still of the old size would be stretched over the
+        // new, and its callback would ask for the next frame too soon.
+        s.frame_asked += 1;
         s.frame_pending = true;
-        renderer.draw(s.id, width, height, list);
+        let commit = {
+            let (qh, conn, viewport) = (qh.clone(), self.conn.clone(), s.viewport.clone());
+            let (logical, scale, asked) = (s.logical, s.scale, s.frame_asked);
+            move |presenting: bool| {
+                // With no buffer to go with it, the size stays the last
+                // buffer's: only the callback is committed.
+                if presenting {
+                    match &viewport {
+                        Some(viewport) => viewport.set_destination(logical.0 as i32, logical.1 as i32),
+                        None => surface.set_buffer_scale(scale.ceil() as i32),
+                    }
+                }
+                surface.frame(&qh, FrameData { surface: surface.clone(), asked });
+                if !presenting {
+                    surface.commit();
+                    let _ = conn.flush();
+                }
+            }
+        };
+        renderer.draw(s.id, width, height, list, Box::new(commit));
         let built = started.elapsed();
         s.built_ms = built.as_secs_f32() * 1000.0;
         log::trace!("build {} us", built.as_micros());
@@ -3165,6 +3189,26 @@ fn pci_bus_id(dev: u64) -> Option<String> {
     pci.contains(':').then_some(pci)
 }
 
+/// A frame callback: of which surface, and which of those it asked for.
+struct FrameData {
+    surface: wl_surface::WlSurface,
+    asked: u64,
+}
+
+impl Dispatch2<wl_callback::WlCallback, App> for FrameData {
+    fn event(&self, app: &mut App, _: &wl_callback::WlCallback, _: wl_callback::Event, _: &Connection, _: &QueueHandle<App>) {
+        let Some(i) = app.by_wl(&self.surface) else { return };
+        let s = &mut app.surfaces[i];
+        if s.frame_asked != self.asked {
+            return;
+        }
+        s.frame_pending = false;
+        if s.dirty {
+            app.draw(i);
+        }
+    }
+}
+
 /// Objects whose events Genoma does not need (managers, viewports).
 struct Ignore;
 
@@ -3291,14 +3335,9 @@ impl CompositorHandler for App {
 
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, _: u32) {
-        if let Some(i) = self.by_wl(wl) {
-            self.surfaces[i].frame_pending = false;
-            if self.surfaces[i].dirty {
-                self.draw(i);
-            }
-        }
-    }
+    // Genoma's frame callbacks carry which frame they were asked for with
+    // (`FrameData`), which this one cannot say.
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
 
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, wl: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
         let size = self

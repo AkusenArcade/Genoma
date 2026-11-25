@@ -63,6 +63,29 @@ struct Target {
     drawn: Option<std::time::Instant>,
 }
 
+impl Target {
+    fn configure(&self, device: &wgpu::Device, width: u32, height: u32) {
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if self.copyable {
+            usage |= wgpu::TextureUsages::COPY_DST;
+        }
+        self.surface.configure(
+            device,
+            &wgpu::SurfaceConfiguration {
+                usage,
+                format: self.format,
+                width,
+                height,
+                present_mode: self.present_mode,
+                desired_maximum_frame_latency: 1,
+                alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+                view_formats: vec![],
+                color_space: wgpu::SurfaceColorSpace::Auto,
+            },
+        );
+    }
+}
+
 impl Gpu {
     /// Opens the device on the adapter at `pci_bus_id` (`0000:03:00.0`), the
     /// compositor's main device when the caller knows it. Without a match it
@@ -198,7 +221,7 @@ impl Gpu {
         }
     }
 
-    pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
+    pub(crate) fn draw(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList, commit: crate::Commit) {
         let started = std::time::Instant::now();
         let counts = (list.rects.len(), list.images.len(), list.texts.len());
         // What this frame shows of the pictures drawn for groups: the rest
@@ -209,7 +232,7 @@ impl Gpu {
             .flat_map(|i| std::iter::once(i.key).chain(i.mask))
             .chain(list.groups.iter().map(|g| g.key))
             .collect();
-        self.draw_inner(id, width, height, list);
+        self.draw_inner(id, width, height, list, commit);
         if let Some(images) = &mut self.images {
             images.release(id, &keep);
         }
@@ -272,7 +295,7 @@ impl Gpu {
         stats.texture_bytes = bytes;
     }
 
-    fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList) {
+    fn draw_inner(&mut self, id: SurfaceId, width: u32, height: u32, list: DrawList, commit: crate::Commit) {
         let now = std::time::Instant::now();
         // A canvas is kept only while its surface keeps moving: one at rest
         // gives its memory back.
@@ -293,24 +316,7 @@ impl Gpu {
             return;
         };
         if target.size != Some((width, height)) {
-            let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
-            if target.copyable {
-                usage |= wgpu::TextureUsages::COPY_DST;
-            }
-            target.surface.configure(
-                &self.device,
-                &wgpu::SurfaceConfiguration {
-                    usage,
-                    format: target.format,
-                    width,
-                    height,
-                    present_mode: target.present_mode,
-                    desired_maximum_frame_latency: 1,
-                    alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-                    view_formats: vec![],
-                    color_space: wgpu::SurfaceColorSpace::Auto,
-                },
-            );
+            target.configure(&self.device, width, height);
             target.size = Some((width, height));
             target.canvas = None;
             target.last = None;
@@ -350,7 +356,13 @@ impl Gpu {
         // because the GPU or the compositor held it, said apart from one that
         // took long to draw.
         let asked = std::time::Instant::now();
-        let acquired = target.surface.get_current_texture();
+        let mut acquired = target.surface.get_current_texture();
+        if matches!(acquired, wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) {
+            // Once more, with a new swapchain: nothing else would draw this
+            // frame again.
+            target.configure(&self.device, width, height);
+            acquired = target.surface.get_current_texture();
+        }
         let waited = asked.elapsed();
         self.waited = waited;
         if waited > std::time::Duration::from_millis(8) {
@@ -360,8 +372,11 @@ impl Gpu {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             other => {
-                log::warn!("no frame to draw into: {other:?}");
+                log::warn!("surface {id}: no frame to draw into: {other:?}");
                 target.size = None;
+                // The frame callback still has to go, or nothing would ask
+                // for the next frame.
+                commit(false);
                 return;
             }
         };
@@ -409,6 +424,7 @@ impl Gpu {
             None => self.render(&mut encoder, &frame_view, format, id, [width, height], &list, &mut viewport, None),
         }
         self.queue.submit([encoder.finish()]);
+        commit(true);
         self.queue.present(frame);
         if let Some(text) = &mut self.text {
             text.atlas.trim();
