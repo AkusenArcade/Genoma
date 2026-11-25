@@ -357,7 +357,8 @@ pub struct App {
     dmabuf: DmabufState,
     effects: BackgroundEffectState,
     compositor: CompositorState,
-    layer_shell: LayerShell,
+    /// None where the compositor has none (GNOME): windows open all the same.
+    layer_shell: Option<LayerShell>,
     viewporter: Option<WpViewporter>,
     fractional: Option<WpFractionalScaleManagerV1>,
     main_device: Option<u64>,
@@ -523,7 +524,7 @@ impl App {
             dmabuf: DmabufState::new(&globals, &qh),
             effects: BackgroundEffectState::new(&globals, &qh),
             compositor: CompositorState::bind(&globals, &qh).expect("wl_compositor"),
-            layer_shell: LayerShell::bind(&globals, &qh).expect("wlr-layer-shell"),
+            layer_shell: LayerShell::bind(&globals, &qh).ok(),
             viewporter: globals.bind(&qh, 1..=1, Ignore).ok(),
             fractional: globals.bind(&qh, 1..=1, Ignore).ok(),
             conn: conn.clone(),
@@ -1923,6 +1924,12 @@ impl App {
             self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, role, None, None, output_size));
             return;
         }
+        let locks = spec.layer == "lock";
+        if !locks && self.layer_shell.is_none() {
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| log::error!("the compositor offers no wlr-layer-shell: g.surface is not shown, only g.window"));
+            return;
+        }
         let wl = self.compositor.create_surface(&qh);
         if let Some(fractional) = &self.fractional {
             fractional.get_fractional_scale(&wl, &qh, ScaleData(id));
@@ -1932,7 +1939,7 @@ impl App {
         if effect.is_none() {
             log::warn!("the compositor offers no ext-background-effect: no blur");
         }
-        let role = if spec.layer == "lock" {
+        let role = if locks {
             let (Some(session_lock), Some(output)) = (&self.session_lock, output.as_ref()) else { return };
             Role::Lock(session_lock.create_lock_surface(wl, output, &qh))
         } else {
@@ -1942,7 +1949,8 @@ impl App {
                 "overlay" => Layer::Overlay,
                 _ => Layer::Top,
             };
-            let layer = self.layer_shell.create_layer_surface(&qh, wl, layer, Some(spec.namespace.clone()), output.as_ref());
+            let Some(shell) = &self.layer_shell else { return };
+            let layer = shell.create_layer_surface(&qh, wl, layer, Some(spec.namespace.clone()), output.as_ref());
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
             Role::Layer(layer)
         };

@@ -50,6 +50,8 @@ changes what a shell sees.
 
 ### Fixed
 
+- An interface of windows alone starts where there is no wlr-layer-shell
+  (GNOME); a `g.surface` there is left out, and the log says so.
 - A shape growing from no width or height inside boxes as large as their
   content never grew: nothing around it was seen, so its transition waited
   for ever.
