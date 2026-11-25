@@ -2491,10 +2491,10 @@ impl Scene {
         // in nothing visible (a closed cell's panel, inside something of no
         // size) waits, its clock running, and goes on where it should be
         // once it is seen again. One on a node growing from nothing counts,
-        // as its parent is seen.
+        // as what holds it is seen.
         let mut waiting_unseen = 0;
         for mut a in animations {
-            if !self.seen(a.node) && !self.parent(a.node).is_some_and(|p| self.seen(p)) {
+            if !self.moves(&a) {
                 waiting_unseen += 1;
                 running.push(a);
                 continue;
@@ -2757,6 +2757,33 @@ impl Scene {
         self.tree.get_node_context(node).is_some_and(|n| n.present && n.laid_frame == self.frame && n.bounds[2] > 0.0 && n.bounds[3] > 0.0)
     }
 
+    /// Whether a transition has something to show: its node is seen, or
+    /// what holds it is. A width or a height may be all that keeps what
+    /// holds it from being seen: a box as large as its content, with
+    /// nothing in it yet, is looked past.
+    fn moves(&self, a: &Animation) -> bool {
+        if self.seen(a.node) {
+            return true;
+        }
+        let mut node = a.node;
+        while let Some(p) = self.parent(node) {
+            if self.seen(p) {
+                return true;
+            }
+            let hugs = matches!(a.prop, Prop::Width | Prop::Height)
+                && self.tree.get_node_context(p).is_some_and(|n| n.present)
+                && self.tree.style(p).is_ok_and(|s| {
+                    let size = if a.prop == Prop::Width { s.size.width } else { s.size.height };
+                    size.tag() == taffy::CompactLength::AUTO_TAG
+                });
+            if !hugs {
+                return false;
+            }
+            node = p;
+        }
+        false
+    }
+
     /// What is moving now and why, for the inspector: each transition on
     /// its way (node, property) and each node that moves of itself (a
     /// shader's clock, an orbit, a filling arc, a wave, a sway, particles,
@@ -2767,7 +2794,7 @@ impl Scene {
         let mut out: Vec<String> = Vec::new();
         let mut waiting = 0;
         for a in &self.animations {
-            if self.seen(a.node) || self.parent(a.node).is_some_and(|p| self.seen(p)) {
+            if self.moves(a) {
                 out.push(format!("{} transition {:?}", u64::from(a.node), a.prop));
             } else {
                 waiting += 1;
@@ -6448,6 +6475,42 @@ mod tests {
         let motion = scene.advance(t0 + Duration::from_millis(520), 1.0);
         assert!(motion.moving || motion.wake.is_some(), "the pulse beats once seen");
         let _ = n;
+    }
+
+    #[test]
+    fn a_shape_grows_from_nothing_inside_what_hugs_it() {
+        let (mut scene, n, _) = spring_scene();
+        let _ = n;
+        let root = scene.root();
+        // A row as wide as its content, and in it one more: both nothing
+        // until the shape inside them is something.
+        let outer = scene.create(Kind::Box, Role::None);
+        let inner = scene.create(Kind::Box, Role::None);
+        let shoot = scene.create(Kind::Capsule, Role::None);
+        scene.append(root, outer);
+        scene.append(outer, inner);
+        scene.append(inner, shoot);
+        scene.set(shoot, Prop::Height, Value::Number(10.0), None).unwrap();
+        scene.set(shoot, Prop::Width, Value::Number(0.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
+        let t0 = Instant::now();
+        scene.advance(t0, 1.0);
+        let grow = Timing { duration: 0.2, curve: genoma_core::timing::Curve::LINEAR, delay: 0.0, spring: None };
+        scene.set(shoot, Prop::Width, Value::Number(40.0), Some(grow)).unwrap();
+        assert!(scene.advance(t0 + Duration::from_millis(16), 1.0).moving, "growing, it asks for frames");
+        scene.advance(Instant::now() + Duration::from_millis(400), 1.0);
+        assert_eq!(scene.value(shoot, Prop::Width), Some(Value::Number(40.0)));
+        // In something closed, a size of nothing and not its content's, it
+        // waits.
+        scene.set(outer, Prop::Width, Value::Number(0.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
+        scene.set(shoot, Prop::Width, Value::Number(0.0), None).unwrap();
+        scene.layout(Some(200.0), Some(100.0));
+        let _ = scene.draw_list(1.0);
+        scene.set(shoot, Prop::Width, Value::Number(40.0), Some(grow)).unwrap();
+        assert!(!scene.advance(Instant::now() + Duration::from_millis(16), 1.0).moving, "closed, it waits");
     }
 
     #[test]

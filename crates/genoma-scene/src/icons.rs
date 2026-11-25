@@ -7,6 +7,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant, SystemTime},
 };
 
 use resvg::{tiny_skia, usvg};
@@ -15,6 +16,9 @@ use resvg::{tiny_skia, usvg};
 pub struct Icons {
     pub dirs: Vec<PathBuf>,
     pub(crate) cache: HashMap<u64, Option<Arc<Vec<u8>>>>,
+    /// When a file given by its path was written, and when that was looked
+    /// at: an icon theme rewrites its files under the same names.
+    written: HashMap<String, (Instant, Option<SystemTime>)>,
     /// Paths drawn, by their document: kept few, since a path that moves
     /// is a new document every frame.
     vectors: HashMap<u64, Option<Arc<Vec<u8>>>>,
@@ -24,6 +28,10 @@ pub struct Icons {
 
 /// The paths kept drawn at most; past it the cache starts again.
 const VECTORS_KEPT: usize = 256;
+
+/// How long a file is taken to be as it was: one look a second at most,
+/// however many frames are drawn in it.
+const WRITTEN_FOR: Duration = Duration::from_secs(1);
 
 fn hex(c: [f32; 4]) -> String {
     let [r, g, b, _] = bytes(c);
@@ -59,6 +67,18 @@ impl Icons {
         self.dirs.iter().map(|d| d.join(format!("{source}.svg"))).find(|p| p.exists())
     }
 
+    fn written(&mut self, source: &str) -> Option<SystemTime> {
+        let now = Instant::now();
+        if let Some((looked, at)) = self.written.get(source)
+            && now.duration_since(*looked) < WRITTEN_FOR
+        {
+            return *at;
+        }
+        let at = std::fs::metadata(source).and_then(|m| m.modified()).ok();
+        self.written.insert(source.to_owned(), (now, at));
+        at
+    }
+
     /// The cache key and the pixels, or `None` if the source cannot be drawn.
     pub fn raster(
         &mut self,
@@ -67,15 +87,16 @@ impl Icons {
         gradient: Option<([f32; 4], [f32; 4])>,
         pixels: u32,
     ) -> Option<(u64, Arc<Vec<u8>>)> {
+        // A name is one of the shell's own glyphs, painted in its role; a path
+        // is an application's icon, drawn in its own colours.
+        let recolour = !Path::new(source).is_absolute();
+        let written = if recolour { None } else { self.written(source) };
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (source, bytes(colour), gradient.map(|(a, b)| (bytes(a), bytes(b))), pixels).hash(&mut h);
+        (source, bytes(colour), gradient.map(|(a, b)| (bytes(a), bytes(b))), pixels, written).hash(&mut h);
         let key = h.finish();
         if let Some(found) = self.cache.get(&key) {
             return found.clone().map(|p| (key, p));
         }
-        // A name is one of the shell's own glyphs, painted in its role; a path
-        // is an application's icon, drawn in its own colours.
-        let recolour = !Path::new(source).is_absolute();
         let pixmap = self.find(source).and_then(|path| render(&path, recolour.then_some(colour), gradient, pixels));
         let pixels = pixmap.map(|p| Arc::new(p.take()));
         self.cache.insert(key, pixels.clone());
