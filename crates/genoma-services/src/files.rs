@@ -1494,6 +1494,67 @@ pub fn check_name(name: &OsStr) -> Result<(), String> {
     Ok(())
 }
 
+/// What a properties panel says of one thing: of itself, so a link's are the
+/// link's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Facts {
+    pub mode: u32,
+    pub owner: String,
+    pub group: String,
+    /// Seconds since 1970; not every disk keeps it.
+    pub created: Option<f64>,
+    pub modified: f64,
+    pub accessed: f64,
+    /// Where a link leads, as it is written.
+    pub target: Option<PathBuf>,
+    /// How many names it has.
+    pub links: u64,
+    /// Of its disk, bytes: what this user may still write, and all of it.
+    pub free: u64,
+    pub total: u64,
+}
+
+pub fn facts(path: &Path) -> io::Result<Facts> {
+    let m = fs::symlink_metadata(path)?;
+    let seconds = |t: io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+    let disk = rustix::fs::statvfs(if m.is_dir() { path } else { path.parent().unwrap_or(path) }).ok();
+    Ok(Facts {
+        mode: m.mode() & 0o7777,
+        owner: user_name(m.uid()),
+        group: group_name(m.gid()),
+        created: seconds(m.created()),
+        modified: seconds(m.modified()).unwrap_or(0.0),
+        accessed: seconds(m.accessed()).unwrap_or(0.0),
+        target: m.is_symlink().then(|| fs::read_link(path).ok()).flatten(),
+        links: m.nlink(),
+        free: disk.as_ref().map_or(0, |d| d.f_bavail * d.f_frsize),
+        total: disk.as_ref().map_or(0, |d| d.f_blocks * d.f_frsize),
+    })
+}
+
+/// What the system calls a user, or the number.
+fn user_name(uid: u32) -> String {
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let mut text = vec![0 as libc::c_char; 16 << 10];
+    let done = unsafe { libc::getpwuid_r(uid, &mut entry, text.as_mut_ptr(), text.len(), &mut found) };
+    if done != 0 || found.is_null() || entry.pw_name.is_null() {
+        return uid.to_string();
+    }
+    unsafe { std::ffi::CStr::from_ptr(entry.pw_name) }.to_string_lossy().into_owned()
+}
+
+fn group_name(gid: u32) -> String {
+    let mut entry: libc::group = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::group = std::ptr::null_mut();
+    let mut text = vec![0 as libc::c_char; 64 << 10];
+    let done = unsafe { libc::getgrgid_r(gid, &mut entry, text.as_mut_ptr(), text.len(), &mut found) };
+    if done != 0 || found.is_null() || entry.gr_name.is_null() {
+        return gid.to_string();
+    }
+    unsafe { std::ffi::CStr::from_ptr(entry.gr_name) }.to_string_lossy().into_owned()
+}
+
 /// An extended attribute of `path` itself set, or taken off it.
 pub fn set_attribute(path: &Path, name: &str, value: Option<&str>) -> io::Result<()> {
     use rustix::io::Errno;
@@ -1709,6 +1770,21 @@ mod tests {
             let f = File::open(dir.join(p)).unwrap();
             f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000)).unwrap();
         }
+    }
+
+    #[test]
+    fn facts_are_a_things_own() {
+        let dir = scratch("facts");
+        fs::write(dir.join("a"), "x").unwrap();
+        fs::set_permissions(dir.join("a"), std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink("a", dir.join("l")).unwrap();
+        let f = facts(&dir.join("a")).unwrap();
+        assert_eq!((f.mode, f.links, f.target.clone()), (0o640, 1, None));
+        assert!(f.total > 0 && f.modified > 0.0 && !f.owner.is_empty() && !f.group.is_empty());
+        assert_eq!(facts(&dir.join("l")).unwrap().target, Some("a".into()));
+        assert!(facts(&dir.join("none")).is_err());
+        assert_eq!(user_name(0), "root");
+        assert_eq!(group_name(4_000_000_123), "4000000123");
     }
 
     #[test]

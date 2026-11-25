@@ -2635,6 +2635,14 @@ make_folder: (self: Files, folder: string, name: string, on_done: ((path: string
 make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> ()
 ```
 
+### `files:facts`
+
+```luau
+facts: (self: Files, path: string, on_told: (facts: { mode: number, owner: string, group: string, created: number?, modified: number, accessed: number, target: string?, links: number, free: number, total: number }?) -> ()) -> ()
+```
+
+What a properties panel says of one thing, of itself (a link's are the link's); nil when it is not there. Found out off the loop. `mode` is its permission bits; `created` is nil where the disk does not keep it; `free` and `total` are its disk's, bytes.
+
 ### `files:set_attribute`
 
 ```luau

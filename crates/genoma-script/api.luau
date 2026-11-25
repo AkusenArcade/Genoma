@@ -1454,6 +1454,22 @@ export type Files = {
     rename: (self: Files, path: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_folder: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    -- What a properties panel says of one thing, of itself (a link's are the
+    -- link's); nil when it is not there. Found out off the loop. `mode` is its
+    -- permission bits; `created` is nil where the disk does not keep it; `free`
+    -- and `total` are its disk's, bytes.
+    facts: (self: Files, path: string, on_told: (facts: {
+        mode: number,
+        owner: string,
+        group: string,
+        created: number?,
+        modified: number,
+        accessed: number,
+        target: string?,
+        links: number,
+        free: number,
+        total: number,
+    }?) -> ()) -> (),
     -- A user extended attribute of each set, or taken off (nil): of the thing
     -- itself, so never a link's. Told those it could not be done to.
     set_attribute: (self: Files, paths: { string }, name: string, value: string?, on_done: ((failed: { string }) -> ())?) -> (),

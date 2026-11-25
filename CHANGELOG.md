@@ -53,6 +53,8 @@ changes what a shell sees.
 - `g.directory { attribute, known, only }`: an extended attribute of each
   entry, read and followed, and only those it says something of;
   `files:set_attribute`.
+- `files:facts(path)`: a thing's permissions, owner, times, where a link leads,
+  and the room on its disk.
 - `apps:terminal(folder)`: the desktop's terminal, in a folder.
 - `files:same_disk`: whether moving things somewhere only changes names.
 - `g.field { select = "stem" }` (or `"all"`): what is selected as it takes the

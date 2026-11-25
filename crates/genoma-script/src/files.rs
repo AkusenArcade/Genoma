@@ -69,6 +69,7 @@ enum Sent {
     /// What was counted so far, and whether it is all.
     Measured(u64, Measure, bool),
     Told(u64, bool),
+    Facts(u64, Option<Box<files::Facts>>),
     /// Those of some paths that something could not be done to.
     Failed(u64, Vec<PathBuf>),
 }
@@ -147,6 +148,15 @@ impl Files {
                 match args {
                     Ok(args) => call(&f, "files on_done", args, owner),
                     Err(e) => log::error!("files on_done: {e}"),
+                }
+            }
+            Sent::Facts(id, found) => {
+                let Some((f, owner)) = self.waiting.borrow_mut().remove(&id) else { return };
+                let Some(lua) = f.weak_lua().try_upgrade() else { return };
+                let told = found.map(|f| facts(&lua, &f)).transpose();
+                match told {
+                    Ok(t) => call(&f, "files on_told", t, owner),
+                    Err(e) => log::error!("files on_told: {e}"),
                 }
             }
             Sent::Failed(id, list) => {
@@ -256,6 +266,23 @@ fn measured(lua: &Lua, m: &Measure) -> mlua::Result<Table> {
     t.set("files", m.files as f64)?;
     t.set("folders", m.folders as f64)?;
     t.set("unread", m.unread as f64)?;
+    Ok(t)
+}
+
+fn facts(lua: &Lua, f: &files::Facts) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("mode", f.mode)?;
+    t.set("owner", f.owner.as_str())?;
+    t.set("group", f.group.as_str())?;
+    t.set("created", f.created)?;
+    t.set("modified", f.modified)?;
+    t.set("accessed", f.accessed)?;
+    if let Some(target) = &f.target {
+        t.set("target", bytes(lua, target)?)?;
+    }
+    t.set("links", f.links as f64)?;
+    t.set("free", f.free as f64)?;
+    t.set("total", f.total as f64)?;
     Ok(t)
 }
 
@@ -432,6 +459,18 @@ impl UserData for FilesRef {
             std::thread::Builder::new()
                 .name("genoma-files".into())
                 .spawn(move || post.send(Sent::Told(id, files::same_disk(&list, &folder))))
+                .map(|_| ())
+                .map_err(|e| err(format!("files: no thread: {e}")))
+        });
+        // files:facts(path, function(facts or nil) end).
+        methods.add_method("facts", |_, this, (path, f): (LuaString, Function)| {
+            let path = whole(&path)?;
+            let Some(post) = this.0.post.borrow().clone() else { return Err(err("files: not started")) };
+            let id = this.0.id();
+            this.0.waiting.borrow_mut().insert(id, (f, current_owner()));
+            std::thread::Builder::new()
+                .name("genoma-files".into())
+                .spawn(move || post.send(Sent::Facts(id, files::facts(&path).ok().map(Box::new))))
                 .map(|_| ())
                 .map_err(|e| err(format!("files: no thread: {e}")))
         });
