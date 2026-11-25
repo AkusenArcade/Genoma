@@ -1002,6 +1002,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     app.on_modifiers(script.borrow().modifiers());
     app.on_pressed(script.borrow().pressed_at());
     app.on_activation(script.borrow().activation_queue());
+    app.on_activate(script.borrow().activate_queue());
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();
     let reloader = script.clone();

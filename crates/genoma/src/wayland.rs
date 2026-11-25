@@ -407,6 +407,8 @@ pub struct App {
     /// xdg-activation: tokens for the programs the interface starts.
     activation: Option<smithay_client_toolkit::activation::ActivationState>,
     activation_requests: Option<genoma_script::ActivationQueue>,
+    /// Tokens its window is to be given the focus with.
+    activate: Option<Rc<std::cell::RefCell<Vec<String>>>>,
     tokens: Vec<(u64, Option<String>)>,
     /// The surface of the last press or key: what a token is asked from.
     input_surface: Option<wl_surface::WlSurface>,
@@ -592,6 +594,7 @@ impl App {
             keyboard_on: None,
             activation: None,
             activation_requests: None,
+            activate: None,
             dnd_manager: None,
             dnd_device: None,
             dnd: None,
@@ -1577,6 +1580,33 @@ impl App {
         self.activation_requests = Some(queue);
     }
 
+    /// Where `g.activate` leaves its tokens; the first is the one the program
+    /// was started with.
+    pub fn on_activate(&mut self, queue: Rc<std::cell::RefCell<Vec<String>>>) {
+        if let Ok(token) = std::env::var("XDG_ACTIVATION_TOKEN")
+            && !token.is_empty()
+            && self.activate.is_none()
+        {
+            queue.borrow_mut().insert(0, token);
+        }
+        self.activate = Some(queue);
+    }
+
+    /// The window given the focus with the latest token, once it is open.
+    fn serve_activate(&mut self) {
+        let Some(queue) = &self.activate else { return };
+        if queue.borrow().is_empty() {
+            return;
+        }
+        let Some(window) = self.surfaces.iter().find(|s| s.configured && matches!(s.role, Role::Window(Some(_)))) else { return };
+        let Some(wl) = window.role.wl_surface() else { return };
+        let token = queue.borrow_mut().pop();
+        queue.borrow_mut().clear();
+        if let (Some(activation), Some(token)) = (&self.activation, token) {
+            activation.activate::<App>(wl, token);
+        }
+    }
+
     /// The tokens asked for since the last look, sent to the compositor;
     /// with no xdg-activation, answered at once with none.
     fn serve_activation(&mut self) {
@@ -2310,6 +2340,7 @@ impl App {
     /// apart from motion in flight.
     pub fn after_events(&mut self) {
         self.serve_activation();
+        self.serve_activate();
         self.flush_drag();
         self.sync_idle();
         self.sync_popups();

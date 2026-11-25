@@ -623,6 +623,10 @@ export type G = {
     -- XDG_ACTIVATION_TOKEN in g.process's env), its window takes the focus.
     -- nil where the compositor gives none.
     activation_token: (t: { app_id: string?, on_token: (token: string?) -> () }) -> (),
+    -- The interface's window given the focus with a token another program
+    -- passed (a D-Bus call's startup id), now or as soon as it is open. The one
+    -- it was itself started with ($XDG_ACTIVATION_TOKEN) is used by itself.
+    activate: (token: string) -> (),
 
     dbus: {
         -- g.dbus.call { bus, destination, path, interface, method,

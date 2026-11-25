@@ -2282,6 +2282,8 @@ pub struct Script {
     mocks: Rc<RefCell<HashMap<String, PathBuf>>>,
     /// Activation tokens asked for and not yet given, and who waits for each.
     activation: ActivationQueue,
+    /// The tokens its window is to be given the focus with (`g.activate`).
+    activate: Rc<RefCell<Vec<String>>>,
     activation_waiting: Rc<RefCell<HashMap<u64, Function>>>,
     activation_next: Rc<std::cell::Cell<u64>>,
     /// The mounted load's surface contents, each target's own scope, and
@@ -2367,6 +2369,7 @@ impl Script {
             pressed_at: Rc::default(),
             mocks: Rc::default(),
             activation: Rc::default(),
+            activate: Rc::default(),
             activation_waiting: Rc::default(),
             activation_next: Rc::default(),
             contents: Vec::new(),
@@ -2439,6 +2442,11 @@ impl Script {
     /// a cell is to be seen with).
     pub fn mock(&mut self, name: &str, path: PathBuf) {
         self.mocks.borrow_mut().insert(name.to_owned(), path);
+    }
+
+    /// Where `g.activate` leaves the tokens for the host.
+    pub fn activate_queue(&self) -> Rc<RefCell<Vec<String>>> {
+        self.activate.clone()
     }
 
     /// Where `g.activation_token` leaves its requests for the host.
@@ -2939,6 +2947,18 @@ impl Script {
                 next.set(id);
                 waiting.borrow_mut().insert(id, on_token);
                 queue.borrow_mut().push((id, t.get::<Option<String>>("app_id")?));
+                Ok(())
+            })?,
+        )?;
+        // g.activate(token): the interface's window given the focus with a
+        // token another program passed, now or as soon as it is open.
+        let queue = self.activate.clone();
+        g.set(
+            "activate",
+            lua.create_function(move |_, token: String| {
+                if !token.is_empty() {
+                    queue.borrow_mut().push(token);
+                }
                 Ok(())
             })?,
         )?;

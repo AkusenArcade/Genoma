@@ -55,6 +55,8 @@ changes what a shell sees.
   `files:set_attribute`.
 - `files:facts(path)`: a thing's permissions, owner, times, where a link leads,
   and the room on its disk.
+- A window started with an activation token takes the focus with it;
+  `g.activate(token)` does so with one passed later.
 - `apps:terminal(folder)`: the desktop's terminal, in a folder.
 - `files:same_disk`: whether moving things somewhere only changes names.
 - `g.field { select = "stem" }` (or `"all"`): what is selected as it takes the

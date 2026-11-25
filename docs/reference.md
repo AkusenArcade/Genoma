@@ -743,6 +743,14 @@ activation_token: (t: { app_id: string?, on_token: (token: string?) -> () }) -> 
 
 A token from the compositor for a program about to start, in answer to the press or key just handled: given to it (apps:launch's token, or XDG_ACTIVATION_TOKEN in g.process's env), its window takes the focus. nil where the compositor gives none.
 
+### `g.activate`
+
+```luau
+activate: (token: string) -> ()
+```
+
+The interface's window given the focus with a token another program passed (a D-Bus call's startup id), now or as soon as it is open. The one it was itself started with ($XDG_ACTIVATION_TOKEN) is used by itself.
+
 ### `g.dbus`
 
 ```luau
