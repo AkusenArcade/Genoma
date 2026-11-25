@@ -906,8 +906,10 @@ version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "document-features",
+ "image",
  "num-traits",
  "thiserror",
 ]
@@ -1166,16 +1168,22 @@ name = "genoma-services"
 version = "0.1.24"
 dependencies = [
  "calloop",
+ "fast_image_resize",
  "futures-channel",
  "futures-util",
  "genoma-core",
+ "image",
  "jiff",
  "libc",
  "log",
+ "md-5",
  "pipewire",
  "png",
+ "resvg",
  "rustfft",
+ "rustix",
  "serde_json",
+ "unicode-normalization",
  "zbus 6.1.0",
  "zruntime",
 ]
@@ -1664,6 +1672,16 @@ dependencies = [
  "float_next_after",
  "lyon_path",
  "num-traits",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]
@@ -3156,6 +3174,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-script"

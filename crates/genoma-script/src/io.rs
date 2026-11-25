@@ -201,6 +201,65 @@ pub(crate) fn off_loop<T: Send + 'static>(
     Ok(())
 }
 
+/// Where a thread leaves what it made for the main one.
+pub(crate) struct Post<T> {
+    made: std::sync::Arc<std::sync::Mutex<Vec<T>>>,
+    bell: std::sync::Arc<OwnedFd>,
+}
+
+impl<T> Clone for Post<T> {
+    fn clone(&self) -> Self {
+        Post { made: self.made.clone(), bell: self.bell.clone() }
+    }
+}
+
+impl<T> Post<T> {
+    pub(crate) fn send(&self, value: T) {
+        self.made.lock().unwrap_or_else(|e| e.into_inner()).push(value);
+        // Full, the loop has been told enough.
+        let _ = rustix::io::write(&*self.bell, &[1]);
+    }
+}
+
+/// [`off_loop`] for work that comes again and again: what is sent through
+/// the [`Post`], from any thread, is given to `deliver` on the main one in
+/// the order sent, until `stop`.
+pub(crate) fn mailbox<T: Send + 'static>(host: &HostRef, stop: &Stop, name: &str, deliver: impl FnMut(T) + 'static) -> mlua::Result<Post<T>> {
+    let (post, token) = open_mailbox(host, name, deliver)?;
+    stop.hold(token);
+    Ok(post)
+}
+
+/// A [`mailbox`] no reload closes.
+pub(crate) fn lasting_mailbox<T: Send + 'static>(host: &HostRef, name: &str, deliver: impl FnMut(T) + 'static) -> mlua::Result<Post<T>> {
+    Ok(open_mailbox(host, name, deliver)?.0)
+}
+
+fn open_mailbox<T: Send + 'static>(
+    host: &HostRef,
+    name: &str,
+    mut deliver: impl FnMut(T) + 'static,
+) -> mlua::Result<(Post<T>, Option<RegistrationToken>)> {
+    use rustix::pipe::PipeFlags;
+    let (reader, writer) =
+        rustix::pipe::pipe_with(PipeFlags::NONBLOCK | PipeFlags::CLOEXEC).map_err(|e| err(format!("{name}: {e}")))?;
+    let post = Post { made: std::sync::Arc::default(), bell: std::sync::Arc::new(writer) };
+    let made = std::sync::Arc::downgrade(&post.made);
+    let token = host.readable(
+        reader,
+        Box::new(move |fd| {
+            let mut rung = [0u8; 256];
+            let open = !matches!(rustix::io::read(fd, &mut rung), Ok(0));
+            // Nobody left to send.
+            let Some(made) = made.upgrade() else { return false };
+            let all = std::mem::take(&mut *made.lock().unwrap_or_else(|e| e.into_inner()));
+            all.into_iter().for_each(&mut deliver);
+            open
+        }),
+    );
+    Ok((post, token))
+}
+
 /// Bytes into lines: what a stream gives is cut wherever the kernel cut it.
 #[derive(Default)]
 struct Lines(Vec<u8>);
@@ -619,7 +678,7 @@ fn watch_toward(fd: BorrowedFd<'_>, dir: &Path, events: inotify::WatchFlags) -> 
 
 /// What a watched directory tells: the names of what changed in it, and
 /// whether the watch has only now reached it (then everything may have).
-type Changed = Box<dyn FnMut(&[Vec<u8>], bool)>;
+pub(crate) type Changed = Box<dyn FnMut(&[Vec<u8>], bool)>;
 
 /// One directory someone watches.
 struct Watch {
@@ -659,7 +718,7 @@ impl Watches {
 }
 
 /// `dir` watched until `stop` stops: `changed` hears of what happens in it.
-fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, changed: Changed) {
+pub(crate) fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, changed: Changed) {
     let id = WATCHES.with(|w| {
         let mut w = w.borrow_mut();
         if w.is_none() {
@@ -706,15 +765,18 @@ fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, changed: Cha
 /// of what changed there.
 fn watches_ready(fd: BorrowedFd<'_>) -> bool {
     let mut seen: Vec<(i32, Option<Vec<u8>>, bool)> = Vec::new();
+    // More happened than the kernel keeps: anything may have changed.
+    let mut lost = false;
     let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
     let mut events = inotify::Reader::new(fd, &mut buf);
     while let Ok(event) = events.next() {
         let gone = event.events().contains(inotify::ReadFlags::IGNORED);
+        lost |= event.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW);
         seen.push((event.wd(), event.file_name().map(|n| n.to_bytes().to_vec()), gone));
     }
     let ids: Vec<u64> = WATCHES.with(|w| {
         w.borrow().as_ref().map_or_else(Vec::new, |all| {
-            all.watches.iter().filter(|x| seen.iter().any(|(wd, ..)| x.wd == Some(*wd))).map(|x| x.id).collect()
+            all.watches.iter().filter(|x| lost || seen.iter().any(|(wd, ..)| x.wd == Some(*wd))).map(|x| x.id).collect()
         })
     });
     for id in ids {
@@ -730,7 +792,7 @@ fn watches_ready(fd: BorrowedFd<'_>) -> bool {
                 all.watches[at].armed = false;
             }
             // Something made on the way to its folder: a level further.
-            let mut came = false;
+            let mut came = lost;
             if !all.watches[at].armed {
                 let before = all.watches[at].wd;
                 let (wd, armed) = watch_toward(all.fd.as_fd(), &all.watches[at].dir, FILE_EVENTS);

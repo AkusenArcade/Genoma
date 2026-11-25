@@ -106,3 +106,15 @@ mod tests {
         assert_eq!(checks[6], "true");
     }
 }
+
+/// `g.file_uri(path)`: "/a b" → "file:///a%20b".
+pub fn file_uri(_: &Lua, path: LuaString) -> mlua::Result<String> {
+    Ok(genoma_services::thumbnails::file_uri(&crate::mime::path_of(&path)))
+}
+
+/// `g.uri_path(uri)`: a file's path, byte for byte; nil for a URI of
+/// something else.
+pub fn uri_path(lua: &Lua, uri: String) -> mlua::Result<Option<LuaString>> {
+    use std::os::unix::ffi::OsStrExt;
+    genoma_services::thumbnails::uri_path(&uri).map(|p| lua.create_string(p.as_os_str().as_bytes())).transpose()
+}

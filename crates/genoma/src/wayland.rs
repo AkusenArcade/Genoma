@@ -705,6 +705,7 @@ impl App {
         for request in clipboard.take_requests() {
             match request {
                 genoma_services::clipboard::Request::Set { types, data } => self.own_selection(types, data),
+                genoma_services::clipboard::Request::Offer(all) => self.offer_selection(all.into_iter().map(|(t, d)| (t, std::sync::Arc::new(d))).collect()),
                 genoma_services::clipboard::Request::Clear => {
                     if let Some(device) = &self.data_device {
                         device.set_selection(None);
@@ -713,17 +714,26 @@ impl App {
                 genoma_services::clipboard::Request::Save { mime, path } => self.save_selection(&mime, &path),
             }
         }
+        for (mime, done) in clipboard.take_readings() {
+            self.read_selection(&mime, done);
+        }
         let _ = self.conn.flush();
     }
 
     /// The shell's own copy: a source that hands the bytes to whoever
     /// pastes, until somebody else copies.
     fn own_selection(&mut self, types: Vec<String>, data: Vec<u8>) {
+        let data = std::sync::Arc::new(data);
+        self.offer_selection(types.into_iter().map(|t| (t, data.clone())).collect());
+    }
+
+    fn offer_selection(&mut self, all: Vec<(String, std::sync::Arc<Vec<u8>>)>) {
         let (Some(manager), Some(device)) = (&self.data_control, &self.data_device) else {
             log::warn!("clipboard: nothing to copy with (no data-control or no seat)");
             return;
         };
-        let source = manager.create_data_source(&self.qh, SourceData(std::sync::Arc::new(data)));
+        let types: Vec<String> = all.iter().map(|(t, _)| t.clone()).collect();
+        let source = manager.create_data_source(&self.qh, SourceData(all));
         for t in types {
             source.offer(t);
         }
@@ -771,7 +781,30 @@ impl App {
         self.clip_offer = Some(offer);
     }
 
+    /// The current copy in `mime`, for an interface.
+    fn read_selection(&mut self, mime: &str, done: Box<dyn FnOnce(Option<Vec<u8>>)>) {
+        match self.clip_offer.take() {
+            Some(offer) => {
+                self.read_offer(&offer, mime, OFFER_LIMIT, move |_, data| done(data));
+                self.clip_offer = Some(offer);
+            }
+            None => done(None),
+        }
+    }
+
     fn read_text(&mut self, offer: &ExtDataControlOfferV1, mime: &str, serial: u64) {
+        self.read_offer(offer, mime, genoma_services::clipboard::TEXT_LIMIT, move |app, data| {
+            if let (Some(clipboard), Some(text)) = (&app.clipboard, data)
+                // Only if nobody has copied since.
+                && clipboard.changed.get_untracked() == Some(serial)
+            {
+                clipboard.read(String::from_utf8_lossy(&text).into_owned());
+            }
+        });
+    }
+
+    /// What `offer` holds in `mime`, read on the loop: none past `limit`.
+    fn read_offer(&mut self, offer: &ExtDataControlOfferV1, mime: &str, limit: usize, done: impl FnOnce(&mut App, Option<Vec<u8>>) + 'static) {
         use std::os::fd::AsFd;
         let Some(handle) = self.handle.clone() else { return };
         let (read, write) = match rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC) {
@@ -790,8 +823,9 @@ impl App {
             log::warn!("clipboard: {e}");
             return;
         }
-        let mut text = Vec::new();
+        let mut data = Vec::new();
         let mut too_long = false;
+        let mut done = Some(done);
         let source = Generic::new(read, Interest::READ, Mode::Level);
         let inserted = handle.insert_source(source, move |_, fd, app: &mut App| {
             let mut chunk = [0u8; 16384];
@@ -801,11 +835,11 @@ impl App {
                     Ok(n) => {
                         // Past the limit the rest is drained, not kept: an
                         // owner whose pipe closes early may take it badly.
-                        if !too_long && text.len() + n <= genoma_services::clipboard::TEXT_LIMIT {
-                            text.extend_from_slice(&chunk[..n]);
+                        if !too_long && data.len() + n <= limit {
+                            data.extend_from_slice(&chunk[..n]);
                         } else {
                             too_long = true;
-                            text.clear();
+                            data.clear();
                         }
                     }
                     Err(rustix::io::Errno::AGAIN) => return Ok(PostAction::Continue),
@@ -813,11 +847,8 @@ impl App {
                     Err(_) => break,
                 }
             }
-            if let Some(clipboard) = &app.clipboard {
-                // Only if nobody has copied since.
-                if !too_long && clipboard.changed.get_untracked() == Some(serial) {
-                    clipboard.read(String::from_utf8_lossy(&text).into_owned());
-                }
+            if let Some(done) = done.take() {
+                done(app, (!too_long).then(|| std::mem::take(&mut data)));
             }
             Ok(PostAction::Remove)
         });
@@ -1364,7 +1395,7 @@ impl App {
         if (x - px).hypot(y - py) < 6.0 {
             return false;
         }
-        let Some((files, text)) = self.surfaces[i].scene.borrow().drag_data(node) else { return false };
+        let Some((files, text, actions)) = self.surfaces[i].scene.borrow().drag_data(node) else { return false };
         let (Some(manager), Some(device), Some(origin)) =
             (&self.dnd_manager, &self.dnd_device, self.surfaces[i].role.wl_surface().cloned())
         else {
@@ -1372,17 +1403,32 @@ impl App {
         };
         let mut offered: Vec<(String, Vec<u8>)> = Vec::new();
         if !files.is_empty() {
-            let list: String = files.iter().map(|f| format!("{}\r\n", file_uri(f))).collect();
+            // A URI is one already.
+            let uri = |f: &String| if f.starts_with("file://") { f.clone() } else { genoma_services::thumbnails::file_uri(std::path::Path::new(f)) };
+            let list: String = files.iter().map(|f| format!("{}\r\n", uri(f))).collect();
             offered.push(("text/uri-list".into(), list.into_bytes()));
         }
-        let plain = text.unwrap_or_else(|| files.join("\n"));
+        let plain = text.unwrap_or_else(|| {
+            let path = |f: &String| match genoma_services::thumbnails::uri_path(f) {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => f.clone(),
+            };
+            files.iter().map(path).collect::<Vec<_>>().join("\n")
+        });
         for mime in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"] {
             offered.push((mime.into(), plain.clone().into_bytes()));
         }
         let source = manager.create_drag_and_drop_source(
             &self.qh,
             offered.iter().map(|(m, _)| m.clone()),
-            smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction::Copy,
+            {
+                use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
+                match actions {
+                    genoma_scene::DragActions::Copy => DndAction::Copy,
+                    genoma_scene::DragActions::Move => DndAction::Move,
+                    genoma_scene::DragActions::Both => DndAction::Copy | DndAction::Move,
+                }
+            },
         );
         source.start_drag(device, &origin, None, self.input_serial);
         let _ = self.conn.flush();
@@ -1414,8 +1460,14 @@ impl App {
         let mime = target.and_then(|_| offer.with_mime_types(preferred_mime));
         offer.accept_mime_type(offer.serial, mime);
         use smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction;
-        if target.is_some() {
-            offer.set_actions(DndAction::Copy, DndAction::Copy);
+        if let Some(node) = target {
+            // Moved where it says so and the other program lets it; else a
+            // copy is what both can do.
+            if self.surfaces[i].scene.borrow().drop_moves(node) {
+                offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Move);
+            } else {
+                offer.set_actions(DndAction::Copy, DndAction::Copy);
+            }
         } else {
             offer.set_actions(DndAction::empty(), DndAction::empty());
         }
@@ -1507,7 +1559,7 @@ impl App {
                 FocusRequest::Press => {
                     if let Some(node) = self.surfaces[i].focused {
                         let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(node).unwrap_or([0.0; 4]);
-                        self.deliver(i, node, Input::Click(272, w / 2.0, h / 2.0));
+                        self.deliver(i, node, Input::Click(272, w / 2.0, h / 2.0, 1));
                     }
                 }
                 FocusRequest::Clear => {
@@ -1602,7 +1654,7 @@ impl App {
             "Return" | "KP_Enter" | "space" if focused.is_some() => {
                 if let Some(f) = focused {
                     let [_, _, w, h] = self.surfaces[i].scene.borrow().extent(f).unwrap_or([0.0; 4]);
-                    self.deliver(i, f, Input::Click(272, w / 2.0, h / 2.0));
+                    self.deliver(i, f, Input::Click(272, w / 2.0, h / 2.0, 1));
                 }
             }
             _ => {
@@ -2694,7 +2746,8 @@ impl App {
                 }
             }
             if clicks {
-                self.deliver(i, node, Input::Click(button, lx, ly));
+                let count = self.surfaces[i].press.clicked(Instant::now(), node, button, x, y);
+                self.deliver(i, node, Input::Click(button, lx, ly, count));
             }
         }
         let press = &mut self.surfaces[i].press;
@@ -3007,15 +3060,18 @@ impl Dispatch2<ExtDataControlDeviceV1, App> for DeviceData {
 }
 
 /// The shell's own copy: its bytes, handed to every program that pastes.
-struct SourceData(std::sync::Arc<Vec<u8>>);
+struct SourceData(Vec<(String, std::sync::Arc<Vec<u8>>)>);
+
+/// The most of a copy an interface reads in a type of its choosing.
+const OFFER_LIMIT: usize = 16 << 20;
 
 impl Dispatch2<ExtDataControlSourceV1, App> for SourceData {
     fn event(&self, _: &mut App, source: &ExtDataControlSourceV1, event: ext_data_control_source_v1::Event, _: &Connection, _: &QueueHandle<App>) {
         match event {
             // Written apart from the loop: the reader may be the shell itself,
             // reading the text of its own copy on this very loop.
-            ext_data_control_source_v1::Event::Send { fd, .. } => {
-                let data = self.0.clone();
+            ext_data_control_source_v1::Event::Send { fd, mime_type } => {
+                let Some(data) = self.0.iter().find(|(t, _)| *t == mime_type).map(|(_, d)| d.clone()) else { return };
                 let _ = std::thread::Builder::new().name("genoma-clipboard".into()).spawn(move || {
                     use std::io::Write;
                     let _ = std::fs::File::from(fd).write_all(&data);
@@ -3189,47 +3245,11 @@ fn preferred_mime(mimes: &[String]) -> Option<String> {
         .map(|m| (*m).to_owned())
 }
 
-/// A path as a `file://` URI, what is not plain percent-encoded.
-fn file_uri(path: &str) -> String {
-    let mut out = String::from("file://");
-    for b in path.bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// What a `text/uri-list` holds: its URIs, and the files among them as
 /// paths.
-fn uri_list(text: &str) -> (Vec<String>, Vec<String>) {
+fn uri_list(text: &str) -> (Vec<String>, Vec<std::path::PathBuf>) {
     let uris: Vec<String> = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned).collect();
-    let files = uris
-        .iter()
-        .filter_map(|u| u.strip_prefix("file://"))
-        // file://host/path: the host, usually empty or localhost, goes.
-        .map(|rest| if rest.starts_with('/') { rest } else { rest.find('/').map_or(rest, |at| &rest[at..]) })
-        .map(|p| {
-            let bytes = p.as_bytes();
-            let mut out = Vec::with_capacity(bytes.len());
-            let mut k = 0;
-            while k < bytes.len() {
-                if bytes[k] == b'%'
-                    && k + 2 < bytes.len()
-                    && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&bytes[k + 1..k + 3]).unwrap_or(""), 16)
-                {
-                    out.push(v);
-                    k += 3;
-                } else {
-                    out.push(bytes[k]);
-                    k += 1;
-                }
-            }
-            String::from_utf8_lossy(&out).into_owned()
-        })
-        .collect();
+    let files = uris.iter().filter_map(|u| genoma_services::thumbnails::uri_path(u)).collect();
     (uris, files)
 }
 
@@ -3280,6 +3300,8 @@ impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler
             return;
         }
         let surface_id = self.surfaces[over.surface].id;
+        // What the compositor settled on, of what both offered.
+        let moves = offer.selected_action.contains(smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction::Move);
         let mut read = Vec::new();
         let inserted = handle.insert_source(Generic::new(pipe, Interest::READ, Mode::Level), move |_, fd, app: &mut App| {
             let mut chunk = [0u8; 16384];
@@ -3294,7 +3316,7 @@ impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler
                 }
             }
             let text = String::from_utf8_lossy(&read).into_owned();
-            let mut dropped = genoma_script::Dropped { x: over.x, y: over.y, ..Default::default() };
+            let mut dropped = genoma_script::Dropped { x: over.x, y: over.y, moves, ..Default::default() };
             if mime == "text/uri-list" {
                 (dropped.uris, dropped.files) = uri_list(&text);
             } else {
@@ -3768,11 +3790,11 @@ mod tests {
 
     #[test]
     fn a_dragged_file_is_a_uri_and_a_dropped_uri_a_file() {
-        let uri = super::file_uri("/home/a/My Pictures/città.png");
+        let uri = genoma_services::thumbnails::file_uri(std::path::Path::new("/home/a/My Pictures/città.png"));
         assert_eq!(uri, "file:///home/a/My%20Pictures/citt%C3%A0.png");
         let (uris, files) = super::uri_list(&format!("# a comment\r\n{uri}\r\nfile://localhost/tmp/x\r\nhttps://example.org/\r\n"));
         assert_eq!(uris.len(), 3);
-        assert_eq!(files, vec!["/home/a/My Pictures/città.png".to_owned(), "/tmp/x".to_owned()]);
+        assert_eq!(files, ["/home/a/My Pictures/città.png", "/tmp/x"].map(std::path::PathBuf::from));
         assert_eq!(super::preferred_mime(&["text/plain".into(), "text/uri-list".into()]).as_deref(), Some("text/uri-list"));
         assert_eq!(super::preferred_mime(&["image/png".into()]), None);
     }

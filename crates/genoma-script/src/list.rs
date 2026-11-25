@@ -292,6 +292,12 @@ impl Scroll {
     }
 }
 
+/// Where a list's rows come from.
+enum From {
+    Table(Function),
+    Places { count: Function, item: Function },
+}
+
 /// `g.list`: the rows of `items` in view, every one `row_height` tall.
 /// The wheel steps through it, a touchpad moves it and flings it, and
 /// `reveal` (a row's place, from 1) brings a row into view.
@@ -299,7 +305,14 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
     let want = |name: &str| -> mlua::Result<Function> {
         t.get::<Option<Function>>(name)?.ok_or_else(|| err(format!("g.list needs {name}, a function")))
     };
-    let (items, key, row) = (want("items")?, want("key")?, want("row")?);
+    let (key, row) = (want("key")?, want("row")?);
+    // All of them in a table, or as many as it says and one at a time: a
+    // list of fifty thousand is then never a table at all.
+    let from = match (t.get::<Option<Function>>("items")?, t.get::<Option<Function>>("count")?, t.get::<Option<Function>>("item")?) {
+        (Some(items), None, None) => From::Table(items),
+        (None, Some(count), Some(item)) => From::Places { count, item },
+        _ => return Err(err("g.list needs items, or count and item, functions")),
+    };
     let row_height = t
         .get::<Option<f64>>("row_height")?
         .filter(|h| *h > 0.0)
@@ -330,7 +343,7 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
 
     // Its own wheel, fling and size, the size after any on_size of the
     // interface's.
-    let lua = items.weak_lua().upgrade();
+    let lua = key.weak_lua().upgrade();
     let s = Rc::downgrade(&scroll);
     let on_wheel = lua.create_function(move |_, (_dx, dy, steps): (f64, f64, Option<bool>)| {
         let Some(s) = s.upgrade() else { return Ok(()) };
@@ -401,14 +414,17 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
     let told = Cell::new((f64::NAN, f64::NAN));
     let s = scroll.clone();
     Effect::new(move || {
-        let list = match items.call::<Table>(()) {
-            Ok(list) => list,
+        let seen = match &from {
+            From::Table(items) => items.call::<Table>(()).map(|t| (t.raw_len(), Some(t))),
+            From::Places { count, .. } => count.call::<f64>(()).map(|n| (n.max(0.0) as usize, None)),
+        };
+        let (count, list) = match seen {
+            Ok(seen) => seen,
             Err(e) => {
                 log::error!("g.list items: {e}");
                 return;
             }
         };
-        let count = list.raw_len();
         let view = s.view.get();
         let offset = s.offset.get();
         untracked(|| {
@@ -423,7 +439,14 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
             let last = (((offset + view) / s.pitch).ceil() as usize + OVERSCAN).min(count);
             let mut wanted = Vec::with_capacity(last - first);
             for i in first..last {
-                let value = list.raw_get::<LuaValue>(i + 1).unwrap_or(LuaValue::Nil);
+                let value = match (&from, &list) {
+                    (From::Places { item, .. }, _) => item.call::<LuaValue>(i + 1).unwrap_or_else(|e| {
+                        log::error!("g.list item {}: {e}", i + 1);
+                        LuaValue::Nil
+                    }),
+                    (From::Table(_), Some(list)) => list.raw_get::<LuaValue>(i + 1).unwrap_or(LuaValue::Nil),
+                    (From::Table(_), None) => LuaValue::Nil,
+                };
                 if let Some(w) = rows.wanted(&key, value, i, &wanted) {
                     wanted.push(w);
                 }
@@ -574,6 +597,36 @@ mod tests {
     }
 
     #[test]
+    fn a_list_asks_only_for_the_items_in_view() {
+        let lua = Lua::new();
+        let fonts = Arc::new(Mutex::new(genoma_render::cosmic_text::FontSystem::new_with_fonts(std::iter::empty())));
+        let scene = Rc::new(RefCell::new(Scene::new(fonts)));
+        let handlers: Handlers = Rc::new(RefCell::new(HashMap::new()));
+        let t: Table = lua
+            .load(
+                r#"asked = 0
+                return { __kind = "list", height = 200, row_height = 20,
+                    count = function() return 1000000 end,
+                    item = function(i) asked += 1 return i end,
+                    key = function(i) return i end,
+                    row = function(i) return { __kind = "box", id = "row-" .. i() } end }"#,
+            )
+            .eval()
+            .unwrap();
+        let root = scene.borrow().root();
+        let (_scope, node) = Scope::new(|| mount(&scene, &handlers, 0, &t, root).unwrap());
+        scene.borrow_mut().layout(Some(300.0), Some(200.0));
+        let sized = scene.borrow_mut().take_sized();
+        for (n, w, h) in sized {
+            call(&handlers, n, "on_size", (w as f64, h as f64));
+        }
+        assert!(shows(&scene, 1) && shows(&scene, 13) && !shows(&scene, 14));
+        call(&handlers, node, "on_wheel", (0.0, 1e9, false));
+        assert!(shows(&scene, 1_000_000));
+        assert!(lua.globals().get::<f64>("asked").unwrap() < 200.0);
+    }
+
+    #[test]
     fn a_touchpad_moves_the_window_and_the_scroll_stays_small() {
         let lua = Lua::new();
         let (scene, handlers, node, _scope) = mounted(&lua, 10_000, "");
@@ -619,6 +672,7 @@ mod tests {
         let root = scene.borrow().root();
         for source in [
             r#"return { __kind = "list", items = function() return {} end, key = tostring, row = function() return { __kind = "box" } end }"#,
+            r#"return { __kind = "list", row_height = 20, count = function() return 1 end, key = tostring, row = function() return { __kind = "box" } end }"#,
             r#"return { __kind = "list", row_height = 20, on_wheel = function() end, items = function() return {} end, key = tostring, row = function() return { __kind = "box" } end }"#,
         ] {
             let t: Table = lua.load(source).eval().unwrap();

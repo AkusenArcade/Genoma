@@ -97,6 +97,22 @@ pub struct Images {
     frame: u64,
 }
 
+/// Files written again under the same name, and how many times: part of
+/// what their pixels are kept by.
+static CHANGED: std::sync::RwLock<Option<HashMap<String, u64>>> = std::sync::RwLock::new(None);
+
+/// `source`, an image's file, holds another picture now: one drawn after
+/// this is decoded again.
+pub fn changed(source: &str) {
+    let mut all = CHANGED.write().unwrap_or_else(|e| e.into_inner());
+    *all.get_or_insert_default().entry(source.to_owned()).or_default() += 1;
+}
+
+fn times_changed(source: &str) -> u64 {
+    let all = CHANGED.read().unwrap_or_else(|e| e.into_inner());
+    all.as_ref().and_then(|a| a.get(source)).copied().unwrap_or(0)
+}
+
 /// How long the scene waits before looking again while an image decodes.
 pub const BEAT: Duration = Duration::from_millis(16);
 
@@ -122,7 +138,7 @@ impl Images {
         at: f32,
     ) -> Option<(u64, Arc<Vec<u8>>, Option<f32>)> {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        ("image", source, width, height, fit, (radius * 4.0).round() as i32, (soften * 4.0).round() as i32, crop).hash(&mut h);
+        ("image", source, width, height, fit, (radius * 4.0).round() as i32, (soften * 4.0).round() as i32, crop, times_changed(source)).hash(&mut h);
         let key = h.finish();
         let frame = self.frame;
         if let Some((entry, used)) = self.cache.get_mut(&key) {

@@ -20,6 +20,8 @@ mod tls;
 mod websocket;
 mod auth;
 mod contours;
+mod directory;
+mod files;
 mod colour;
 mod scroll;
 mod profile;
@@ -27,9 +29,11 @@ pub mod dbus;
 mod dbus_serve;
 mod greetd;
 mod list;
+mod mime;
 mod values;
 pub mod io;
 mod svg;
+mod thumbnails;
 
 use genoma_core::{
     reactive::{Effect, Scope, Signal, current_owner, detached, on_cleanup, owned_by},
@@ -94,8 +98,9 @@ pub enum Input {
     /// corner: a progress line seeks to where it was pressed.
     Press(u32, f32, f32),
     Release(u32, f32, f32),
-    /// A press and a release on the same node.
-    Click(u32, f32, f32),
+    /// A press and a release on the same node, and which of several in a
+    /// row it is: 2 the second of a double click.
+    Click(u32, f32, f32, u32),
     /// The pointer moving while a button is held, to the node the press
     /// landed on, logical units from its top-left corner wherever the
     /// pointer has gone since: a rectangle being drawn.
@@ -164,7 +169,10 @@ pub enum Input {
 /// text when there was some, and where it fell, surface coordinates.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Dropped {
-    pub files: Vec<String>,
+    /// Byte for byte.
+    pub files: Vec<std::path::PathBuf>,
+    /// Agreed with the program it came from: moved, else copied.
+    pub moves: bool,
     pub uris: Vec<String>,
     pub text: Option<String>,
     pub x: f32,
@@ -1171,6 +1179,34 @@ impl UserData for ClipboardRef {
         methods.add_method("set_text", |_, this, text: String| {
             let types = TEXT_TYPES.iter().map(|t| t.to_string()).collect();
             this.0.ask(ClipboardRequest::Set { types, data: text.into_bytes() });
+            Ok(())
+        });
+        // clipboard:offer({ ["text/uri-list"] = "file:///…\r\n", … }): as
+        // many types as given, each with its own content.
+        methods.add_method("offer", |_, this, all: Table| {
+            let mut offered = Vec::new();
+            for pair in all.pairs::<String, mlua::LuaString>() {
+                let (mime, data) = pair?;
+                offered.push((mime, data.as_bytes().to_vec()));
+            }
+            this.0.ask(ClipboardRequest::Offer(offered));
+            Ok(())
+        });
+        // clipboard:read("text/uri-list", function(data) end): the current
+        // copy in one of its types; nil when it is not offered in it, or is
+        // not given whole.
+        methods.add_method("read", |_, this, (mime, f): (String, Function)| {
+            let owner = genoma_core::reactive::current_owner();
+            this.0.read_as(
+                &mime,
+                Box::new(move |data| {
+                    let Some(lua) = f.weak_lua().try_upgrade() else { return };
+                    match data.map(|d| lua.create_string(&d)).transpose() {
+                        Ok(data) => io::call(&f, "clipboard read", data, owner),
+                        Err(e) => log::error!("clipboard read: {e}"),
+                    }
+                }),
+            );
             Ok(())
         });
         // clipboard:set("image/png", "~/…/shot.png"): a file's content on the
@@ -2193,6 +2229,8 @@ pub struct Script {
     /// loads.
     dbus: Rc<RefCell<Option<Rc<dbus::Dbus>>>>,
     states: Rc<RefCell<HashMap<String, Signal<StateValue>>>>,
+    /// `@genoma/files`' jobs, kept across loads.
+    files: files::Shared,
     /// The load's own scope, which owns every module: a module is evaluated
     /// once per load and cached, so what it creates must live as long as the
     /// load, wherever it was first required from.
@@ -2290,6 +2328,7 @@ impl Script {
             host,
             dbus: Rc::default(),
             states: Rc::default(),
+            files: files::Shared::default(),
             module_owner: Rc::default(),
             services,
             wanted: Rc::default(),
@@ -2423,7 +2462,8 @@ impl Script {
                         f.call::<()>((key.name.as_str(), key.text.clone(), mods))
                     })(),
                     Input::Hover(entered) => f.call::<()>(*entered),
-                    Input::Press(b, x, y) | Input::Release(b, x, y) | Input::Click(b, x, y) => f.call::<()>((*b, *x, *y)),
+                    Input::Press(b, x, y) | Input::Release(b, x, y) => f.call::<()>((*b, *x, *y)),
+                    Input::Click(b, x, y, count) => f.call::<()>((*b, *x, *y, *count)),
                     Input::Drag(x, y) => f.call::<()>((*x, *y)),
                     Input::Move(x, y) => {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
@@ -2452,7 +2492,12 @@ impl Script {
                     Input::Drop(d) => (|| {
                         let lua = f.weak_lua().upgrade();
                         let t = lua.create_table()?;
-                        t.set("files", d.files.clone())?;
+                        let files = lua.create_table()?;
+                        for p in &d.files {
+                            files.raw_push(lua.create_string(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))?)?;
+                        }
+                        t.set("files", files)?;
+                        t.set("action", if d.moves { "move" } else { "copy" })?;
                         t.set("uris", d.uris.clone())?;
                         t.set("text", d.text.clone())?;
                         let (lx, ly) = scene.borrow().local(id, d.x, d.y);
@@ -2912,6 +2957,8 @@ impl Script {
                 io::folder(&host, t)
             })?,
         )?;
+        let (host, dir) = (self.host.clone(), self.dir.clone());
+        g.set("directory", lua.create_function(move |_, t: Table| directory::directory(&host, dir.clone(), t))?)?;
         // g.computed(fn), g.animated(value), g.json_set(text, path, value):
         // an interface's own modules (Bioma's core/ singletons).
         g.set("computed", lua.create_function(|_, f: Function| Ok(values::computed(f)))?)?;
@@ -3172,6 +3219,8 @@ impl Script {
         // g.sha256(data), g.base64.encode / decode, g.random_bytes(n):
         // bytes for protocols written in Luau.
         g.set("sha256", lua.create_function(bytes::sha256)?)?;
+        g.set("file_uri", lua.create_function(bytes::file_uri)?)?;
+        g.set("uri_path", lua.create_function(bytes::uri_path)?)?;
         let base64_table = lua.create_table()?;
         base64_table.set("encode", lua.create_function(bytes::encode)?)?;
         base64_table.set("decode", lua.create_function(bytes::decode)?)?;
@@ -3358,6 +3407,8 @@ impl Script {
         let wanted = self.wanted.clone();
         let module_owner = self.module_owner.clone();
         let mocks = self.mocks.clone();
+        let host = self.host.clone();
+        let jobs = self.files.clone();
         let cache: Table = lua.create_table()?;
         let require = lua.create_function(move |lua, name: String| -> mlua::Result<LuaValue> {
             if let Some(v) = cache.get::<Option<LuaValue>>(name.as_str())? {
@@ -3371,7 +3422,7 @@ impl Script {
                     owned_by(module_owner.get(), || lua.load(&source).set_name(format!("@{}", path.display())).eval())?
                 }
                 "@genoma" => LuaValue::Table(g.clone()),
-                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/capture" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" | "@genoma/portal" => {
+                "@genoma/clock" | "@genoma/niri" | "@genoma/compositor" | "@genoma/vitals" | "@genoma/power" | "@genoma/network" | "@genoma/media" | "@genoma/audio" | "@genoma/bluetooth" | "@genoma/toplevels" | "@genoma/displays" | "@genoma/gamma" | "@genoma/capture" | "@genoma/idle" | "@genoma/lock" | "@genoma/tray" | "@genoma/polkit" | "@genoma/notifications" | "@genoma/clipboard" | "@genoma/apps" | "@genoma/session" | "@genoma/spectrum" | "@genoma/brightness" | "@genoma/drives" | "@genoma/accounts" | "@genoma/portal" | "@genoma/mime" | "@genoma/thumbnails" | "@genoma/files" | "@genoma/trash" => {
                     let service = &name["@genoma/".len()..];
                     let key: &'static str = match service {
                         "clock" => "clock",
@@ -3399,6 +3450,10 @@ impl Script {
                         "drives" => "drives",
                         "accounts" => "accounts",
                         "portal" => "portal",
+                        "mime" => "mime",
+                        "thumbnails" => "thumbnails",
+                        "files" => "files",
+                        "trash" => "trash",
                         _ => "vitals",
                     };
                     if !wanted.borrow().contains(&key) {
@@ -3436,6 +3491,14 @@ impl Script {
                         "drives" => lua.create_userdata(DrivesRef(services.drives.clone()))?,
                         "accounts" => lua.create_userdata(AccountsRef(services.accounts.clone()))?,
                         "portal" => lua.create_userdata(PortalRef(services.portal.clone()))?,
+                        "mime" => lua.create_userdata(mime::MimeRef(services.apps.clone()))?,
+                        // Made once for all loads: a reload stops no job.
+                        "files" => lua.create_userdata(files::FilesRef(jobs.get(&host)?))?,
+                        "trash" => {
+                            let files = jobs.get(&host)?;
+                            lua.create_userdata(files::TrashRef(owned_by(module_owner.get(), || files::Trash::new(&host, files))?))?
+                        }
+                        "thumbnails" => lua.create_userdata(thumbnails::ThumbnailsRef(thumbnails::Thumbnails::new(&host, module_owner.get())?))?,
                         _ => lua.create_userdata(VitalsRef(services.vitals.clone()))?,
                     };
                     LuaValue::UserData(data)
@@ -3565,6 +3628,10 @@ pub const SERVICES: &[(&str, &str)] = &[
     ("drives", "Drives"),
     ("accounts", "Accounts"),
     ("portal", "Portal"),
+    ("mime", "Mime"),
+    ("thumbnails", "Thumbnails"),
+    ("files", "Files"),
+    ("trash", "Trash"),
 ];
 
 /// The kit's modules by name, as built in.
@@ -4130,7 +4197,7 @@ fn mount(
         if (each || list) && matches!(key.as_str(), "items" | "key" | "row") {
             continue;
         }
-        if list && matches!(key.as_str(), "row_height" | "reveal" | "on_scroll") {
+        if list && matches!(key.as_str(), "count" | "item" | "row_height" | "reveal" | "on_scroll") {
             continue;
         }
         if scrolls && key == "on_scroll" {

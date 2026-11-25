@@ -164,6 +164,8 @@ pub enum Prop {
     MoveWindow,
     DragFiles,
     DragText,
+    DragActions,
+    DropAction,
     BlurRadius,
     BackdropBlur,
     Backdrop,
@@ -428,8 +430,10 @@ pub const PROPS: &[PropInfo] = &[
     p("morph_timing", Prop::MorphTiming, Ty::Text, false, "The `g.timing` entry a `morph` moves on (`morph` by default; unset there, 0.35 s easing out)."),
     p("navigate", Prop::Navigate, Ty::Bool, false, "Inside it the keyboard walks, once its surface has the keys: Tab and Shift+Tab, or the arrows, move the focus among its buttons and sliders, shown by a ring; a focused slider takes Left and Right; Return and space press the focused node; a row of a g.list it reaches is scrolled into view. Other keys go to the focused node and on up to its ancestors' on_key."),
     p("focus_color", Prop::FocusColor, Ty::Color, false, "The ring round the focused node inside a `navigate` node."),
-    p("drag_files", Prop::DragFiles, Ty::Text, false, "Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line. A dock's application, a download, a picture."),
+    p("drag_files", Prop::DragFiles, Ty::Text, false, "Dragged from (pressed and moved a few units), it gives these files to the program it is dropped on, as text/uri-list: absolute paths, one a line, or `file://` URIs (`g.file_uri`, for a name that is not UTF-8). A dock's application, a download, a picture."),
     p("drag_text", Prop::DragText, Ty::Text, false, "Dragged from, it gives this text to the program it is dropped on."),
+    p("drag_actions", Prop::DragActions, Ty::Choice(&["copy", "move", "both"]), false, "What the program it is dropped on may do with what is dragged: `copy` (the default), `move` or either. The moving is the other's to do."),
+    p("drop_action", Prop::DropAction, Ty::Choice(&["copy", "move"]), false, "What an `on_drop` node would do with what is over it, for the pointer and the other program to say: `copy` (the default), or `move` where the other allows it. The drop says what was agreed, `action`."),
     p("move_window", Prop::MoveWindow, Ty::Bool, false, "In a g.window, pressing it moves the window, as a title bar does, and pressing it twice maximizes the window or gives back its size. A button inside it keeps its own press."),
     p("combine_soft", Prop::CombineSoft, Ty::Number, true, "How softly `combine` meets the other shape, logical units: 0 is a sharp edge; a union this soft grows a neck between shapes that come close."),
 ];
@@ -459,12 +463,12 @@ pub fn luau_definitions() -> String {
     out.push_str(&format!(
         "-- g.each: a box with a row per item, kept by key. `row` gets the item\n\
          -- and its place as functions, so a row whose key stays follows them.\n\
-         export type Each<T> = {{\n{fields}{SCROLLER}{EACH}}}\n\n"
+         export type Each<T> = {{\n{fields}{SCROLLER}{EACH}{EACH_ROW}}}\n\n"
     ));
     out.push_str(&format!(
         "-- g.list: a keyed list that scrolls, mounting only the rows in view.\n\
          -- Every row is row_height tall; the list needs a height of its own.\n\
-         export type List<T> = {{\n{fields}{EACH}{LIST}}}\n"
+         export type List<T> = {{\n{fields}{LIST_ITEMS}{EACH_ROW}{LIST}}}\n"
     ));
     out
 }
@@ -472,7 +476,10 @@ pub fn luau_definitions() -> String {
 // A list has an on_scroll of its own (LIST).
 const SCROLLER: &str = "    -- With `scroll`: where it has moved to, across and down.\n    on_scroll: ((x: number, y: number) -> ())?,\n";
 
-const EACH: &str = "    items: () -> { T },\n    key: (T) -> string | number,\n    row: (item: () -> T, index: () -> number) -> Node,\n";
+const EACH: &str = "    items: () -> { T },\n";
+// A list's items are all of them, or how many and each by its place.
+const LIST_ITEMS: &str = "    items: (() -> { T })?,\n    -- Instead of items: how many there are, and the one at a place (from\n    -- 1), asked for only as it comes into view. `count` is what the list\n    -- follows; what `item` reads is not.\n    count: (() -> number)?,\n    item: ((index: number) -> T)?,\n";
+const EACH_ROW: &str = "    key: (T) -> string | number,\n    row: (item: () -> T, index: () -> number) -> Node,\n";
 const LIST: &str = "    row_height: number,\n    -- A row's place, from 1: brought into view the least way.\n    reveal: (() -> number?)?,\n    -- Where it is scrolled to, and how far it can go.\n    on_scroll: ((offset: number, room: number) -> ())?,\n";
 
 /// Every node's fields: the properties, then what every node takes besides.
@@ -500,7 +507,7 @@ fn node_fields() -> String {
          \x20   -- Input, heard by the node and passed up to the nearest one that\n\
          \x20   -- listens (not hover, size, focus, change or submit). Buttons are\n\
          \x20   -- 272 left, 273 right, 274 middle; positions are the node's own.\n\
-         \x20   on_click: ((button: number, x: number, y: number) -> ())?,\n\
+         \x20   on_click: ((button: number, x: number, y: number, count: number) -> ())?,\n\
          \x20   on_press: ((button: number, x: number, y: number) -> ())?,\n\
          \x20   on_release: ((button: number, x: number, y: number) -> ())?,\n\
          \x20   -- How far the pointer is from where the press began.\n\
@@ -527,7 +534,7 @@ fn node_fields() -> String {
          \x20   on_submit: ((text: string) -> ())?,\n\
          \x20   -- Dropped on it, from another program or the shell: the files of a\n\
          \x20   -- uri-list as paths (and the URIs), or the text; where, from its corner.\n\
-         \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, x: number, y: number }) -> ())?,\n\
+         \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, action: \"copy\" | \"move\", x: number, y: number }) -> ())?,\n\
          \x20   -- Something being dragged came over it (true) or left.\n\
          \x20   on_drop_hover: ((over: boolean) -> ())?,\n\
          \x20   -- A drag began (past drag_threshold), where it was pressed; it\n\

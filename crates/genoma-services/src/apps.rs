@@ -126,12 +126,32 @@ impl Apps {
         find_in(&list, name).cloned()
     }
 
+    /// The application `id`, the ones the menu leaves out included.
+    pub fn entry(&self, id: &str) -> Option<App> {
+        self.entries(std::slice::from_ref(&id)).pop()
+    }
+
+    /// The applications of `ids` there are, in that order, the ones the
+    /// menu leaves out included: a handler opens files all the same.
+    pub fn entries(&self, ids: &[impl AsRef<str>]) -> Vec<App> {
+        let listed = genoma_core::reactive::untracked(|| self.all());
+        let (dirs, languages) = (data_dirs(), languages());
+        let found = ids.iter().filter_map(|id| {
+            let id = id.as_ref();
+            listed.iter().find(|a| a.id == id).cloned().or_else(|| {
+                // The first directory that has it, even hidden there, decides.
+                let file = dirs.iter().map(|d| d.join("applications").join(format!("{id}.desktop"))).find(|f| f.is_file())?;
+                parse_any(id, &fs::read_to_string(&file).ok()?, &languages, &file, false)
+            })
+        });
+        found.collect()
+    }
+
     /// Starts `id` (or its action `action`), with `files` for its %f/%F/%u/%U,
     /// detached from the shell, and counts it. With an activation `token`
     /// (`g.activation_token`), its window is given the focus.
     pub fn launch(&self, id: &str, action: Option<&str>, files: &[String], token: Option<&str>) -> Result<(), String> {
-        let list = genoma_core::reactive::untracked(|| self.all());
-        let app = list.iter().find(|a| a.id == id).ok_or_else(|| format!("no application {id}"))?;
+        let app = &self.entry(id).ok_or_else(|| format!("no application {id}"))?;
         let exec = match action {
             Some(a) => &app.actions.iter().find(|x| x.id == a).ok_or_else(|| format!("{id} has no action {a}"))?.exec,
             None => &app.exec,
@@ -197,7 +217,7 @@ fn state_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
 }
 
-fn data_dirs() -> Vec<PathBuf> {
+pub(crate) fn data_dirs() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut dirs = vec![std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(&home).join(".local/share"))];
     let system = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
@@ -207,7 +227,7 @@ fn data_dirs() -> Vec<PathBuf> {
 
 /// The user's languages, most specific first: `it_IT.UTF-8` gives
 /// `it_IT`, `it`.
-fn languages() -> Vec<String> {
+pub(crate) fn languages() -> Vec<String> {
     let raw = ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())).unwrap_or_default();
     let base = raw.split(['.', '@']).next().unwrap_or_default();
     if base.is_empty() || base == "C" || base == "POSIX" {
@@ -275,6 +295,12 @@ fn read_all(dirs: &[PathBuf], languages: &[String]) -> Vec<App> {
 /// A desktop file's application, or none for one hidden, not shown, or
 /// not an application.
 fn parse(id: &str, text: &str, languages: &[String], file: &Path) -> Option<App> {
+    parse_any(id, text, languages, file, true)
+}
+
+/// [`parse`]; with `shown` false also one the menu leaves out (`NoDisplay`,
+/// another desktop's): it opens files all the same.
+fn parse_any(id: &str, text: &str, languages: &[String], file: &Path, shown: bool) -> Option<App> {
     let mut groups: Vec<(String, HashMap<String, String>)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -296,7 +322,7 @@ fn parse(id: &str, text: &str, languages: &[String], file: &Path) -> Option<App>
         languages.iter().find_map(|l| fields.get(&format!("{k}[{l}]")).cloned()).unwrap_or_else(|| get(fields, k))
     };
     let yes = |k: &str| get(entry, k).eq_ignore_ascii_case("true");
-    if get(entry, "Type") != "Application" || yes("Hidden") || yes("NoDisplay") {
+    if get(entry, "Type") != "Application" || yes("Hidden") || (shown && yes("NoDisplay")) {
         return None;
     }
     // Only where the desktop says it belongs.
@@ -304,10 +330,10 @@ fn parse(id: &str, text: &str, languages: &[String], file: &Path) -> Option<App>
     let desktops: Vec<String> = desktop.split(':').filter(|d| !d.is_empty()).map(str::to_owned).collect();
     let listed = |k: &str| get(entry, k).split(';').filter(|s| !s.is_empty()).map(|s| s.to_lowercase()).collect::<Vec<_>>();
     let only = listed("OnlyShowIn");
-    if !only.is_empty() && !only.iter().any(|d| desktops.contains(d)) {
+    if shown && !only.is_empty() && !only.iter().any(|d| desktops.contains(d)) {
         return None;
     }
-    if listed("NotShowIn").iter().any(|d| desktops.contains(d)) {
+    if shown && listed("NotShowIn").iter().any(|d| desktops.contains(d)) {
         return None;
     }
     let list = |k: &str| local(entry, k).split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect();

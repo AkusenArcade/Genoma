@@ -22,6 +22,8 @@ pub const SWIPE_SPEED: f64 = 500.0;
 pub const WINDOW: Duration = Duration::from_millis(80);
 /// A long press when the timing set has no `long_press`.
 pub const LONG_PRESS: Duration = Duration::from_millis(500);
+/// The longest between two clicks in a row: GTK's and Qt's.
+pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// One press, from down to up.
 #[derive(Default)]
@@ -43,9 +45,26 @@ pub struct Press {
     /// Where the pointer was, recently, surface coordinates.
     pub samples: VecDeque<(Instant, f32, f32)>,
     pub timer: Option<RegistrationToken>,
+    /// The click before: when, on what, with which button, where, and which
+    /// in a row it was.
+    pub clicked: Option<(Instant, genoma_scene::NodeId, u32, f32, f32, u32)>,
 }
 
 impl Press {
+    /// A click now: which in a row it is, 2 the second of a double click.
+    pub fn clicked(&mut self, now: Instant, node: genoma_scene::NodeId, button: u32, x: f32, y: f32) -> u32 {
+        let count = match self.clicked {
+            Some((then, n, b, px, py, count))
+                if n == node && b == button && now.duration_since(then) <= DOUBLE_CLICK && (x - px).hypot(y - py) <= SLOP =>
+            {
+                count + 1
+            }
+            _ => 1,
+        };
+        self.clicked = Some((now, node, button, x, y, count));
+        count
+    }
+
     pub fn sample(&mut self, now: Instant, x: f32, y: f32) {
         self.samples.push_back((now, x, y));
         while self.samples.front().is_some_and(|s| now.duration_since(s.0) > WINDOW * 2) {

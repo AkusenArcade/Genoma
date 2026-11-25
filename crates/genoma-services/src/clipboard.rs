@@ -28,6 +28,8 @@ pub const TEXT_LIMIT: usize = 1 << 20;
 pub enum Request {
     /// Own the selection with these bytes, offered under these types.
     Set { types: Vec<String>, data: Vec<u8> },
+    /// Own the selection, each type with its own bytes.
+    Offer(Vec<(String, Vec<u8>)>),
     /// Own the selection with nothing on it.
     Clear,
     /// Write what the selection holds in this type to this file.
@@ -48,12 +50,18 @@ pub struct Clipboard {
     pub changed: Signal<u64>,
     /// What the interface asked since the runtime last looked.
     pub requests: RefCell<Vec<Request>>,
+    /// Readings of the current selection asked for since the runtime last
+    /// looked: in which type, and who is told.
+    readings: RefCell<Vec<Reading>>,
     /// The texts copied, the newest first, each once (copied again, it
     /// moves to the front), at most `history_limit` of them. Kept in
     /// memory only; a copy a password manager marks secret is left out.
     pub history: Signal<Vec<Copied>>,
     pub history_limit: std::cell::Cell<usize>,
 }
+
+/// The selection asked for in one type: the bytes, or none.
+pub type Reading = (String, Box<dyn FnOnce(Option<Vec<u8>>)>);
 
 /// One text in the history.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +82,20 @@ impl Clipboard {
 
     pub fn take_requests(&self) -> Vec<Request> {
         std::mem::take(&mut *self.requests.borrow_mut())
+    }
+
+    /// The current selection read in `mime`; none at once when it is not
+    /// offered in it.
+    pub fn read_as(&self, mime: &str, done: Box<dyn FnOnce(Option<Vec<u8>>)>) {
+        if self.types.get_untracked().is_some_and(|t| t.iter().any(|t| t == mime)) {
+            self.readings.borrow_mut().push((mime.to_owned(), done));
+        } else {
+            done(None);
+        }
+    }
+
+    pub fn take_readings(&self) -> Vec<Reading> {
+        std::mem::take(&mut *self.readings.borrow_mut())
     }
 
     /// A new selection, as the compositor announced it.
@@ -127,6 +149,7 @@ impl Default for Clipboard {
             history_limit: std::cell::Cell::new(50),
             changed: Signal::new(0),
             requests: RefCell::new(Vec::new()),
+            readings: RefCell::default(),
         }
     }
 }

@@ -6,6 +6,47 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Added
+
+- `@genoma/mime`: what a file is (the shared MIME database: names, then
+  magic for what they leave open), what its type is called, its icon, and
+  the applications that open it (`mimeapps.list`), with `set_default`.
+- `g.directory`: a folder for a file manager, read, sorted and filtered off
+  the loop, followed, with each entry's type; handed out a window at a
+  time. A folder of 50 000 files: 45 ms to the first rows, none of them on
+  the loop, and 7 ms for another order (`g.folder` and a sort in Luau:
+  230 ms, all of them on it).
+- `@genoma/thumbnails`: small pictures of files in the cache every
+  freedesktop program shares: PNG, JPEG, WebP, GIF and SVG made in the
+  process, the rest by the thumbnailers installed, in a bubblewrap sandbox
+  where there is one; made while something looks at them.
+- `@genoma/files`: copy, move, link, delete and trash as jobs: progress,
+  pause, cancel, and questions answered from Luau. Nothing is overwritten
+  without an answer; a file appears whole or not at all; what moves across
+  disks is removed only once its copy is on the disk and only if unchanged.
+  Also rename, new folder, new file, and a folder's size. Jobs outlive a
+  reload.
+- `@genoma/trash`: what was thrown away, on every disk, followed; restore,
+  erase, empty.
+- `clipboard:offer` (several types, each with its own content) and
+  `clipboard:read` (the current copy in any of its types).
+- `drag_actions` and `drop_action`: what is dragged or dropped may be moved,
+  and a drop says what was agreed (`action`). `drag_files` takes `file://`
+  URIs too, and a drop's `files` are byte for byte.
+- `on_click` is given which click in a row it is: 2 the second of a double.
+- `g.file_uri` and `g.uri_path`.
+- `g.list` takes `count` and `item` instead of `items`: only what comes
+  into view is asked for.
+- `apps:launch` starts an application the menu leaves out (`NoDisplay`)
+  too: a file's handler often is one.
+
+### Fixed
+
+- More changes in a watched folder than the kernel keeps (a large archive
+  unpacked): the folder is read again, rather than left as it was.
+
 ## 0.1.24 — 2026-11-25
 
 ### Added

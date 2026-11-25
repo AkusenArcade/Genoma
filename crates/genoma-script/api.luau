@@ -71,6 +71,52 @@ export type Folder = {
     stop: (self: Folder) -> (),
 }
 
+export type DirectoryEntry = {
+    -- For showing; a name that is not UTF-8 has its odd bytes replaced.
+    name: string,
+    -- Byte for byte, for opening.
+    path: string,
+    dir: boolean,
+    -- A symbolic link; the rest is what it points at.
+    link: boolean,
+    -- A link to nothing.
+    broken: boolean,
+    hidden: boolean,
+    executable: boolean,
+    -- Bytes; 0 for a folder.
+    size: number,
+    -- Seconds since 1970.
+    modified: number,
+    -- "image/png", as @genoma/mime has it. What the name leaves open is
+    -- told from the content a moment after the folder is shown.
+    mime: string,
+}
+
+export type Directory = {
+    -- How many entries are shown. A binding that reads it follows the
+    -- folder, a rename too.
+    read count: number,
+    -- How many there are, the hidden and the filtered out too.
+    read total: number,
+    -- The folder shown: the one asked for, once it is read.
+    read path: string,
+    -- The folder asked for is being read; the one before is shown still.
+    read loading: boolean,
+    -- Why it could not be read, in words ("not found", "permission
+    -- denied", "not a folder"), or nil.
+    read error: string?,
+    -- The entry at a place, from 1, or nil.
+    at: (self: Directory, index: number) -> DirectoryEntry?,
+    slice: (self: Directory, first: number, last: number) -> { DirectoryEntry },
+    -- The paths from a place to another; all of them.
+    paths: (self: Directory, first: number?, last: number?) -> { string },
+    -- An entry's place, or nil when it is not shown.
+    index: (self: Directory, path: string) -> number?,
+    -- Read whole again: for a filesystem that tells nobody when it changes.
+    reload: (self: Directory) -> (),
+    stop: (self: Directory) -> (),
+}
+
 export type Socket = {
     read connected: boolean,
     -- s:send("text\n"): as given; a line-delimited peer wants the newline.
@@ -400,6 +446,24 @@ export type G = {
     -- is in a folder, followed; hidden keeps dot-files, details adds size
     -- and modified to each entry.
     folder: (t: { path: string, watch: boolean?, hidden: boolean?, details: boolean? }) -> Folder,
+    -- g.directory { path, sort = "name", … }: a folder for a file manager:
+    -- read, sorted and filtered off the loop, followed, and handed out a
+    -- window at a time (g.list's count and item). Each option is a value
+    -- or a function, followed: path moves it to another folder, the others
+    -- show the same one differently. Names sort as people do (no case, no
+    -- accents, "2" before "10").
+    directory: (t: {
+        path: string | () -> string,
+        hidden: (boolean | () -> boolean)?,
+        sort: ("name" | "size" | "modified" | "type" | () -> string)?,
+        descending: (boolean | () -> boolean)?,
+        -- true
+        folders_first: (boolean | () -> boolean)?,
+        -- Only names containing it.
+        filter: (string | () -> string)?,
+        -- true: followed as it changes.
+        watch: boolean?,
+    }) -> Directory,
     -- g.socket { path, on_line, on_close }: a Unix socket, its input as
     -- lines. g.socket { host, port, on_open, on_line, on_close }: the same
     -- over TCP, connected off the loop; on_close(error) says why, when it
@@ -451,6 +515,11 @@ export type G = {
         port: number?,
         on_request: (request: ServedRequest) -> { status: number?, headers: { [string]: string }?, body: string? }?,
     }) -> Server,
+    -- g.file_uri("/a b") → "file:///a%20b".
+    file_uri: (path: string) -> string,
+    -- g.uri_path("file:///a%20b") → "/a b", byte for byte; nil for a URI
+    -- that is no file's.
+    uri_path: (uri: string) -> string?,
     -- g.sha256(data): the digest, 32 bytes (a Luau string carries bytes).
     sha256: (data: string) -> string,
     base64: {
@@ -866,6 +935,13 @@ export type Clipboard = {
     -- clipboard:set("image/png", "~/…/shot.png"): a file's content, offered
     -- as the type (or types) given.
     set: (self: Clipboard, types: string | { string }, path: string) -> (),
+    -- clipboard:offer({ ["text/uri-list"] = uris, ["text/plain"] = paths }):
+    -- as many types as given, each with its own content.
+    offer: (self: Clipboard, content: { [string]: string }) -> (),
+    -- clipboard:read("text/uri-list", function(data) … end): the current
+    -- copy in one of its `types`, up to 16 MiB; nil when it is not offered
+    -- in it or is larger.
+    read: (self: Clipboard, type: string, on_read: (data: string?) -> ()) -> (),
     clear: (self: Clipboard) -> (),
     -- clipboard:save("image/png", "~/…/1.png") → true when the copy is
     -- offered in that type.
@@ -1200,6 +1276,160 @@ export type Portal = {
     -- backend that fails without answering leaves the callback uncalled:
     -- xdg-desktop-portal-gnome on niri with more than one output does.
     screenshot: (self: Portal, options: { interactive: boolean? }?, on_taken: (path: string?, error: string?) -> ()) -> (),
+}
+
+-- @genoma/mime: what a file is and what opens it: the shared MIME database
+-- and mimeapps.list, as every freedesktop program reads them. Read again
+-- when they change.
+export type Mime = {
+    -- A file's type ("image/png", "inode/directory"): by its name, its
+    -- beginning read only when the name leaves it open.
+    of: (self: Mime, path: string) -> string,
+    -- What a name alone says, or nil; of several types, the likeliest.
+    of_name: (self: Mime, name: string) -> string?,
+    -- What a type is called, in the user's language: "PNG image".
+    description: (self: Mime, mime: string) -> string,
+    -- The icons that stand for it, the most precise first.
+    icon_names: (self: Mime, mime: string) -> { string },
+    -- The first of them the icon theme has, as a file, or nil.
+    icon: (self: Mime, mime: string) -> string?,
+    -- Whether a type is a kind of another: every source file is text/plain.
+    is_a: (self: Mime, mime: string, parent: string) -> boolean,
+    -- What opens it, the default first, then what opens what it is a kind
+    -- of; apps:launch(app.id, nil, { path }) opens a file with one.
+    apps: (self: Mime, mime: string) -> { AppEntry },
+    -- What opens it when nobody chooses, or nil.
+    default: (self: Mime, mime: string) -> AppEntry?,
+    -- The default from now on for every program, in the user's own
+    -- mimeapps.list; an error when the application does not exist.
+    set_default: (self: Mime, mime: string, id: string) -> (),
+}
+
+-- @genoma/thumbnails: small pictures of files, in the cache every
+-- freedesktop program shares. Made a few at a time, off the loop, while a
+-- binding looks at them: a row scrolled away before its turn is not made.
+export type Thumbnails = {
+    -- A file's thumbnail, a PNG for g.image: nil until it is made, or when
+    -- it has none. `size` is the longest side at most ("normal" 128,
+    -- "large" 256, the default, "x-large" 512, "xx-large" 1024). Give the
+    -- entry's `modified` and a file that changes is pictured again, and one
+    -- that has not is not looked at; its `mime` saves finding it out. Not
+    -- made of what is on a network, only shown when it is there already.
+    of: (self: Thumbnails, path: string, options: { size: ("normal" | "large" | "x-large" | "xx-large")?, modified: number?, mime: string? }?) -> string?,
+    -- Whether files of a type can have one.
+    can: (self: Thumbnails, mime: string) -> boolean,
+}
+
+export type FileSeen = { dir: boolean, size: number, modified: number }
+
+-- What only a person can say. `answers` are the ones it takes.
+export type FileQuestion = {
+    -- "exists": the name is taken; "failed": it could not be done;
+    -- "space": more than fits.
+    kind: "exists" | "failed" | "space",
+    -- "replace", "merge" (a folder into the one there), "keep_both",
+    -- "skip", "retry", "cancel". To "space", "skip" goes on anyway.
+    answers: { string },
+    path: string,
+    -- Of "exists": what is there.
+    to: string?,
+    source: FileSeen?,
+    target: FileSeen?,
+    -- Of "failed": why, in words.
+    error: string?,
+    -- Of "space", bytes.
+    needed: number?,
+    available: number?,
+}
+
+export type FileJob = {
+    id: number,
+    kind: "copy" | "move" | "link" | "delete" | "trash" | "restore" | "erase",
+    -- "waiting" for the ones before it; "finishing": the disk is writing
+    -- the last of it.
+    state: "waiting" | "preparing" | "running" | "paused" | "asking" | "finishing",
+    -- How many things were asked for, and the folder they go to.
+    count: number,
+    to: string?,
+    bytes: number,
+    total_bytes: number,
+    files: number,
+    total_files: number,
+    current: string,
+    -- Bytes a second, lately; across disks, as the disk takes them.
+    rate: number,
+    -- Seconds, as far as can be told.
+    remaining: number?,
+    question: FileQuestion?,
+}
+
+-- What came of a job: where each thing is now, what was left out (by an
+-- answer, or for what it is: a pipe, a device), and what a copy could not
+-- keep ("permissions", "times", "attributes", "changes" made meanwhile).
+export type FileResult = { cancelled: boolean, made: { string }, skipped: { string }, lost: { string } }
+
+export type FileMeasure = {
+    bytes: number,
+    -- Less where there are holes, more for small files.
+    on_disk: number,
+    files: number,
+    folders: number,
+    -- Folders that could not be read.
+    unread: number,
+}
+
+-- @genoma/files: what is done to files, as jobs. Nothing is overwritten
+-- without an answer, a file appears whole under its name or not at all, and
+-- what moves across disks is removed only once its copy is on the disk. One
+-- copies at a time, in the order asked; what only changes names does not
+-- wait. Jobs outlive a reload. Paths are absolute, byte for byte.
+export type Files = {
+    -- What is being done and what waits; one that ended is told to its
+    -- on_done and gone from here. A binding that reads it follows it all,
+    -- a few times a second while something is done.
+    read jobs: { FileJob },
+    -- Into a folder, each under its own name; copied into the folder it is
+    -- in, a thing becomes "name (2)". Gives the job's id.
+    copy: (self: Files, paths: { string }, to: string, on_done: ((result: FileResult) -> ())?) -> number,
+    move: (self: Files, paths: { string }, to: string, on_done: ((result: FileResult) -> ())?) -> number,
+    -- Symbolic links to them.
+    link: (self: Files, paths: { string }, to: string, on_done: ((result: FileResult) -> ())?) -> number,
+    -- For good: ask first.
+    delete: (self: Files, paths: { string }, on_done: ((result: FileResult) -> ())?) -> number,
+    trash: (self: Files, paths: { string }, on_done: ((result: FileResult) -> ())?) -> number,
+    pause: (self: Files, id: number) -> (),
+    resume: (self: Files, id: number) -> (),
+    -- What is whole stays, what is half made is taken away.
+    cancel: (self: Files, id: number) -> (),
+    -- `for_all`: and to every question of that kind this job asks.
+    answer: (self: Files, id: number, answer: string, for_all: boolean?) -> (),
+    -- At once, and never over another; the new path, or why not.
+    rename: (self: Files, path: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    make_folder: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    -- Why nothing can be called that, or nil: told as it is typed.
+    check_name: (self: Files, name: string) -> string?,
+    -- What is in them, counted off the loop; told of as it grows, then whole.
+    measure: (self: Files, paths: { string }, on_measured: (total: FileMeasure, whole: boolean) -> ()) -> Stoppable,
+}
+
+-- @genoma/trash: what was thrown away, in the home's trash and each disk's
+-- own, as every freedesktop file manager shares it; followed. files:trash
+-- puts things there.
+export type Trash = {
+    -- The latest first. `path` is where it was, `file` where it is and
+    -- what the rest here go by, `deleted` seconds since 1970.
+    read items: { { name: string, path: string, file: string, deleted: number, dir: boolean, size: number, mime: string } },
+    read count: number,
+    read loading: boolean,
+    -- Back where they were, their folder made again if it went too; a job
+    -- of @genoma/files.
+    restore: (self: Trash, files: { string }, on_done: ((result: FileResult) -> ())?) -> number,
+    -- For good: ask first.
+    erase: (self: Trash, files: { string }, on_done: ((result: FileResult) -> ())?) -> number,
+    empty: (self: Trash, on_done: ((result: FileResult) -> ())?) -> number,
+    -- Looked for again: a disk was plugged in.
+    reload: (self: Trash) -> (),
 }
 
 export type ChooserOptions = {

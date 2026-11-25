@@ -17,6 +17,16 @@ mod schema;
 mod vector;
 
 /// usvg, as `g.svg` reads documents with it.
+pub use images::changed as image_changed;
+
+/// What may be done with what a node gives when dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragActions {
+    Copy,
+    Move,
+    Both,
+}
+
 pub use resvg::{self, usvg};
 
 use std::{
@@ -391,6 +401,8 @@ pub struct Node {
     /// What dragging it gives another program: paths, one a line, and text.
     drag_files: Option<String>,
     drag_text: Option<String>,
+    drag_actions: DragActions,
+    drop_moves: bool,
 }
 
 impl Node {
@@ -574,6 +586,8 @@ impl Node {
             drop_target: false,
             drag_files: None,
             drag_text: None,
+            drag_actions: DragActions::Copy,
+            drop_moves: false,
         }
     }
 
@@ -1559,15 +1573,20 @@ impl Scene {
         raised.or(found)
     }
 
+    /// Whether what is dropped on `node` would be moved there.
+    pub fn drop_moves(&self, node: NodeId) -> bool {
+        self.tree.get_node_context(node).is_some_and(|n| n.drop_moves)
+    }
+
     /// What dragging `node` gives, from it or the nearest node around it
     /// that says: the files (paths) and the text.
-    pub fn drag_data(&self, node: NodeId) -> Option<(Vec<String>, Option<String>)> {
+    pub fn drag_data(&self, node: NodeId) -> Option<(Vec<String>, Option<String>, DragActions)> {
         let mut at = Some(node);
         while let Some(id) = at {
             let n = self.tree.get_node_context(id)?;
             if n.drag_files.is_some() || n.drag_text.is_some() {
                 let files = n.drag_files.as_deref().map(|f| f.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default();
-                return Some((files, n.drag_text.clone()));
+                return Some((files, n.drag_text.clone(), n.drag_actions));
             }
             at = self.parent(id);
         }
@@ -2364,6 +2383,14 @@ impl Scene {
                 n.drag_text = Some(take!(text)).filter(|t| !t.is_empty());
                 n.interactive |= n.drag_text.is_some();
             }
+            Prop::DragActions => {
+                n.drag_actions = match take!(text).as_str() {
+                    "move" => DragActions::Move,
+                    "both" => DragActions::Both,
+                    _ => DragActions::Copy,
+                }
+            }
+            Prop::DropAction => n.drop_moves = take!(text) == "move",
             Prop::MoveWindow => {
                 n.move_window = take!(flag);
                 // It takes the press even with no handler of its own.
