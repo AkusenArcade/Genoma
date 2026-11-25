@@ -1000,6 +1000,7 @@ fn run(dir: PathBuf, entry: Option<String>) {
     app.on_pan(move |target, node| panner.borrow().pans(target, node));
     app.on_focus(script.borrow().focus_queue());
     app.on_modifiers(script.borrow().modifiers());
+    app.on_pressed(script.borrow().pressed_at());
     app.on_activation(script.borrow().activation_queue());
     let pending = Rc::new(Cell::new(false));
     let timers = handle.clone();

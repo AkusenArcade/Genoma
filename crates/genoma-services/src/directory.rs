@@ -7,14 +7,14 @@
 //! so a change of a few names costs those names, and a new order no read.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{OsStr, OsString},
     fs,
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -28,7 +28,8 @@ const TELLING: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
-    /// As the system has it, byte for byte.
+    /// As the system has it, byte for byte. What was found below the folder
+    /// is called by its way from it: "a/b.txt".
     pub name: OsString,
     pub dir: bool,
     /// A symbolic link; what it points at decides the rest.
@@ -47,8 +48,22 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Itself, or something on the way to it.
     pub fn hidden(&self) -> bool {
-        self.name.as_bytes().first() == Some(&b'.')
+        self.name.as_bytes().split(|b| *b == b'/').any(|part| part.first() == Some(&b'.'))
+    }
+
+    /// Its own name, and the way to it from the folder when it is below.
+    pub fn leaf(&self) -> (&OsStr, Option<&OsStr>) {
+        let bytes = self.name.as_bytes();
+        match bytes.iter().rposition(|b| *b == b'/') {
+            Some(at) => (OsStr::from_bytes(&bytes[at + 1..]), Some(OsStr::from_bytes(&bytes[..at]))),
+            None => (&self.name, None),
+        }
+    }
+
+    fn matches(&self, filter: &str) -> bool {
+        folded(&self.leaf().0.to_string_lossy()).contains(filter)
     }
 
     /// The entry `name` of `dir` as it is now, or none.
@@ -60,7 +75,7 @@ impl Entry {
         let target = if link { fs::metadata(&path).ok() } else { None };
         let broken = link && target.is_none();
         let meta = target.unwrap_or(own);
-        let text = name.to_string_lossy();
+        let text = Path::new(name).file_name().unwrap_or(name).to_string_lossy();
         let (mime, unsure) = if broken {
             ("inode/symlink".into(), false)
         } else if let Some(kind) = special(&meta.file_type()) {
@@ -149,11 +164,13 @@ pub struct View {
     pub folders_first: bool,
     /// Only names containing it, whatever the case and the accents.
     pub filter: String,
+    /// With a filter, what is in the folders below too.
+    pub deep: bool,
 }
 
 impl Default for View {
     fn default() -> View {
-        View { hidden: false, by: By::Name, descending: false, folders_first: true, filter: String::new() }
+        View { hidden: false, by: By::Name, descending: false, folders_first: true, filter: String::new(), deep: false }
     }
 }
 
@@ -162,6 +179,8 @@ impl Default for View {
 pub struct Listing {
     pub path: PathBuf,
     entries: Vec<Arc<Entry>>,
+    /// What was found below it.
+    found: Vec<Arc<Entry>>,
     /// What is shown of them, in order.
     pub shown: Vec<Arc<Entry>>,
     /// Why it could not be read.
@@ -184,6 +203,12 @@ impl Cancel {
 impl Listing {
     pub fn total(&self) -> usize {
         self.entries.len()
+    }
+
+    fn next(&self, entries: Vec<Arc<Entry>>, found: Vec<Arc<Entry>>, view: &View) -> Listing {
+        let mut out = Listing { path: self.path.clone(), entries, found, shown: Vec::new(), error: self.error.clone() };
+        out.arrange(view);
+        out
     }
 
     /// The folder `path` read whole.
@@ -244,25 +269,51 @@ impl Listing {
                 }
             }
         }
-        if !changed {
+        // What was found in a folder that changed may have gone with it.
+        let names: HashSet<&OsStr> = names.iter().map(|n| n.as_os_str()).collect();
+        let first = |e: &Entry| Path::new(&e.name).iter().next().is_some_and(|n| names.contains(n));
+        let found: Vec<Arc<Entry>> =
+            self.found.iter().filter(|e| !first(e) || fs::symlink_metadata(self.path.join(&e.name)).is_ok()).cloned().collect();
+        if !changed && found.len() == self.found.len() {
             return None;
         }
-        let mut out =
-            Listing { path: self.path.clone(), entries: next.into_iter().flatten().collect(), shown: Vec::new(), error: self.error.clone() };
-        out.arrange(view);
-        Some(out)
+        Some(self.next(next.into_iter().flatten().collect(), found, view))
     }
 
-    /// The same entries in another view.
-    pub fn arranged(&self, view: &View) -> Listing {
-        let mut out = Listing { path: self.path.clone(), entries: self.entries.clone(), shown: Vec::new(), error: self.error.clone() };
+    /// The same folder with what else was found below it.
+    pub fn joined(&self, more: Vec<Arc<Entry>>, view: &View) -> Listing {
+        let mut found = self.found.clone();
+        {
+            let had: HashSet<&OsStr> = self.found.iter().map(|e| e.name.as_os_str()).collect();
+            found.extend(more.into_iter().filter(|e| !had.contains(e.name.as_os_str())));
+        }
+        // Several names looked for one after the other: the last one's only.
+        if found.len() > MOST * 2 {
+            let filter = folded(&view.filter);
+            found.retain(|e| e.matches(&filter));
+        }
+        self.next(self.entries.clone(), found, view)
+    }
+
+    /// The folder read whole, keeping what was found below it before: of
+    /// that, what is still there.
+    pub fn again(&self, view: &View, db: &Database, cancel: &Cancel) -> Listing {
+        let mut out = Listing::read(&self.path, view, db, cancel);
+        out.found = self.found.iter().filter_map(|e| Entry::read(&self.path, &e.name, db).map(Arc::new)).collect();
         out.arrange(view);
         out
     }
 
+    /// The same entries in another view.
+    pub fn arranged(&self, view: &View) -> Listing {
+        // What was found is kept for what is typed next, until nothing is.
+        let found = if view.deep && !view.filter.is_empty() { self.found.clone() } else { Vec::new() };
+        self.next(self.entries.clone(), found, view)
+    }
+
     /// Whether any entry's type waits on its content.
     pub fn unsure(&self) -> bool {
-        self.entries.iter().any(|e| e.unsure)
+        self.entries.iter().chain(&self.found).any(|e| e.unsure)
     }
 
     /// The types the names left open, from what the files hold, as many as
@@ -271,9 +322,9 @@ impl Listing {
     /// name's guess stays.
     pub fn told(&self, view: &View, db: &Database, cancel: &Cancel) -> Listing {
         let far = remote(&self.path);
-        let mut out = Listing { path: self.path.clone(), entries: self.entries.clone(), shown: Vec::new(), error: self.error.clone() };
+        let (mut entries, mut found) = (self.entries.clone(), self.found.clone());
         let started = Instant::now();
-        for e in &mut out.entries {
+        for e in entries.iter_mut().chain(&mut found) {
             if cancel.cancelled() || started.elapsed() > TELLING {
                 break;
             }
@@ -283,12 +334,11 @@ impl Listing {
             let mut next = (**e).clone();
             next.unsure = false;
             if !far {
-                next.mime = db.resolve(db.by_name(&e.name.to_string_lossy()), &self.path.join(&e.name), e.size);
+                next.mime = db.resolve(db.by_name(&e.leaf().0.to_string_lossy()), &self.path.join(&e.name), e.size);
             }
             *e = Arc::new(next);
         }
-        out.arrange(view);
-        out
+        self.next(entries, found, view)
     }
 
     fn arrange(&mut self, view: &View) {
@@ -296,10 +346,32 @@ impl Listing {
         let mut shown: Vec<Arc<Entry>> = self
             .entries
             .iter()
-            .filter(|e| (view.hidden || !e.hidden()) && (filter.is_empty() || folded(&e.name.to_string_lossy()).contains(&filter)))
+            .filter(|e| (view.hidden || !e.hidden()) && (filter.is_empty() || e.matches(&filter)))
             .cloned()
             .collect();
-        shown.sort_unstable_by(|a, b| {
+        if view.deep && !filter.is_empty() {
+            shown.extend(self.found.iter().filter(|e| (view.hidden || !e.hidden()) && e.matches(&filter)).cloned());
+        }
+        // Looked for, what is nearer is seen first: this folder's own, then
+        // those whose name begins so, then by how deep they are.
+        let depth = |e: &Entry| e.name.as_bytes().iter().filter(|b| **b == b'/').count();
+        let begins = |e: &Entry| folded(&e.leaf().0.to_string_lossy()).starts_with(&filter);
+        let far: HashMap<&OsStr, (bool, bool, usize)> = match view.deep && !filter.is_empty() {
+            true => shown.iter().map(|e| (e.name.as_os_str(), (depth(e) > 0, view.by == By::Name && !begins(e), depth(e)))).collect(),
+            false => HashMap::new(),
+        };
+        let mut order = shown.clone();
+        order.sort_unstable_by(|a, b| {
+            let near = match far.is_empty() {
+                true => std::cmp::Ordering::Equal,
+                false => {
+                    let (a, b) = (far[a.name.as_os_str()], far[b.name.as_os_str()]);
+                    a.0.cmp(&b.0).then(if a.0 { a.1.cmp(&b.1).then(if view.by == By::Name { a.2.cmp(&b.2) } else { std::cmp::Ordering::Equal }) } else { std::cmp::Ordering::Equal })
+                }
+            };
+            if near.is_ne() {
+                return near;
+            }
             let folders = if view.folders_first { b.dir.cmp(&a.dir) } else { std::cmp::Ordering::Equal };
             folders.then_with(|| {
                 let name = || a.key.cmp(&b.key).then_with(|| a.name.cmp(&b.name));
@@ -317,8 +389,122 @@ impl Listing {
                 }
             })
         });
-        self.shown = shown;
+        self.shown = order;
     }
+}
+
+/// The most that is looked for below a folder: past it, what is typed says
+/// too little.
+pub const MOST: usize = 10_000;
+
+/// What a search below a folder tells as it goes.
+pub struct Found {
+    pub entries: Vec<Arc<Entry>>,
+    /// Nothing more is coming.
+    pub done: bool,
+    /// Stopped at [`MOST`].
+    pub capped: bool,
+}
+
+/// How often what was found is told.
+const BATCH: Duration = Duration::from_millis(120);
+/// Reading folders is waiting for a disk: a few at a time.
+const WALKERS: usize = 4;
+
+/// The folders still to look in, nearest first, and how many are being.
+struct Ahead {
+    folders: VecDeque<OsString>,
+    open: usize,
+}
+
+/// What is below `path` whose name contains `filter`, told a few at a time.
+/// Links are not followed, hidden folders only with `hidden`, and no disk
+/// that is a network's is gone into.
+pub fn search(path: &Path, filter: &str, hidden: bool, db: &Database, cancel: &Cancel, tell: &(dyn Fn(Found) + Sync)) {
+    let filter = folded(filter);
+    if filter.is_empty() || remote(path) {
+        tell(Found { entries: Vec::new(), done: true, capped: false });
+        return;
+    }
+    let device = rustix::fs::stat(path).map(|s| s.st_dev).unwrap_or(0);
+    let ahead = Mutex::new(Ahead { folders: VecDeque::from([OsString::new()]), open: 0 });
+    let more = Condvar::new();
+    let batch = Mutex::new((Vec::new(), Instant::now()));
+    let count = AtomicUsize::new(0);
+    let over = || cancel.cancelled() || count.load(Ordering::Relaxed) >= MOST;
+    // What was found is told a few at a time, and before a long silence.
+    let flush = |push: Option<Arc<Entry>>| {
+        let mut b = batch.lock().unwrap();
+        b.0.extend(push);
+        if !b.0.is_empty() && b.1.elapsed() > BATCH {
+            b.1 = Instant::now();
+            let entries = std::mem::take(&mut b.0);
+            drop(b);
+            tell(Found { entries, done: false, capped: false });
+        }
+    };
+    let walk = || {
+        loop {
+            flush(None);
+            let folder = {
+                let mut a = ahead.lock().unwrap();
+                loop {
+                    if over() {
+                        more.notify_all();
+                        return;
+                    }
+                    if let Some(f) = a.folders.pop_front() {
+                        a.open += 1;
+                        break f;
+                    }
+                    if a.open == 0 {
+                        more.notify_all();
+                        return;
+                    }
+                    // Woken now and then, for a search that is for nothing.
+                    a = more.wait_timeout(a, Duration::from_millis(200)).unwrap().0;
+                }
+            };
+            let mut below: Vec<OsString> = Vec::new();
+            for e in fs::read_dir(path.join(&folder)).into_iter().flatten().flatten() {
+                if over() {
+                    break;
+                }
+                let name = e.file_name();
+                if !hidden && name.as_bytes().first() == Some(&b'.') {
+                    continue;
+                }
+                let way = Path::new(&folder).join(&name).into_os_string();
+                // Its own are the listing's.
+                if !folder.is_empty() && folded(&name.to_string_lossy()).contains(&filter)
+                    && let Some(entry) = Entry::read(path, &way, db)
+                {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    flush(Some(Arc::new(entry)));
+                }
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    // Another disk is gone into only when it is here.
+                    use std::os::unix::fs::MetadataExt;
+                    let at = path.join(&way);
+                    if e.metadata().is_ok_and(|m| m.dev() == device) || !(remote(&at) || of_the_kernel(&at)) {
+                        below.push(way);
+                    }
+                }
+            }
+            let mut a = ahead.lock().unwrap();
+            a.open -= 1;
+            a.folders.extend(below);
+            more.notify_all();
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..WALKERS {
+            s.spawn(walk);
+        }
+        walk();
+    });
+    let entries = std::mem::take(&mut batch.lock().unwrap().0);
+    tell(Found { entries, done: true, capped: count.load(Ordering::Relaxed) >= MOST });
 }
 
 /// Why a folder could not be read, in words.
@@ -347,6 +533,20 @@ pub fn remote(path: &Path) -> bool {
         FUSE => !on_a_drive(path),
         kind => [NFS, CIFS, SMB2, AFS, CEPH, V9FS].contains(&kind),
     }
+}
+
+/// Whether what is there is not files but the kernel speaking.
+fn of_the_kernel(path: &Path) -> bool {
+    const PROC: u64 = 0x9fa0;
+    const SYSFS: u64 = 0x6265_6572;
+    const CGROUP2: u64 = 0x6367_7270;
+    const DEBUGFS: u64 = 0x6462_6720;
+    const TRACEFS: u64 = 0x7472_6163;
+    const DEVPTS: u64 = 0x1cd1;
+    const MQUEUE: u64 = 0x1980_0202;
+    let Ok(fs_) = rustix::fs::statfs(path) else { return true };
+    let kind = fs_.f_type as u64 & 0xffff_ffff;
+    [PROC, SYSFS, CGROUP2, DEBUGFS, TRACEFS, DEVPTS, MQUEUE].contains(&kind)
 }
 
 /// Whether a FUSE filesystem is over a block device: `fuseblk` in the
@@ -440,6 +640,54 @@ mod tests {
         assert_eq!(why(&dir.join("none")).as_deref(), Some("not found"));
         assert_eq!(why(&dir.join("file")).as_deref(), Some("not a folder"));
         assert_eq!(why(&dir), None);
+    }
+
+    #[test]
+    fn what_is_below_is_found_nearest_first() {
+        let dir = scratch("deep");
+        for f in ["Report.txt", "other.txt", "a/my report.txt", "a/b/report 2.txt", "a/b/c/reports.md", ".hide/report.txt"] {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "x").unwrap();
+        }
+        fs::create_dir(dir.join("a/Report folder")).unwrap();
+        std::os::unix::fs::symlink("..", dir.join("a/loop")).unwrap();
+        let db = Database::default();
+        let mut view = View { filter: "REPORT".into(), deep: true, ..Default::default() };
+        let look = |hidden: bool| {
+            let all = Mutex::new((Vec::new(), 0));
+            search(&dir, "REPORT", hidden, &db, &cancel(), &|f: Found| {
+                let mut a = all.lock().unwrap();
+                a.0.extend(f.entries);
+                a.1 += f.done as usize;
+            });
+            let (found, done) = all.into_inner().unwrap();
+            assert_eq!(done, 1);
+            found
+        };
+        let l = Listing::read(&dir, &view, &db, &cancel());
+        assert_eq!(names(&l), ["Report.txt"]);
+        let found = look(false);
+        assert_eq!(found.len(), 4);
+        let l = l.joined(found, &view);
+        assert_eq!(names(&l), ["Report.txt", "a/Report folder", "a/b/report 2.txt", "a/b/c/reports.md", "a/my report.txt"]);
+        let (leaf, within) = l.shown[2].leaf();
+        assert_eq!((leaf, within), (OsStr::new("report 2.txt"), Some(OsStr::new("a/b"))));
+        // Found twice is found once; what is hidden, only when asked for.
+        let l = l.joined(look(true), &view);
+        assert_eq!(l.shown.len(), 5);
+        view.hidden = true;
+        assert_eq!(l.arranged(&view).shown.len(), 6);
+        // Another name keeps what still answers to it; none, nothing.
+        view.filter = "reports".into();
+        assert_eq!(names(&l.arranged(&view)), ["a/b/c/reports.md"]);
+        // What went is forgotten.
+        view.filter = "report".into();
+        fs::remove_dir_all(dir.join("a/b")).unwrap();
+        assert_eq!(l.updated(&["a".into()], &view, &db).unwrap().shown.len(), 4);
+        assert_eq!(l.again(&view, &db, &cancel()).shown.len(), 4);
+        view.filter.clear();
+        let l = l.arranged(&view);
+        assert!(l.found.is_empty() && l.shown.len() == 4);
     }
 
     #[test]

@@ -140,6 +140,7 @@ pub enum Prop {
     SelectionColor,
     CaretColor,
     Focused,
+    Select,
     Secret,
     D,
     Points,
@@ -393,6 +394,7 @@ pub const PROPS: &[PropInfo] = &[
     p("selection_color", Prop::SelectionColor, Ty::Color, false, "What is selected in a field, drawn behind its text; unset, the text's colour at a quarter."),
     p("caret_color", Prop::CaretColor, Ty::Color, false, "A field's caret; unset, the text's colour."),
     p("focused", Prop::Focused, Ty::Bool, false, "While true, a field takes the keys and shows its caret: typing, the editing keys, Ctrl+A/C/X/V/Z/Y. Return reaches on_submit; Escape, Tab, Up and Down go on to on_key."),
+    p("select", Prop::Select, Ty::Choice(&["none", "all", "stem"]), false, "What of a field is selected as it takes the keys (`focused`): nothing (`none`, the default, the caret at its end), `all`, or `stem`, a file's name without its ending."),
     p("secret", Prop::Secret, Ty::Bool, false, "A field drawn as a dot a character, and never copied out: a password."),
     p("overlay", Prop::Overlay, Ty::Bool, false, "Out of the parent's flow: laid over its siblings at the parent's alignment."),
     p("d", Prop::D, Ty::Text, true, "A path's outline as SVG path data (M, L, C, Q, A, Z…), in logical units from the node's top-left corner. Animated with a timing, it morphs: outlines with the same commands move point by point; others are first divided until they match, an approximation."),
@@ -534,9 +536,10 @@ fn node_fields() -> String {
          \x20   on_submit: ((text: string) -> ())?,\n\
          \x20   -- Dropped on it, from another program or the shell: the files of a\n\
          \x20   -- uri-list as paths (and the URIs), or the text; where, from its corner.\n\
-         \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, action: \"copy\" | \"move\", x: number, y: number }) -> ())?,\n\
-         \x20   -- Something being dragged came over it (true) or left.\n\
-         \x20   on_drop_hover: ((over: boolean) -> ())?,\n\
+         \x20   on_drop: ((drop: { files: { string }, uris: { string }, text: string?, action: \"copy\" | \"move\", own: boolean, x: number, y: number }) -> ())?,\n\
+         \x20   -- Something being dragged came over it (true) or left; own when it\n\
+         \x20   -- was dragged from this interface itself.\n\
+         \x20   on_drop_hover: ((over: boolean, own: boolean) -> ())?,\n\
          \x20   -- A drag began (past drag_threshold), where it was pressed; it\n\
          \x20   -- ended, at this speed, logical units a second.\n\
          \x20   on_drag_start: ((x: number, y: number) -> ())?,\n\

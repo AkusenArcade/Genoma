@@ -214,6 +214,7 @@ Each takes the properties below; a property given a function is a binding, re-ru
 | `selection_color` | colour |  | What is selected in a field, drawn behind its text; unset, the text's colour at a quarter. |
 | `caret_color` | colour |  | A field's caret; unset, the text's colour. |
 | `focused` | boolean |  | While true, a field takes the keys and shows its caret: typing, the editing keys, Ctrl+A/C/X/V/Z/Y. Return reaches on_submit; Escape, Tab, Up and Down go on to on_key. |
+| `select` | "none" \| "all" \| "stem" |  | What of a field is selected as it takes the keys (`focused`): nothing (`none`, the default, the caret at its end), `all`, or `stem`, a file's name without its ending. |
 | `secret` | boolean |  | A field drawn as a dot a character, and never copied out: a password. |
 | `overlay` | boolean |  | Out of the parent's flow: laid over its siblings at the parent's alignment. |
 | `d` | string | yes | A path's outline as SVG path data (M, L, C, Q, A, Z…), in logical units from the node's top-left corner. Animated with a timing, it morphs: outlines with the same commands move point by point; others are first divided until they match, an approximation. |
@@ -278,8 +279,8 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_focus_within`: `(x: number, y: number, width: number, height: number) -> ()`
 - `on_change`: `(text: string) -> ()`
 - `on_submit`: `(text: string) -> ()`
-- `on_drop`: `(drop: { files: { string }, uris: { string }, text: string?, action: "copy" | "move", x: number, y: number }) -> ()`
-- `on_drop_hover`: `(over: boolean) -> ()`
+- `on_drop`: `(drop: { files: { string }, uris: { string }, text: string?, action: "copy" | "move", own: boolean, x: number, y: number }) -> ()`
+- `on_drop_hover`: `(over: boolean, own: boolean) -> ()`
 - `on_drag_start`: `(x: number, y: number) -> ()`
 - `on_drag_end`: `(vx: number, vy: number) -> ()`
 - `on_long_press`: `(x: number, y: number, touch: boolean) -> boolean?`
@@ -481,7 +482,7 @@ g.folder { path, watch = true, hidden = false, details = false }: what is in a f
 ### `g.directory`
 
 ```luau
-directory: (t: { path: string | () -> string, hidden: (boolean | () -> boolean)?, sort: ("name" | "size" | "modified" | "type" | () -> string)?, descending: (boolean | () -> boolean)?, -- true folders_first: (boolean | () -> boolean)?, -- Only names containing it. filter: (string | () -> string)?, -- true: followed as it changes. watch: boolean? }) -> Directory
+directory: (t: { path: string | () -> string, hidden: (boolean | () -> boolean)?, sort: ("name" | "size" | "modified" | "type" | () -> string)?, descending: (boolean | () -> boolean)?, -- true folders_first: (boolean | () -> boolean)?, -- Only names containing it. filter: (string | () -> string)?, -- With a filter, what is in the folders below too, as it is found: -- this folder's own first, then the nearest. Links are not followed, -- hidden folders only with `hidden`, networks not gone into. deep: (boolean | () -> boolean)?, -- true: followed as it changes. watch: boolean? }) -> Directory
 ```
 
 g.directory { path, sort = "name", … }: a folder for a file manager: read, sorted and filtered off the loop, followed, and handed out a window at a time (g.list's count and item). Each option is a value or a function, followed: path moves it to another folder, the others show the same one differently. Names sort as people do (no case, no accents, "2" before "10").
@@ -699,6 +700,14 @@ modifiers: () -> { ctrl: boolean, shift: boolean, alt: boolean, logo: boolean }
 ```
 
 The modifiers held now, to read a press or a wheel step with: none while the keyboard is on no surface of the interface's. Reactive.
+
+### `g.pressed_at`
+
+```luau
+pressed_at: () -> (number, number)
+```
+
+Where on its surface the last press was, the pointer's or a finger's: where a menu opens.
 
 ### `g.focus_move`
 
@@ -1964,6 +1973,14 @@ launch: (self: Apps, id: string, action: string?, files: { string }?, token: str
 
 Started out of the shell's session (an action by its id, files for its %f and %u), in a terminal when it asks for one, and counted. token: from g.activation_token, so its window takes the focus.
 
+### `apps:terminal`
+
+```luau
+terminal: (self: Apps, folder: string, token: string?) -> ()
+```
+
+The desktop's terminal opened in a folder: xdg-terminal-exec, else $TERMINAL, else the first of the usual ones; an error with none.
+
 ### `apps:usage`
 
 ```luau
@@ -2618,6 +2635,14 @@ make_folder: (self: Files, folder: string, name: string, on_done: ((path: string
 make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> ()
 ```
 
+### `files:same_disk`
+
+```luau
+same_disk: (self: Files, paths: { string }, to: string, on_told: (same: boolean) -> ()) -> ()
+```
+
+Whether moving them into a folder only changes names: they are on its disk. Found out off the loop.
+
 ### `files:check_name`
 
 ```luau
@@ -2778,6 +2803,7 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 |---|---|---|
 | `name` | `string` | For showing; a name that is not UTF-8 has its odd bytes replaced. |
 | `path` | `string` | Byte for byte, for opening. |
+| `within` | `string?` | Found below the folder (`deep`): the way to it from there ("a/b"). |
 | `dir` | `boolean` |  |
 | `link` | `boolean` | A symbolic link; the rest is what it points at. |
 | `broken` | `boolean` | A link to nothing. |
@@ -2796,6 +2822,8 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `path` | `string` | The folder shown: the one asked for, once it is read. |
 | `loading` | `boolean` | The folder asked for is being read; the one before is shown still. |
 | `error` | `string?` | Why it could not be read, in words ("not found", "permission denied", "not a folder"), or nil. |
+| `searching` | `boolean` | With `deep`: the folders below are being looked in still; more was found there than is kept (10 000). |
+| `capped` | `boolean` |  |
 | `at` | `(self: Directory, index: number) -> DirectoryEntry?` | The entry at a place, from 1, or nil. |
 | `slice` | `(self: Directory, first: number, last: number) -> { DirectoryEntry }` |  |
 | `paths` | `(self: Directory, first: number?, last: number?) -> { string }` | The paths from a place to another; all of them. |

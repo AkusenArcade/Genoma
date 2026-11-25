@@ -17,7 +17,7 @@ use std::{
 
 use genoma_core::reactive::{Effect, Signal, batch, owned_by, untracked};
 use genoma_services::{
-    directory::{By, Cancel, Entry, Listing, View},
+    directory::{self, By, Cancel, Entry, Found, Listing, View},
     mime,
 };
 use mlua::{Lua, LuaString, Table, UserData, UserDataFields, UserDataMethods, Value as LuaValue};
@@ -32,6 +32,9 @@ use crate::{
 /// files is a few listings a second, not one a file.
 const SETTLE: Duration = Duration::from_millis(100);
 
+/// How long nothing is typed before the folders below are looked in.
+const PAUSE: Duration = Duration::from_millis(150);
+
 /// What there is to do, beside what is being done.
 #[derive(Default)]
 struct Due {
@@ -41,6 +44,17 @@ struct Due {
     names: BTreeSet<OsString>,
     /// The same entries in the view asked for now.
     arrange: bool,
+    /// What else was found below it.
+    found: Vec<Arc<Entry>>,
+}
+
+/// A search below the folder.
+#[derive(Default)]
+struct Search {
+    /// What it looks for: the filter, and whether hidden ones too.
+    asked: Option<(String, bool)>,
+    /// All of it was found.
+    whole: bool,
 }
 
 struct Inner {
@@ -59,6 +73,11 @@ struct Inner {
     /// Counts the folders asked for: a job for one before stops, and what
     /// it made is nobody's.
     asked: Arc<AtomicU64>,
+    /// Counts the searches, the same way.
+    searches: Arc<AtomicU64>,
+    search: RefCell<Search>,
+    searching: Signal<bool>,
+    capped: Signal<bool>,
     /// Where the jobs leave what they made.
     post: RefCell<Option<Post<Made>>>,
     /// The watch on the folder asked for.
@@ -68,10 +87,9 @@ struct Inner {
 
 /// What a job made: for which folder asked for, in which view; nothing when
 /// nothing changed, or why it broke.
-struct Made {
-    asked: u64,
-    view: View,
-    listing: Result<Option<Listing>, ()>,
+enum Made {
+    Listing { asked: u64, view: View, listing: Result<Option<Listing>, ()> },
+    Found { search: u64, found: Found },
 }
 
 impl Inner {
@@ -83,7 +101,7 @@ impl Inner {
         let shown = self.shown.borrow().clone();
         let current = shown.path == *self.path.borrow();
         let mut due = self.due.borrow_mut();
-        if !due.read && !due.arrange && due.names.is_empty() {
+        if !due.read && !due.arrange && due.names.is_empty() && due.found.is_empty() {
             return;
         }
         // Only what changed outside waits; what the person asks does not.
@@ -108,6 +126,9 @@ impl Inner {
         }
         let whole = due.read || !current;
         let names: Vec<OsString> = std::mem::take(&mut due.names).into_iter().collect();
+        let found = std::mem::take(&mut due.found);
+        // Read again, it is still the same search.
+        let again = current && due.read;
         *due = Due::default();
         drop(due);
         let (path, view) = (self.path.borrow().clone(), self.view.borrow().clone());
@@ -115,10 +136,15 @@ impl Inner {
         let sort = view.clone();
         self.start(view, move || {
             let db = mime::database();
+            let shown = if found.is_empty() { shown } else { Arc::new(shown.joined(found, &sort)) };
+            if again {
+                return Some(shown.again(&sort, &db, &cancel));
+            }
             if whole {
                 return Some(Listing::read(&path, &sort, &db, &cancel));
             }
-            if names.is_empty() { Some(shown.arranged(&sort)) } else { shown.updated(&names, &sort, &db) }
+            // A change with nothing in it still leaves what was found.
+            if names.is_empty() { Some(shown.arranged(&sort)) } else { shown.updated(&names, &sort, &db).or_else(|| Some(shown.arranged(&sort))) }
         });
     }
 
@@ -146,7 +172,7 @@ impl Inner {
         let thread = std::thread::Builder::new().name("genoma-directory".into()).spawn(move || {
             // A job that broke must not leave the folder waiting for it.
             let listing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|_| ());
-            post.send(Made { asked, view, listing });
+            post.send(Made::Listing { asked, view, listing });
         });
         if let Err(e) = thread {
             self.busy.set(false);
@@ -154,14 +180,94 @@ impl Inner {
         }
     }
 
+    /// The search the view asks for, begun when it is another than the one
+    /// made or under way.
+    fn look(self: &Rc<Self>, anew: bool) {
+        let view = self.view.borrow().clone();
+        let wanted = (view.deep && !view.filter.trim().is_empty()).then(|| (directory::folded(&view.filter), view.hidden));
+        {
+            let mut s = self.search.borrow_mut();
+            // All that has this name in it has the shorter one in it too.
+            let covered = match (&s.asked, &wanted) {
+                (Some(a), Some(b)) => a == b || (s.whole && a.1 == b.1 && b.0.contains(&a.0)),
+                (None, None) => true,
+                _ => false,
+            };
+            if covered && !anew {
+                // What is asked for next is measured against this.
+                return;
+            }
+            if !covered || anew {
+                *s = Search { asked: wanted.clone(), whole: false };
+            }
+        }
+        let search = self.searches.fetch_add(1, Ordering::Relaxed) + 1;
+        self.due.borrow_mut().found.clear();
+        batch(|| {
+            self.capped.set(false);
+            self.searching.set(wanted.is_some());
+        });
+        let Some((filter, hidden)) = wanted else { return };
+        let me = Rc::downgrade(self);
+        self.host.timer(
+            PAUSE,
+            Box::new(move || {
+                if let Some(me) = me.upgrade().filter(|m| m.searches.load(Ordering::Relaxed) == search && !m.stopped.get()) {
+                    me.begin(search, filter.clone(), hidden);
+                }
+                None
+            }),
+        );
+    }
+
+    fn begin(&self, search: u64, filter: String, hidden: bool) {
+        let Some(post) = self.post.borrow().clone() else { return };
+        let path = self.path.borrow().clone();
+        let cancel = Cancel { now: self.searches.clone(), started: search };
+        let thread = std::thread::Builder::new().name("genoma-search".into()).spawn(move || {
+            let last = post.clone();
+            let post = std::sync::Mutex::new(post);
+            let work = || {
+                directory::search(&path, &filter, hidden, &mime::database(), &cancel, &|found| {
+                    post.lock().unwrap().send(Made::Found { search, found });
+                });
+            };
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+                last.send(Made::Found { search, found: Found { entries: Vec::new(), done: true, capped: false } });
+            }
+        });
+        if let Err(e) = thread {
+            self.searching.set(false);
+            log::error!("g.directory: no thread: {e}");
+        }
+    }
+
     fn done(self: &Rc<Self>, made: Made) {
+        let (asked, view, listing) = match made {
+            Made::Listing { asked, view, listing } => (asked, view, listing),
+            Made::Found { search, found } => {
+                if search != self.searches.load(Ordering::Relaxed) || self.stopped.get() {
+                    return;
+                }
+                self.due.borrow_mut().found.extend(found.entries);
+                if found.done {
+                    self.search.borrow_mut().whole = !found.capped;
+                    batch(|| {
+                        self.capped.set(found.capped);
+                        self.searching.set(false);
+                    });
+                }
+                self.run();
+                return;
+            }
+        };
         // Another folder was asked for meanwhile, and did not wait.
-        if made.asked != self.asked() || self.stopped.get() {
+        if asked != self.asked() || self.stopped.get() {
             return;
         }
         self.busy.set(false);
-        match made.listing {
-            Ok(listing) => self.show(listing, &made.view),
+        match listing {
+            Ok(listing) => self.show(listing, &view),
             Err(()) => log::error!("g.directory {}: the reading stopped", self.path.borrow().display()),
         }
         self.run();
@@ -197,8 +303,12 @@ fn bytes(lua: &Lua, path: &std::path::Path) -> mlua::Result<LuaString> {
 }
 
 fn entry(lua: &Lua, listing: &Listing, e: &Entry) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 10)?;
-    t.raw_set("name", e.name.to_string_lossy().as_ref())?;
+    let t = lua.create_table_with_capacity(0, 11)?;
+    let (leaf, within) = e.leaf();
+    t.raw_set("name", leaf.to_string_lossy().as_ref())?;
+    if let Some(within) = within {
+        t.raw_set("within", within.to_string_lossy().as_ref())?;
+    }
     t.raw_set("path", bytes(lua, &listing.path.join(&e.name))?)?;
     t.raw_set("dir", e.dir)?;
     t.raw_set("link", e.link)?;
@@ -222,6 +332,10 @@ impl UserData for Directory {
         fields.add_field_method_get("path", |lua, this| bytes(lua, &this.0.read().path));
         // d.loading: the folder asked for is being read for the first time.
         fields.add_field_method_get("loading", |_, this| Ok(this.0.loading.try_get().unwrap_or(false)));
+        // d.searching: the folders below are being looked in.
+        fields.add_field_method_get("searching", |_, this| Ok(this.0.searching.try_get().unwrap_or(false)));
+        // d.capped: more was found there than is kept.
+        fields.add_field_method_get("capped", |_, this| Ok(this.0.capped.try_get().unwrap_or(false)));
         // d.error: why it could not be read, in words, or nil.
         fields.add_field_method_get("error", |_, this| Ok(this.0.read().error.clone()));
     }
@@ -257,22 +371,21 @@ impl UserData for Directory {
         methods.add_method("index", |_, this, path: LuaString| {
             let listing = this.0.read();
             let path = path_of(&path);
-            if path.parent() != Some(listing.path.as_path()) {
-                return Ok(None);
-            }
-            let name = path.file_name().map(|n| n.to_owned());
-            Ok(listing.shown.iter().position(|e| Some(&e.name) == name.as_ref()).map(|i| i + 1))
+            let Ok(name) = path.strip_prefix(&listing.path) else { return Ok(None) };
+            Ok(listing.shown.iter().position(|e| e.name == name.as_os_str()).map(|i| i + 1))
         });
         // d:reload(): read whole again (a filesystem that tells nobody when
         // it changes: a network's, some FUSE ones).
         methods.add_method("reload", |_, this, ()| {
             this.0.due.borrow_mut().read = true;
+            untracked(|| this.0.look(true));
             this.0.run();
             Ok(())
         });
         methods.add_method("stop", |_, this, ()| {
             this.0.stopped.set(true);
             this.0.asked.fetch_add(1, Ordering::Relaxed);
+            this.0.searches.fetch_add(1, Ordering::Relaxed);
             if let Some(watch) = this.0.watching.borrow_mut().take() {
                 watch.stop();
             }
@@ -283,7 +396,7 @@ impl UserData for Directory {
 }
 
 /// `g.directory { path, hidden, sort, descending, folders_first, filter,
-/// watch }`: each a value or a function, followed: `path` moves it to
+/// deep, watch }`: each a value or a function, followed: `path` moves it to
 /// another folder, the others show the same one differently.
 pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Directory> {
     let value = move |t: &Table, name: &str| -> mlua::Result<LuaValue> {
@@ -325,6 +438,7 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
             descending: yes("descending", false)?,
             folders_first: yes("folders_first", true)?,
             filter: text("filter")?.unwrap_or_default(),
+            deep: yes("deep", false)?,
         };
         Ok((path, view))
     };
@@ -344,6 +458,10 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
         last: Cell::new(None),
         waiting: Cell::new(false),
         asked: Arc::default(),
+        searches: Arc::default(),
+        search: RefCell::default(),
+        searching: Signal::new(false),
+        capped: Signal::new(false),
         post: RefCell::default(),
         watching: RefCell::default(),
         stopped: Cell::new(false),
@@ -374,6 +492,9 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
                 *me.path.borrow_mut() = path.clone();
                 me.asked.fetch_add(1, Ordering::Relaxed);
                 *me.due.borrow_mut() = Due { read: true, ..Default::default() };
+                *me.search.borrow_mut() = Search::default();
+                me.searches.fetch_add(1, Ordering::Relaxed);
+                me.searching.set(false);
                 // A folder on a mount that hangs holds its own thread only.
                 me.busy.set(false);
                 me.loading.set(true);
@@ -407,6 +528,7 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
             } else if turned {
                 me.due.borrow_mut().arrange = true;
             }
+            me.look(false);
             me.run();
         });
     });

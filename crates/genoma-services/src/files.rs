@@ -1494,6 +1494,13 @@ pub fn check_name(name: &OsStr) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether moving all of `paths` into `folder` is only changing names: they
+/// are on its disk.
+pub fn same_disk(paths: &[PathBuf], folder: &Path) -> bool {
+    let Ok(to) = fs::metadata(folder) else { return false };
+    paths.iter().all(|p| fs::symlink_metadata(p).is_ok_and(|m| m.dev() == to.dev()))
+}
+
 /// `path` called `name`, where it is; never over another.
 pub fn rename(path: &Path, name: &OsStr) -> Result<PathBuf, String> {
     check_name(name)?;

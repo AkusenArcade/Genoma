@@ -142,7 +142,7 @@ pub enum Input {
     /// the runtime found.
     Drop(Dropped),
     /// Something being dragged came over the node (true) or left it.
-    DropHover(bool),
+    DropHover(bool, bool),
     /// A drag began, past the node's `drag_threshold`: where it was pressed,
     /// local to the node pressed.
     DragStart(f32, f32),
@@ -175,6 +175,8 @@ pub struct Dropped {
     pub files: Vec<std::path::PathBuf>,
     /// Agreed with the program it came from: moved, else copied.
     pub moves: bool,
+    /// Dragged from this interface itself.
+    pub own: bool,
     pub uris: Vec<String>,
     pub text: Option<String>,
     pub x: f32,
@@ -199,7 +201,7 @@ impl Input {
             Input::Change(_) => "on_change",
             Input::Submit(_) => "on_submit",
             Input::Drop(_) => "on_drop",
-            Input::DropHover(_) => "on_drop_hover",
+            Input::DropHover(..) => "on_drop_hover",
             Input::Wheel(..) => "on_wheel",
             Input::Fling(..) => "on_fling",
             Input::DragStart(..) => "on_drag_start",
@@ -1325,6 +1327,10 @@ impl UserData for AppsRef {
                 this.0.launch(&id, action.as_deref(), &files.unwrap_or_default(), token.as_deref()).map_err(err)
             },
         );
+        // apps:terminal(folder, token?): the desktop's terminal, in a folder.
+        methods.add_method("terminal", |_, this, (folder, token): (mlua::LuaString, Option<String>)| {
+            this.0.terminal(&mime::path_of(&folder), token.as_deref()).map_err(err)
+        });
         // apps:usage(id) → { count, last }: how often and when last started.
         methods.add_method("usage", |lua, this, id: String| {
             let u = this.0.usage(&id);
@@ -2269,6 +2275,8 @@ pub struct Script {
     wishes_changed: Rc<std::cell::Cell<bool>>,
     focus: FocusQueue,
     modifiers: Signal<Modifiers>,
+    /// Where the last press was, on its surface.
+    pressed_at: Rc<std::cell::Cell<(f32, f32)>>,
     /// Modules to give in place of `@genoma/…` ones (`genoma snapshot
     /// --mock`): a test's fake service, by name, read from this path.
     mocks: Rc<RefCell<HashMap<String, PathBuf>>>,
@@ -2356,6 +2364,7 @@ impl Script {
             wishes_changed: Rc::default(),
             focus: (Rc::default(), Rc::default()),
             modifiers: detached(|| Signal::new(Modifiers::default())),
+            pressed_at: Rc::default(),
             mocks: Rc::default(),
             activation: Rc::default(),
             activation_waiting: Rc::default(),
@@ -2407,6 +2416,11 @@ impl Script {
                 Err(e.to_string())
             }
         }
+    }
+
+    /// Where the runtime says where the last press was.
+    pub fn pressed_at(&self) -> Rc<std::cell::Cell<(f32, f32)>> {
+        self.pressed_at.clone()
     }
 
     /// Where the runtime says which modifiers are held.
@@ -2505,7 +2519,8 @@ impl Script {
                     },
                     Input::Size(w, h) => f.call::<()>((*w, *h)),
                     Input::Change(text) | Input::Submit(text) => f.call::<()>(text.as_str()),
-                    Input::Focus(on) | Input::DropHover(on) => f.call::<()>(*on),
+                    Input::Focus(on) => f.call::<()>(*on),
+                    Input::DropHover(on, own) => f.call::<()>((*on, *own)),
                     Input::Drop(d) => (|| {
                         let lua = f.weak_lua().upgrade();
                         let t = lua.create_table()?;
@@ -2515,6 +2530,7 @@ impl Script {
                         }
                         t.set("files", files)?;
                         t.set("action", if d.moves { "move" } else { "copy" })?;
+                        t.set("own", d.own)?;
                         t.set("uris", d.uris.clone())?;
                         t.set("text", d.text.clone())?;
                         let (lx, ly) = scene.borrow().local(id, d.x, d.y);
@@ -2562,7 +2578,7 @@ impl Script {
             // included, so it never climbs to a parent here.
             if matches!(
                 input,
-                Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_) | Input::Drop(_) | Input::DropHover(_)
+                Input::Hover(_) | Input::Ready | Input::Size(..) | Input::Focus(_) | Input::Change(_) | Input::Submit(_) | Input::Drop(_) | Input::DropHover(..)
             ) {
                 return false;
             }
@@ -2903,6 +2919,10 @@ impl Script {
                 Ok(t)
             })?,
         )?;
+        // g.pressed_at() → x, y: where on its surface the last press was, of
+        // the pointer or a finger: where a menu opens.
+        let pressed_at = self.pressed_at.clone();
+        g.set("pressed_at", lua.create_function(move |_, ()| Ok(pressed_at.get()))?)?;
         // g.activation_token { app_id = "…", on_token = function(token) … end }:
         // a token from the compositor for a program about to start, its
         // window then given the focus (XDG_ACTIVATION_TOKEN in its

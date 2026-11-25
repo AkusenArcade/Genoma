@@ -68,6 +68,7 @@ enum Sent {
     Named(u64, Result<PathBuf, String>),
     /// What was counted so far, and whether it is all.
     Measured(u64, Measure, bool),
+    Told(u64, bool),
 }
 
 pub struct Files {
@@ -144,6 +145,12 @@ impl Files {
                 match args {
                     Ok(args) => call(&f, "files on_done", args, owner),
                     Err(e) => log::error!("files on_done: {e}"),
+                }
+            }
+            Sent::Told(id, yes) => {
+                let Some((f, owner)) = self.waiting.borrow_mut().remove(&id) else { return };
+                if f.weak_lua().try_upgrade().is_some() {
+                    call(&f, "files on_told", yes, owner);
                 }
             }
             Sent::Measured(id, m, whole) => {
@@ -404,6 +411,19 @@ impl UserData for FilesRef {
         methods.add_method("make_file", |_, this, (dir, name, f): (LuaString, LuaString, Option<Function>)| {
             let (dir, name) = (whole(&dir)?, OsStr::from_bytes(&name.as_bytes()).to_owned());
             this.0.named(move || files::make_file(&dir, &name), f)
+        });
+        // files:same_disk(paths, folder, function(same) end): whether moving
+        // them there only changes names.
+        methods.add_method("same_disk", |_, this, (list, folder, f): (Table, LuaString, Function)| {
+            let (list, folder) = (many(list)?, whole(&folder)?);
+            let Some(post) = this.0.post.borrow().clone() else { return Err(err("files: not started")) };
+            let id = this.0.id();
+            this.0.waiting.borrow_mut().insert(id, (f, current_owner()));
+            std::thread::Builder::new()
+                .name("genoma-files".into())
+                .spawn(move || post.send(Sent::Told(id, files::same_disk(&list, &folder))))
+                .map(|_| ())
+                .map_err(|e| err(format!("files: no thread: {e}")))
         });
         // files:check_name(name) → why a thing cannot be called that, or
         // nil: told as it is typed.

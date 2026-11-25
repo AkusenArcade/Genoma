@@ -76,6 +76,8 @@ export type DirectoryEntry = {
     name: string,
     -- Byte for byte, for opening.
     path: string,
+    -- Found below the folder (`deep`): the way to it from there ("a/b").
+    within: string?,
     dir: boolean,
     -- A symbolic link; the rest is what it points at.
     link: boolean,
@@ -105,6 +107,10 @@ export type Directory = {
     -- Why it could not be read, in words ("not found", "permission
     -- denied", "not a folder"), or nil.
     read error: string?,
+    -- With `deep`: the folders below are being looked in still; more was
+    -- found there than is kept (10 000).
+    read searching: boolean,
+    read capped: boolean,
     -- The entry at a place, from 1, or nil.
     at: (self: Directory, index: number) -> DirectoryEntry?,
     slice: (self: Directory, first: number, last: number) -> { DirectoryEntry },
@@ -472,6 +478,10 @@ export type G = {
         folders_first: (boolean | () -> boolean)?,
         -- Only names containing it.
         filter: (string | () -> string)?,
+        -- With a filter, what is in the folders below too, as it is found:
+        -- this folder's own first, then the nearest. Links are not followed,
+        -- hidden folders only with `hidden`, networks not gone into.
+        deep: (boolean | () -> boolean)?,
         -- true: followed as it changes.
         watch: boolean?,
     }) -> Directory,
@@ -588,6 +598,10 @@ export type G = {
     -- The modifiers held now, to read a press or a wheel step with: none
     -- while the keyboard is on no surface of the interface's. Reactive.
     modifiers: () -> { ctrl: boolean, shift: boolean, alt: boolean, logo: boolean },
+
+    -- Where on its surface the last press was, the pointer's or a finger's:
+    -- where a menu opens.
+    pressed_at: () -> (number, number),
 
     -- The keyboard's way through the open surface's buttons and sliders.
     focus_move: (by: number) -> (),
@@ -1160,6 +1174,9 @@ export type Apps = {
     -- its %f and %u), in a terminal when it asks for one, and counted.
     -- token: from g.activation_token, so its window takes the focus.
     launch: (self: Apps, id: string, action: string?, files: { string }?, token: string?) -> (),
+    -- The desktop's terminal opened in a folder: xdg-terminal-exec, else
+    -- $TERMINAL, else the first of the usual ones; an error with none.
+    terminal: (self: Apps, folder: string, token: string?) -> (),
     -- How often and when last it was started from here (seconds since the
     -- epoch), kept in $XDG_STATE_HOME/genoma/apps.json.
     usage: (self: Apps, id: string) -> { count: number, last: number },
@@ -1427,6 +1444,9 @@ export type Files = {
     rename: (self: Files, path: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_folder: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    -- Whether moving them into a folder only changes names: they are on
+    -- its disk. Found out off the loop.
+    same_disk: (self: Files, paths: { string }, to: string, on_told: (same: boolean) -> ()) -> (),
     -- Why nothing can be called that, or nil: told as it is typed.
     check_name: (self: Files, name: string) -> string?,
     -- What is in them, counted off the loop; told of as it grows, then whole.

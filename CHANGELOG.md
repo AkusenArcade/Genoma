@@ -47,6 +47,16 @@ changes what a shell sees.
 - `g.list` takes `reveal_margin`: how clear of its edges a row is brought.
 - `g.drag_picture`: what is seen under the pointer while something is dragged
   out of the interface, a tree drawn live.
+- `g.directory { deep = true }`: with a filter, what is in the folders below
+  too, as it is found, nearest first; `searching`, `capped`, and an entry's
+  `within`. A home of 730 000 files: 0.7 s.
+- `apps:terminal(folder)`: the desktop's terminal, in a folder.
+- `files:same_disk`: whether moving things somewhere only changes names.
+- `g.field { select = "stem" }` (or `"all"`): what is selected as it takes the
+  keys; a file's name without its ending.
+- `on_drop` and `on_drop_hover` say whether what is dragged is the interface's
+  own.
+- `g.pressed_at()`: where the last press was on its surface, for a menu.
 - `portal.icon_theme`: the icon theme's name, followed; once it changes,
   `g.icon_path` and `mime:icon` find icons in the new one.
 - `g.icon_path` and `mime:icon` take a size: the drawing the icon theme has
@@ -56,6 +66,9 @@ changes what a shell sees.
 
 ### Fixed
 
+- Files dragged and dropped on the same interface: more of them than a pipe
+  holds stopped it for good. A program slow to take what it is dropped no
+  longer holds the loop either.
 - A node turned (`rotate`, depth) while absent or faded to nothing turned what
   was drawn after it.
 - An interface of windows alone starts where there is no wlr-layer-shell

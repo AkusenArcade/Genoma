@@ -178,6 +178,9 @@ pub struct Node {
     caret_color: [f32; 4],
     focused: bool,
     secret: bool,
+    /// What is selected as it takes the keys, and whether it just has.
+    select: field::Select,
+    select_due: bool,
     /// Where a field's caret was last drawn, logical units in the surface:
     /// where an input method puts its candidates.
     caret_rect: Option<[f32; 4]>,
@@ -448,6 +451,8 @@ impl Node {
             caret_color: [0.0; 4],
             focused: false,
             secret: false,
+            select: field::Select::None,
+            select_due: false,
             caret_rect: None,
             pulse: 0.0,
             beat: 0.0,
@@ -588,6 +593,19 @@ impl Node {
             drag_text: None,
             drag_actions: DragActions::Copy,
             drop_moves: false,
+        }
+    }
+
+    /// A field that just took the keys: what it starts with selected, once
+    /// it has its text.
+    fn settle_selection(&mut self) {
+        if !std::mem::take(&mut self.select_due) {
+            return;
+        }
+        match (self.edit.as_mut(), self.select) {
+            (Some(e), field::Select::All) => e.select_all(),
+            (Some(e), field::Select::Stem) => e.select_stem(),
+            _ => {}
         }
     }
 
@@ -1406,6 +1424,7 @@ impl Scene {
     /// A key for the field: what it did.
     pub fn field_key(&mut self, node: NodeId, name: &str, typed: Option<&str>, ctrl: bool, shift: bool) -> Option<field::Outcome> {
         let n = self.tree.get_node_context_mut(node)?;
+        n.settle_selection();
         let secret = n.secret;
         let out = n.edit.as_mut()?.key(name, typed, ctrl, shift, secret);
         if out.used {
@@ -2157,7 +2176,18 @@ impl Scene {
             Prop::PlaceholderColor => n.placeholder_color = take!(colour),
             Prop::SelectionColor => n.selection_color = take!(colour),
             Prop::CaretColor => n.caret_color = take!(colour),
-            Prop::Focused => n.focused = take!(flag),
+            Prop::Focused => {
+                let on = take!(flag);
+                n.select_due = on && (n.select_due || !n.focused);
+                n.focused = on;
+            }
+            Prop::Select => {
+                n.select = match take!(text).as_str() {
+                    "all" => field::Select::All,
+                    "stem" => field::Select::Stem,
+                    _ => field::Select::None,
+                }
+            }
             Prop::Secret => (n.secret, reshape) = (take!(flag), true),
             Prop::FontSize => (n.font_size, reshape) = (take!(number), true),
             Prop::Font => (n.font, reshape) = (Some(take!(text)), true),
@@ -3257,6 +3287,7 @@ fn flat(origin: [f32; 2], size: [f32; 2], radius: f32, fill: [f32; 4], out: &Out
 /// a fixed rate is motion with nothing behind it.
 fn draw_field(fonts: &mut ct::FontSystem, n: &mut Node, origin: [f32; 2], layout: &taffy::Layout, scale: f32, alpha: f32, out: &mut Out) {
     let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
+    n.settle_selection();
     let buffer = shape(fonts, n);
     let Some(display) = n.edit.as_ref().map(|e| e.display(n.secret)) else { return };
     let empty = display.text.is_empty();

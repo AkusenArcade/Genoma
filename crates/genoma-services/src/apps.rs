@@ -165,25 +165,17 @@ impl Apps {
             wrapped.append(&mut command);
             command = wrapped;
         }
-        // In a session of its own (setsid -f): not the shell's child, so it
-        // outlives a reload and is never left a zombie.
-        let mut process = std::process::Command::new("setsid");
-        process.arg("-f").args(&command).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        if !app.path.is_empty() {
-            process.current_dir(&app.path);
-        }
-        // What the shell was started with is its own, not the application's.
-        process.env_remove("GENOMA_IPC").env_remove("GENOMA_LOG").env_remove("DESKTOP_STARTUP_ID").env_remove("XDG_ACTIVATION_TOKEN");
-        // Its own token, under both names: Wayland's and the older one
-        // GTK 3 and others still read.
-        if let Some(token) = token {
-            process.env("XDG_ACTIVATION_TOKEN", token).env("DESKTOP_STARTUP_ID", token);
-        }
-        let mut child = process.spawn().map_err(|e| format!("{id}: {e}"))?;
-        // setsid -f returns at once, its child forked away.
-        let _ = child.wait();
+        start(&command, Path::new(&app.path), token).map_err(|e| format!("{id}: {e}"))?;
         self.count(id);
         Ok(())
+    }
+
+    /// The desktop's terminal, opened in `folder`.
+    pub fn terminal(&self, folder: &Path, token: Option<&str>) -> Result<(), String> {
+        if !has_terminal() {
+            return Err("no terminal is installed".into());
+        }
+        start(&["sh".to_owned(), "-c".to_owned(), A_TERMINAL.to_owned()], folder, token).map_err(|e| format!("terminal: {e}"))
     }
 
     fn count(&self, id: &str) {
@@ -197,6 +189,47 @@ impl Apps {
             write_usage(file, &self.usage.borrow());
         }
     }
+}
+
+/// Starts a command in a session of its own (setsid -f): not the shell's
+/// child, so it outlives a reload and is never left a zombie.
+fn start(command: &[String], folder: &Path, token: Option<&str>) -> std::io::Result<()> {
+    let mut process = std::process::Command::new("setsid");
+    process.arg("-f").args(command).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    if !folder.as_os_str().is_empty() {
+        process.current_dir(folder);
+    }
+    // What the shell was started with is its own, not the application's.
+    process.env_remove("GENOMA_IPC").env_remove("GENOMA_LOG").env_remove("DESKTOP_STARTUP_ID").env_remove("XDG_ACTIVATION_TOKEN");
+    // Its own token, under both names: Wayland's and the older one
+    // GTK 3 and others still read.
+    if let Some(token) = token {
+        process.env("XDG_ACTIVATION_TOKEN", token).env("DESKTOP_STARTUP_ID", token);
+    }
+    // setsid -f returns at once, its child forked away.
+    process.spawn()?.wait().map(|_| ())
+}
+
+/// The terminals tried after the desktop's own choice.
+const TERMINALS: &str = "kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm";
+
+/// The same, for a shell in the folder it is started in: those that would
+/// open in the home folder are told which.
+const A_TERMINAL: &str = "if command -v xdg-terminal-exec >/dev/null 2>&1; then exec xdg-terminal-exec --dir=\"$PWD\"; fi; \
+    for t in \"$TERMINAL\" kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm; do \
+    [ -n \"$t\" ] && command -v \"$t\" >/dev/null 2>&1 || continue; \
+    case \"${t##*/}\" in \
+    ghostty|gnome-terminal) exec \"$t\" --working-directory=\"$PWD\";; \
+    konsole) exec \"$t\" --workdir \"$PWD\";; \
+    wezterm) exec \"$t\" start --cwd \"$PWD\";; \
+    *) exec \"$t\";; esac; done; exit 1";
+
+fn has_terminal() -> bool {
+    let named = std::env::var("TERMINAL").unwrap_or_default();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    ["xdg-terminal-exec", named.as_str()].into_iter().chain(TERMINALS.split(' ')).filter(|t| !t.is_empty()).any(|t| {
+        if t.contains('/') { Path::new(t).exists() } else { std::env::split_paths(&path).any(|d| d.join(t).exists()) }
+    })
 }
 
 /// The desktop's terminal, asked the way the freedesktop proposal asks it

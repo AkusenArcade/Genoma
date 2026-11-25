@@ -429,6 +429,8 @@ pub struct App {
     focus: Option<genoma_script::FocusQueue>,
     /// What the interface reads `g.modifiers()` from.
     modifiers_told: Option<genoma_core::reactive::Signal<genoma_script::Modifiers>>,
+    /// What it reads `g.pressed_at()` from.
+    pressed_told: Option<Rc<std::cell::Cell<(f32, f32)>>>,
     /// Surfaces the compositor gave another area than their trees were
     /// built for (another surface took or let go of a zone): each is built
     /// again on its own, the rest of the interface untouched.
@@ -563,6 +565,7 @@ impl App {
             pans: None,
             focus: None,
             modifiers_told: None,
+            pressed_told: None,
             drag: None,
             areas_changed: Vec::new(),
             outputs_changed: false,
@@ -1532,12 +1535,13 @@ impl App {
     fn drag_over(&mut self, i: usize, x: f32, y: f32) {
         let target = self.surfaces[i].scene.borrow().drop_target_at(x, y);
         let before = self.dnd.as_ref().filter(|d| d.surface == i).and_then(|d| d.target);
+        let own = self.drag_source.is_some();
         if before != target {
             if let Some(old) = before {
-                self.deliver(i, old, Input::DropHover(false));
+                self.deliver(i, old, Input::DropHover(false, own));
             }
             if let Some(new) = target {
-                self.deliver(i, new, Input::DropHover(true));
+                self.deliver(i, new, Input::DropHover(true, own));
             }
         }
         self.dnd = Some(DragOver { surface: i, target, x, y });
@@ -1563,7 +1567,8 @@ impl App {
         if let Some(DragOver { surface, target: Some(node), .. }) = self.dnd.take()
             && surface < self.surfaces.len()
         {
-            self.deliver(surface, node, Input::DropHover(false));
+            let own = self.drag_source.is_some();
+            self.deliver(surface, node, Input::DropHover(false, own));
         }
     }
 
@@ -1608,6 +1613,11 @@ impl App {
     /// Where the interface reads the modifiers held now.
     pub fn on_modifiers(&mut self, told: genoma_core::reactive::Signal<genoma_script::Modifiers>) {
         self.modifiers_told = Some(told);
+    }
+
+    /// Where the interface reads where the last press was.
+    pub fn on_pressed(&mut self, told: Rc<std::cell::Cell<(f32, f32)>>) {
+        self.pressed_told = Some(told);
     }
 
     fn tell_modifiers(&self, m: Modifiers) {
@@ -2660,6 +2670,9 @@ impl App {
         let scene = self.surfaces[i].scene.clone();
         self.input_serial = serial;
         self.input_surface = self.surfaces[i].role.wl_surface().cloned();
+        if let Some(told) = &self.pressed_told {
+            told.set((x, y));
+        }
         // The pointer takes over from the keyboard's walk: its ring goes.
         if self.walk_scope(i).is_some()
             && let Some(f) = self.surfaces[i].focused.take()
@@ -3364,6 +3377,18 @@ fn uri_list(text: &str) -> (Vec<String>, Vec<std::path::PathBuf>) {
     (uris, files)
 }
 
+/// What was dropped, from what was read of it in `mime`.
+fn dropped_of(mime: &str, data: &[u8], over: DragOver, moves: bool, own: bool) -> genoma_script::Dropped {
+    let text = String::from_utf8_lossy(data).into_owned();
+    let mut dropped = genoma_script::Dropped { x: over.x, y: over.y, moves, own, ..Default::default() };
+    if mime == "text/uri-list" {
+        (dropped.uris, dropped.files) = uri_list(&text);
+    } else {
+        dropped.text = Some(text);
+    }
+    dropped
+}
+
 impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_device::WlDataDevice, x: f64, y: f64, surface: &wl_surface::WlSurface) {
         self.drag_gone();
@@ -3395,6 +3420,19 @@ impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler
             self.drag_gone();
             return;
         };
+        let moves = offer.selected_action.contains(smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction::Move);
+        // Our own: what is in it is here, and both ends of a pipe on one
+        // loop would wait for each other past what a pipe holds.
+        let ours = self.drag_source.as_ref().and_then(|(_, offered)| offered.iter().find(|(m, _)| *m == mime).map(|(_, d)| d.clone()));
+        if let Some(data) = ours {
+            let dropped = dropped_of(&mime, &data, over, moves, true);
+            log::debug!("surface {}: dropped {} files of ours", self.surfaces[over.surface].id, dropped.files.len());
+            self.deliver(over.surface, target, Input::Drop(dropped));
+            offer.finish();
+            offer.destroy();
+            self.drag_gone();
+            return;
+        }
         let pipe = match offer.receive(mime.clone()) {
             Ok(pipe) => pipe,
             Err(e) => {
@@ -3411,8 +3449,6 @@ impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler
             return;
         }
         let surface_id = self.surfaces[over.surface].id;
-        // What the compositor settled on, of what both offered.
-        let moves = offer.selected_action.contains(smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction::Move);
         let mut read = Vec::new();
         let inserted = handle.insert_source(Generic::new(pipe, Interest::READ, Mode::Level), move |_, fd, app: &mut App| {
             let mut chunk = [0u8; 16384];
@@ -3426,13 +3462,7 @@ impl smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler
                     Err(_) => break,
                 }
             }
-            let text = String::from_utf8_lossy(&read).into_owned();
-            let mut dropped = genoma_script::Dropped { x: over.x, y: over.y, moves, ..Default::default() };
-            if mime == "text/uri-list" {
-                (dropped.uris, dropped.files) = uri_list(&text);
-            } else {
-                dropped.text = Some(text);
-            }
+            let dropped = dropped_of(&mime, &read, over, moves, false);
             if let Some(i) = app.surfaces.iter().position(|s| s.id == surface_id) {
                 log::debug!("surface {surface_id}: dropped {} files", dropped.files.len());
                 app.deliver(i, target, Input::Drop(dropped));
@@ -3472,11 +3502,20 @@ impl smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler
     ) {
         use std::io::Write;
         log::debug!("drag: asked for {mime}");
+        // Off the loop: past what a pipe holds it waits for the other
+        // program, which may be in no hurry.
         if let Some((_, offered)) = &self.drag_source
             && let Some((_, data)) = offered.iter().find(|(m, _)| *m == mime)
-            && let Err(e) = fd.write_all(data)
         {
-            log::warn!("drag: {e}");
+            let data = data.clone();
+            let given = std::thread::Builder::new().name("genoma-drag".into()).spawn(move || {
+                if let Err(e) = fd.write_all(&data) {
+                    log::warn!("drag: {e}");
+                }
+            });
+            if let Err(e) = given {
+                log::warn!("drag: no thread: {e}");
+            }
         }
     }
 

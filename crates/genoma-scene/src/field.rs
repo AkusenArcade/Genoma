@@ -60,6 +60,15 @@ pub struct Editor {
     clicks: Option<(Instant, usize)>,
 }
 
+/// What of a field is selected as it takes the keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Select {
+    #[default]
+    None,
+    All,
+    Stem,
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -199,6 +208,20 @@ impl Editor {
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.text.len();
+        self.run = None;
+    }
+
+    /// A file's name without its ending: what a rename starts with. A name
+    /// that is all ending (".profile") is selected whole.
+    pub fn select_stem(&mut self) {
+        let dot = self.text.rfind('.').filter(|i| *i > 0);
+        // "x.tar.gz" ends in both.
+        let dot = dot.map(|i| match self.text[..i].rfind(".tar") {
+            Some(j) if j > 0 && j + 4 == i => j,
+            _ => i,
+        });
+        self.anchor = Some(0);
+        self.caret = dot.unwrap_or(self.text.len());
         self.run = None;
     }
 
@@ -394,6 +417,16 @@ mod tests {
 
     fn key(e: &mut Editor, name: &str) -> Outcome {
         e.key(name, None, false, false, false)
+    }
+
+    #[test]
+    fn a_rename_starts_with_the_name_and_not_its_ending() {
+        for (text, stem) in [("photo.jpg", "photo"), ("a.tar.gz", "a"), (".profile", ".profile"), ("README", "README"), ("v1.2.zip", "v1.2"), ("x.gz", "x")] {
+            let mut e = Editor::default();
+            e.set_text(text);
+            e.select_stem();
+            assert_eq!(e.selected(), stem, "{text}");
+        }
     }
 
     #[test]
