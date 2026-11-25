@@ -183,8 +183,7 @@ impl TouchHandler for App {
                 // A finger on a list still moving stops it, as fingers
                 // resting on a touchpad do; that touch is no click.
                 let stopped = hit.is_some_and(|h| self.deliver(i, h, Input::Hold(true)));
-                self.pointer_press(i, hit, x, y, 0x110, serial);
-                self.surfaces[i].press.touch = true;
+                self.pointer_press(i, hit, x, y, 0x110, true, serial);
                 self.surfaces[i].press.stopped = stopped;
             }
             // A second finger on the same surface: what the first pressed

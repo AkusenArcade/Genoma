@@ -41,6 +41,9 @@ changes what a shell sees.
   after the arguments, and `queue = true` waits for a name that is taken.
 - `g.list` takes `count` and `item` instead of `items`: only what comes
   into view is asked for.
+- `on_press` and `on_long_press` are told last whether a finger on a screen
+  made the press; a long press answered `false` is not taken, and is a click
+  still.
 - `portal.icon_theme`: the icon theme's name, followed; once it changes,
   `g.icon_path` and `mime:icon` find icons in the new one.
 - `g.icon_path` and `mime:icon` take a size: the drawing the icon theme has

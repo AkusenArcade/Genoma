@@ -263,7 +263,7 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 ## Input
 
 - `on_click`: `(button: number, x: number, y: number, count: number) -> ()`
-- `on_press`: `(button: number, x: number, y: number) -> ()`
+- `on_press`: `(button: number, x: number, y: number, touch: boolean) -> ()`
 - `on_release`: `(button: number, x: number, y: number) -> ()`
 - `on_drag`: `(dx: number, dy: number) -> ()`
 - `on_move`: `(x: number, y: number) -> ()`
@@ -282,7 +282,7 @@ Every node also takes `role`, `name` (for assistive technology), `id` (what a po
 - `on_drop_hover`: `(over: boolean) -> ()`
 - `on_drag_start`: `(x: number, y: number) -> ()`
 - `on_drag_end`: `(vx: number, vy: number) -> ()`
-- `on_long_press`: `(x: number, y: number) -> ()`
+- `on_long_press`: `(x: number, y: number, touch: boolean) -> boolean?`
 - `on_swipe`: `(direction: "left" | "right" | "up" | "down", speed: number) -> ()`
 - `on_pinch`: `(scale: number, rotation: number, phase: "begin" | "update" | "end" | "cancel", x: number, y: number) -> ()`
 - `on_hold`: `(resting: boolean) -> boolean?`

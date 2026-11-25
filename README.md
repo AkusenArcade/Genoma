@@ -242,8 +242,8 @@ return g.surface {
   click), two fingers pinch. `on_pinch(scale, rotation, phase, x, y)`
   hears two fingers on a screen or a touchpad, `on_swipe(direction,
   speed)` a quick stroke (a drag let go moving, or a touchpad swipe),
-  `on_long_press(x, y)` a press held still (the release is then no
-  click), `on_drag_start` and `on_drag_end(vx, vy)` a drag's ends;
+  `on_long_press(x, y, touch)` a press held still (the release is then no
+  click; `touch` for a finger's), `on_drag_start` and `on_drag_end(vx, vy)` a drag's ends;
   `drag_threshold = 6` makes a press a drag only past that distance.
   Fingers resting on a touchpad (`on_hold`) stop a scroller's fling.
   `require("@genoma/kit/gestures")` has them ready: `draggable` (bounds,

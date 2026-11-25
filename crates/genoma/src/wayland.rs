@@ -2554,7 +2554,7 @@ impl App {
 
     /// A press, by the pointer or the first finger: `hit` is what it
     /// landed on.
-    fn pointer_press(&mut self, i: usize, hit: Option<NodeId>, x: f32, y: f32, button: u32, serial: u32) {
+    fn pointer_press(&mut self, i: usize, hit: Option<NodeId>, x: f32, y: f32, button: u32, touch: bool, serial: u32) {
         let scene = self.surfaces[i].scene.clone();
         self.input_serial = serial;
         self.input_surface = self.surfaces[i].role.wl_surface().cloned();
@@ -2587,7 +2587,7 @@ impl App {
         press.id += 1;
         press.dragging = false;
         press.long_pressed = false;
-        press.touch = false;
+        press.touch = touch;
         press.stopped = false;
         press.pan = None;
         press.samples.clear();
@@ -2601,7 +2601,7 @@ impl App {
                 self.ensure_clipboard();
                 scene.borrow_mut().field_press(node, lx, self.modifiers.shift);
             }
-            self.deliver(i, node, Input::Press(button, lx, ly));
+            self.deliver(i, node, Input::Press(button, lx, ly, touch));
             self.await_long_press(i);
         }
     }
@@ -2637,7 +2637,8 @@ impl App {
         }
         let (px, py) = self.surfaces[i].press_point;
         let (lx, ly) = self.surfaces[i].scene.borrow().local(node, px, py);
-        let taken = self.deliver(i, node, Input::LongPress(lx, ly));
+        let touch = self.surfaces[i].press.touch;
+        let taken = self.deliver(i, node, Input::LongPress(lx, ly, touch));
         self.surfaces[i].press.long_pressed = taken;
     }
 
@@ -3631,7 +3632,7 @@ impl PointerHandler for App {
             }
             match event.kind {
                 K::Motion { .. } => self.pointer_motion(i, x, y),
-                K::Press { button, serial, .. } => self.pointer_press(i, hit, x, y, button, serial),
+                K::Press { button, serial, .. } => self.pointer_press(i, hit, x, y, button, false, serial),
                 K::Release { button, .. } => self.pointer_release(i, hit, x, y, button),
                 K::Axis { horizontal, vertical, source, .. } => {
                     let Some(node) = hit else { continue };

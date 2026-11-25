@@ -95,8 +95,9 @@ pub enum Input {
     Key(Key),
     Hover(bool),
     /// The button, and where on the node, logical units from its top-left
-    /// corner: a progress line seeks to where it was pressed.
-    Press(u32, f32, f32),
+    /// corner: a progress line seeks to where it was pressed. True for a
+    /// finger on a screen.
+    Press(u32, f32, f32, bool),
     Release(u32, f32, f32),
     /// A press and a release on the same node, and which of several in a
     /// row it is: 2 the second of a double click.
@@ -150,7 +151,8 @@ pub enum Input {
     DragEnd(f64, f64),
     /// Held still, pressed, for the `long_press` timing: where, local to the
     /// node pressed. A release after one the interface took is no click.
-    LongPress(f32, f32),
+    /// True for a finger on a screen.
+    LongPress(f32, f32, bool),
     /// A quick stroke ended: "left", "right", "up" or "down", and its speed,
     /// logical units a second. From a drag let go moving, or a touchpad's
     /// swipe of several fingers.
@@ -2473,7 +2475,8 @@ impl Script {
                         f.call::<()>((key.name.as_str(), key.text.clone(), mods))
                     })(),
                     Input::Hover(entered) => f.call::<()>(*entered),
-                    Input::Press(b, x, y) | Input::Release(b, x, y) => f.call::<()>((*b, *x, *y)),
+                    Input::Press(b, x, y, touch) => f.call::<()>((*b, *x, *y, *touch)),
+                    Input::Release(b, x, y) => f.call::<()>((*b, *x, *y)),
                     Input::Click(b, x, y, count) => f.call::<()>((*b, *x, *y, *count)),
                     Input::Drag(x, y) => f.call::<()>((*x, *y)),
                     Input::Move(x, y) => {
@@ -2520,7 +2523,16 @@ impl Script {
                         let (lx, ly) = scene.borrow().local(id, *x, *y);
                         f.call::<()>((lx, ly, *w, *h))
                     }
-                    Input::DragStart(x, y) | Input::LongPress(x, y) => f.call::<()>((*x, *y)),
+                    Input::DragStart(x, y) => f.call::<()>((*x, *y)),
+                    // Answered false it was not taken: the press goes on, and
+                    // is a click when it is let go.
+                    Input::LongPress(x, y, touch) => match f.call::<LuaValue>((*x, *y, *touch)) {
+                        Ok(LuaValue::Boolean(false)) => {
+                            at = scene.borrow().parent(id);
+                            continue;
+                        }
+                        other => other.map(|_| ()),
+                    },
                     Input::DragEnd(vx, vy) => f.call::<()>((*vx, *vy)),
                     Input::Swipe(direction, speed) => f.call::<()>((*direction, *speed)),
                     Input::Pinch(scale, turn, phase, x, y) => {

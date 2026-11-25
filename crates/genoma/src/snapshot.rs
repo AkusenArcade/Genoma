@@ -248,7 +248,7 @@ fn snapshot(args: Vec<String>) -> Result<usize, String> {
                 let (t, node) = shown(&targets, id).ok_or_else(|| format!("--click {id}: no node with that id is shown"))?;
                 let [_, _, w, h] = targets[t].2.borrow().extent(node).unwrap_or([0.0; 4]);
                 let (x, y) = (w / 2.0, h / 2.0);
-                for input in [genoma_script::Input::Press(0x110, x, y), genoma_script::Input::Release(0x110, x, y), genoma_script::Input::Click(0x110, x, y, 1)] {
+                for input in [genoma_script::Input::Press(0x110, x, y, false), genoma_script::Input::Release(0x110, x, y), genoma_script::Input::Click(0x110, x, y, 1)] {
                     script.borrow().dispatch(t, node, input);
                 }
             }

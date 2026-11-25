@@ -508,7 +508,7 @@ fn node_fields() -> String {
          \x20   -- listens (not hover, size, focus, change or submit). Buttons are\n\
          \x20   -- 272 left, 273 right, 274 middle; positions are the node's own.\n\
          \x20   on_click: ((button: number, x: number, y: number, count: number) -> ())?,\n\
-         \x20   on_press: ((button: number, x: number, y: number) -> ())?,\n\
+         \x20   on_press: ((button: number, x: number, y: number, touch: boolean) -> ())?,\n\
          \x20   on_release: ((button: number, x: number, y: number) -> ())?,\n\
          \x20   -- How far the pointer is from where the press began.\n\
          \x20   on_drag: ((dx: number, dy: number) -> ())?,\n\
@@ -543,7 +543,7 @@ fn node_fields() -> String {
          \x20   on_drag_end: ((vx: number, vy: number) -> ())?,\n\
          \x20   -- Held still, pressed, for the long_press timing; the release is\n\
          \x20   -- then no click.\n\
-         \x20   on_long_press: ((x: number, y: number) -> ())?,\n\
+         \x20   on_long_press: ((x: number, y: number, touch: boolean) -> boolean?)?,\n\
          \x20   -- A quick stroke: a drag let go moving, or a touchpad swipe.\n\
          \x20   on_swipe: ((direction: \"left\" | \"right\" | \"up\" | \"down\", speed: number) -> ())?,\n\
          \x20   -- Two fingers, on a touchpad or a screen: scale since they began,\n\
