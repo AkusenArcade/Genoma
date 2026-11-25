@@ -4268,6 +4268,24 @@ fn collect_node(
     scale: f32,
     out: &mut Out,
 ) {
+    // Turned or not, and drawn or not (absent, faded to nothing), what comes
+    // after it is as it was.
+    let saved = out.transform;
+    collect_turned(tree, fonts, node, parent, parent_exact, alpha, scale, out);
+    out.transform = saved;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_turned(
+    tree: &mut TaffyTree<Node>,
+    fonts: &mut ct::FontSystem,
+    node: NodeId,
+    parent: [f32; 4],
+    parent_exact: [f32; 4],
+    alpha: f32,
+    scale: f32,
+    out: &mut Out,
+) {
     let (placed, exact) = place(tree, node, parent, parent_exact, scale);
     let mut layout = *tree.layout(node).expect("laid out");
     layout.size.width = placed[2];
@@ -4276,7 +4294,6 @@ fn collect_node(
     let own = [origin[0], origin[1], layout.size.width, layout.size.height];
     // Depth: this node's turn about its pivot, through its perspective,
     // composed with what its ancestors already turned.
-    let saved_transform = out.transform;
     if let Some(n) = tree.get_node_context(node) {
         let pivot = n.pivot_at.unwrap_or([own[2] * n.pivot[0], own[3] * n.pivot[1]]);
         if n.turn != [0.0; 3] {
@@ -5415,7 +5432,6 @@ fn collect_node(
         rounded_clip(mark, c, radius, out);
     }
     out.parent_shape = saved_parent;
-    out.transform = saved_transform;
 }
 
 /// How far right and down SVG path data reaches from its origin, logical
@@ -6475,6 +6491,29 @@ mod tests {
         let motion = scene.advance(t0 + Duration::from_millis(520), 1.0);
         assert!(motion.moving || motion.wake.is_some(), "the pulse beats once seen");
         let _ = n;
+    }
+
+    #[test]
+    fn an_absent_node_turns_nothing_that_comes_after() {
+        let (mut scene, n, _) = spring_scene();
+        let root = scene.root();
+        let turned = scene.create(Kind::Capsule, Role::None);
+        let after = scene.create(Kind::Capsule, Role::None);
+        scene.set_children(root, &[turned, n, after]);
+        for c in [turned, after] {
+            for prop in [Prop::Width, Prop::Height] {
+                scene.set(c, prop, Value::Number(20.0), None).unwrap();
+            }
+            scene.set(c, Prop::Fill, Value::Color([1.0; 4]), None).unwrap();
+        }
+        scene.set(turned, Prop::Rotate, Value::Number(30.0), None).unwrap();
+        for (prop, value) in [(Prop::Present, Value::Bool(false)), (Prop::Opacity, Value::Number(0.0))] {
+            scene.set(turned, Prop::Present, Value::Bool(true), None).unwrap();
+            scene.set(turned, prop, value, None).unwrap();
+            scene.layout(Some(200.0), Some(100.0));
+            let list = scene.draw_list(1.0);
+            assert!(list.rects.iter().all(|r| r.transform == Rect::IDENTITY), "{prop:?}");
+        }
     }
 
     #[test]

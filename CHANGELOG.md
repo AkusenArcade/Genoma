@@ -44,6 +44,9 @@ changes what a shell sees.
 - `on_press` and `on_long_press` are told last whether a finger on a screen
   made the press; a long press answered `false` is not taken, and is a click
   still.
+- `g.list` takes `reveal_margin`: how clear of its edges a row is brought.
+- `g.drag_picture`: what is seen under the pointer while something is dragged
+  out of the interface, a tree drawn live.
 - `portal.icon_theme`: the icon theme's name, followed; once it changes,
   `g.icon_path` and `mime:icon` find icons in the new one.
 - `g.icon_path` and `mime:icon` take a size: the drawing the icon theme has
@@ -53,6 +56,8 @@ changes what a shell sees.
 
 ### Fixed
 
+- A node turned (`rotate`, depth) while absent or faded to nothing turned what
+  was drawn after it.
 - An interface of windows alone starts where there is no wlr-layer-shell
   (GNOME); a `g.surface` there is left out, and the log says so.
 - A shape growing from no width or height inside boxes as large as their

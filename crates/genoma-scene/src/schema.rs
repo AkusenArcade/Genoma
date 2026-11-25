@@ -480,7 +480,7 @@ const EACH: &str = "    items: () -> { T },\n";
 // A list's items are all of them, or how many and each by its place.
 const LIST_ITEMS: &str = "    items: (() -> { T })?,\n    -- Instead of items: how many there are, and the one at a place (from\n    -- 1), asked for only as it comes into view. `count` is what the list\n    -- follows; what `item` reads is not.\n    count: (() -> number)?,\n    item: ((index: number) -> T)?,\n";
 const EACH_ROW: &str = "    key: (T) -> string | number,\n    row: (item: () -> T, index: () -> number) -> Node,\n";
-const LIST: &str = "    row_height: number,\n    -- A row's place, from 1: brought into view the least way.\n    reveal: (() -> number?)?,\n    -- Where it is scrolled to, and how far it can go.\n    on_scroll: ((offset: number, room: number) -> ())?,\n";
+const LIST: &str = "    row_height: number,\n    -- A row's place, from 1: brought into view the least way.\n    reveal: (() -> number?)?,\n    -- How clear of the edges it is brought: a foot that fades.\n    reveal_margin: number?,\n    -- Where it is scrolled to, and how far it can go.\n    on_scroll: ((offset: number, room: number) -> ())?,\n";
 
 /// Every node's fields: the properties, then what every node takes besides.
 fn node_fields() -> String {

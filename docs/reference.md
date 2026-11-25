@@ -304,6 +304,12 @@ surface: (t: Surface) -> Surface
 popup: (t: Popup) -> Popup
 ```
 
+### `g.drag_picture`
+
+```luau
+drag_picture: (t: DragPicture) -> DragPicture
+```
+
 ### `g.window`
 
 ```luau
@@ -2940,6 +2946,16 @@ g.popup { … }: a surface beside a node of another one, over everything. Writte
 | `grab` | `boolean?` | Whether it takes the keyboard and closes on a press outside. |
 | `present` | `(() -> boolean)?` |  |
 | `on_dismiss` | `(() -> ())?` | A press outside, or the compositor closing it. |
+| `[number]` | `any` |  |
+
+### DragPicture
+
+g.drag_picture { … }: what is seen under the pointer while something is dragged out of the interface (`drag_files`, `drag_text`); one of them, beside the surfaces. Its content is drawn live.
+
+| Field | Type | |
+|---|---|---|
+| `x` | `number?` | Where its corner is, from the pointer, logical units (12, 12). |
+| `y` | `number?` |  |
 | `[number]` | `any` |  |
 
 ### WindowSurface

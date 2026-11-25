@@ -284,6 +284,9 @@ pub struct SurfaceSpec {
     /// A window (`g.window`) rather than a layer surface: what it is called
     /// and the size it asks for.
     pub window: Option<WindowSpec>,
+    /// What is seen under the pointer while something is dragged out of the
+    /// interface (`g.drag_picture`): where its corner is, from the pointer.
+    pub picture: Option<(i32, i32)>,
     /// When it takes the keyboard: "none" (only while a node catches),
     /// "on_demand" (when pressed: a bar with a search field), "exclusive"
     /// (always).
@@ -3349,6 +3352,16 @@ impl Script {
                 Ok(t)
             })?,
         )?;
+        // g.drag_picture { x = 12, y = 12, node }: what is seen under the
+        // pointer while something is dragged out of the interface.
+        g.set(
+            "drag_picture",
+            lua.create_function(|_, t: Table| {
+                t.set("__surface", true)?;
+                t.set("__picture", true)?;
+                Ok(t)
+            })?,
+        )?;
         // g.timing { open = { duration = 0.25, curve = { … } }, … }: the one
         // place a duration may be written. g.timing_default { … } defines
         // only the names not defined yet: what a library offers, which a
@@ -3819,7 +3832,7 @@ fn hoist_popups(surfaces: Vec<Table>) -> mlua::Result<Vec<Table>> {
 fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
     // A popup's anchor is a node, read by popup_spec.
     let is_popup = t.get::<Option<bool>>("__popup")? == Some(true);
-    let is_window = t.get::<Option<bool>>("__window")? == Some(true);
+    let is_window = t.get::<Option<bool>>("__window")? == Some(true) || t.get::<Option<bool>>("__picture")? == Some(true);
     let anchor = match t.get::<LuaValue>("anchor")? {
         _ if is_popup || is_window => Vec::new(),
         LuaValue::String(s) => vec![s.to_string_lossy()],
@@ -3859,6 +3872,13 @@ fn surface_spec(t: &Table) -> mlua::Result<SurfaceSpec> {
         },
         popup: popup_spec(t)?,
         window: window_spec(t)?,
+        picture: match t.get::<Option<bool>>("__picture")? {
+            Some(true) => {
+                let at = |k: &str| -> mlua::Result<i32> { Ok(t.get::<Option<f64>>(k)?.unwrap_or(12.0).round() as i32) };
+                Some((at("x")?, at("y")?))
+            }
+            _ => None,
+        },
         keyboard: match t.get::<Option<String>>("keyboard")?.as_deref() {
             None | Some("none") => "none".into(),
             Some(k @ ("on_demand" | "exclusive")) => k.into(),
@@ -4221,7 +4241,7 @@ fn mount(
         if (each || list) && matches!(key.as_str(), "items" | "key" | "row") {
             continue;
         }
-        if list && matches!(key.as_str(), "count" | "item" | "row_height" | "reveal" | "on_scroll") {
+        if list && matches!(key.as_str(), "count" | "item" | "row_height" | "reveal" | "reveal_margin" | "on_scroll") {
             continue;
         }
         if scrolls && key == "on_scroll" {

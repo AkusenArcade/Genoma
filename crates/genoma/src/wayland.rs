@@ -113,6 +113,15 @@ enum Role {
     /// A window the compositor manages, while its description is present:
     /// `None` while closed, the scene and its tree staying, as a popup's.
     Window(Option<WindowRole>),
+    /// Under the pointer while something is dragged out: `None` while
+    /// nothing is, the scene and its tree staying, as a popup's.
+    Picture(Option<PictureRole>),
+}
+
+/// A drag's picture while it is shown: its Wayland objects.
+struct PictureRole {
+    wl: wl_surface::WlSurface,
+    fraction: Option<WpFractionalScaleV1>,
 }
 
 /// An open window's own Wayland objects, and what its last configure said.
@@ -153,13 +162,14 @@ impl Role {
             Role::Lock(lock) => Some(lock.wl_surface()),
             Role::Popup(open) => open.as_ref().map(|p| p.popup.wl_surface()),
             Role::Window(open) => open.as_ref().map(|w| w.window.wl_surface()),
+            Role::Picture(open) => open.as_ref().map(|p| &p.wl),
         }
     }
 
     fn layer(&self) -> Option<&LayerSurface> {
         match self {
             Role::Layer(layer) => Some(layer),
-            Role::Lock(_) | Role::Popup(_) | Role::Window(_) => None,
+            Role::Lock(_) | Role::Popup(_) | Role::Window(_) | Role::Picture(_) => None,
         }
     }
 
@@ -1397,8 +1407,8 @@ impl App {
             return false;
         }
         let Some((files, text, actions)) = self.surfaces[i].scene.borrow().drag_data(node) else { return false };
-        let (Some(manager), Some(device), Some(origin)) =
-            (&self.dnd_manager, &self.dnd_device, self.surfaces[i].role.wl_surface().cloned())
+        let (Some(manager), true, Some(origin)) =
+            (&self.dnd_manager, self.dnd_device.is_some(), self.surfaces[i].role.wl_surface().cloned())
         else {
             return false;
         };
@@ -1431,7 +1441,15 @@ impl App {
                 }
             },
         );
-        source.start_drag(device, &origin, None, self.input_serial);
+        let picture = self.open_picture(i);
+        let icon = picture.and_then(|p| self.surfaces[p].role.wl_surface().cloned());
+        if let Some(device) = &self.dnd_device {
+            source.start_drag(device, &origin, icon.as_ref(), self.input_serial);
+        }
+        // Drawn once it has its part: a surface with another is refused it.
+        if let Some(p) = picture {
+            self.draw(p);
+        }
         let _ = self.conn.flush();
         self.drag_source = Some((source, offered));
         // The compositor has the pointer now: the press ends here, without
@@ -1441,6 +1459,72 @@ impl App {
         self.deliver(i, node, Input::Release(0x110, w / 2.0, h / 2.0));
         log::debug!("surface {}: drag started", self.surfaces[i].id);
         true
+    }
+
+    /// The interface's drag picture, made ready beside surface `i`, whose
+    /// scale it takes: its place, or none where there is no picture.
+    fn open_picture(&mut self, i: usize) -> Option<usize> {
+        let p = self.surfaces.iter().position(|s| matches!(s.role, Role::Picture(_)))?;
+        self.close_picture(p);
+        let (dx, dy) = self.specs.get(self.surfaces[p].spec)?.picture?;
+        let scale = self.surfaces[i].scale;
+        let size = self.measure(p);
+        let qh = self.qh.clone();
+        let id = self.surfaces[p].id;
+        let wl = self.compositor.create_surface(&qh);
+        // Its corner is at the pointer until it is moved.
+        if wl.version() >= 5 {
+            wl.offset(dx, dy);
+        }
+        let fraction = self.fractional.as_ref().map(|f| f.get_fractional_scale(&wl, &qh, ScaleData(id)));
+        let viewport = self.viewporter.as_ref().map(|v| v.get_viewport(&wl, &qh, Ignore));
+        let s = &mut self.surfaces[p];
+        s.role = Role::Picture(Some(PictureRole { wl, fraction }));
+        s.viewport = viewport;
+        s.scale = scale;
+        s.wanted = size;
+        s.logical = size;
+        s.configured = true;
+        s.target_made = false;
+        s.frame_pending = false;
+        s.frames = 0;
+        s.blurred.clear();
+        s.inputs = None;
+        s.holes.clear();
+        Some(p)
+    }
+
+    /// Puts a drag's picture away: its renderer target first, then its
+    /// Wayland objects, its scene and tree staying for the next drag.
+    fn close_picture(&mut self, p: usize) {
+        let s = &mut self.surfaces[p];
+        let Role::Picture(open) = &mut s.role else { return };
+        let Some(open) = open.take() else { return };
+        if s.target_made {
+            if let Some(renderer) = &self.renderer {
+                renderer.destroy_target_now(s.id);
+            }
+            s.target_made = false;
+        }
+        if let Some(viewport) = s.viewport.take() {
+            viewport.destroy();
+        }
+        if let Some(fraction) = open.fraction {
+            fraction.destroy();
+        }
+        if let (Some(wake), Some(handle)) = (s.wake.take(), &self.handle) {
+            handle.remove(wake);
+        }
+        s.configured = false;
+        s.frame_pending = false;
+        open.wl.destroy();
+        let _ = self.conn.flush();
+    }
+
+    fn close_pictures(&mut self) {
+        for p in 0..self.surfaces.len() {
+            self.close_picture(p);
+        }
     }
 
     /// Something dragged is over surface `i` at (x, y): the drop target
@@ -1840,7 +1924,7 @@ impl App {
         // surface keeps both for its life.
         let changed = |i: usize, old: &[SurfaceSpec]| {
             old.get(i).is_none_or(|o| {
-                specs.get(i).is_none_or(|n| o.layer != n.layer || o.namespace != n.namespace || o.popup.is_some() != n.popup.is_some())
+                specs.get(i).is_none_or(|n| o.layer != n.layer || o.namespace != n.namespace || o.popup.is_some() != n.popup.is_some() || o.picture.is_some() != n.picture.is_some())
             })
         };
         let old = std::mem::take(&mut self.specs);
@@ -1858,6 +1942,12 @@ impl App {
                 Role::Window(Some(_)) => {
                     if gone.contains(&self.surfaces[i].id) {
                         self.close_window(i);
+                    }
+                    continue;
+                }
+                Role::Picture(Some(_)) => {
+                    if gone.contains(&self.surfaces[i].id) {
+                        self.close_picture(i);
                     }
                     continue;
                 }
@@ -1918,9 +2008,15 @@ impl App {
             .and_then(|i| i.logical_size)
             .map(|(w, h)| (w.max(0) as u32, h.max(0) as u32));
         // A popup, or a window, has no Wayland surface until it opens.
-        if spec.popup.is_some() || spec.window.is_some() {
+        if spec.popup.is_some() || spec.window.is_some() || spec.picture.is_some() {
             let scene = Rc::new(RefCell::new(Scene::new(fonts)));
-            let role = if spec.window.is_some() { Role::Window(None) } else { Role::Popup(None) };
+            let role = if spec.window.is_some() {
+                Role::Window(None)
+            } else if spec.picture.is_some() {
+                Role::Picture(None)
+            } else {
+                Role::Popup(None)
+            };
             self.surfaces.push(Surface::blank(id, spec_index, output_name, scene, role, None, None, output_size));
             return;
         }
@@ -1979,7 +2075,7 @@ impl App {
             return self.surfaces[i].logical;
         }
         // A popup is its content's size, whatever it catches.
-        if self.surfaces[i].role.is_popup() {
+        if self.surfaces[i].role.is_popup() || matches!(self.surfaces[i].role, Role::Picture(_)) {
             let size = self.surfaces[i].scene.borrow_mut().layout(None, None);
             return (size.0.ceil().max(1.0) as u32, size.1.ceil().max(1.0) as u32);
         }
@@ -2026,6 +2122,11 @@ impl App {
             return;
         }
         if s.role.is_window() {
+            s.dirty = true;
+            return;
+        }
+        if matches!(s.role, Role::Picture(_)) {
+            s.logical = wanted;
             s.dirty = true;
             return;
         }
@@ -2117,7 +2218,7 @@ impl App {
                             "output": s.output,
                             "size": [s.logical.0, s.logical.1],
                             "moving": s.scene.borrow().moving_report(),
-                            "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", Role::Window(_) => "window", _ => "layer" },
+                            "kind": match &s.role { Role::Popup(_) => "popup", Role::Lock(_) => "lock", Role::Window(_) => "window", Role::Picture(_) => "picture", _ => "layer" },
                             "asleep": s.asleep,
                             "nodes": nodes,
                         })
@@ -2326,6 +2427,7 @@ impl App {
                 Role::Window(_) => "window",
                 Role::Lock(_) => "lock",
                 Role::Layer(_) => "layer",
+                Role::Picture(_) => "picture",
             };
             let damage = match mine.damage {
                 None => "nothing".to_owned(),
@@ -3381,13 +3483,17 @@ impl smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {
         log::debug!("drag: cancelled");
         self.drag_source = None;
+        self.close_pictures();
     }
 
-    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {}
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {
+        self.close_pictures();
+    }
 
     fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource) {
         log::debug!("drag: finished");
         self.drag_source = None;
+        self.close_pictures();
     }
 
     fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &smithay_client_toolkit::reexports::client::protocol::wl_data_source::WlDataSource, _: smithay_client_toolkit::reexports::client::protocol::wl_data_device_manager::DndAction) {}

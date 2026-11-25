@@ -300,7 +300,8 @@ enum From {
 
 /// `g.list`: the rows of `items` in view, every one `row_height` tall.
 /// The wheel steps through it, a touchpad moves it and flings it, and
-/// `reveal` (a row's place, from 1) brings a row into view.
+/// `reveal` (a row's place, from 1) brings a row into view, `reveal_margin`
+/// clear of its edges.
 pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize, node: NodeId, t: &Table) -> mlua::Result<()> {
     let want = |name: &str| -> mlua::Result<Function> {
         t.get::<Option<Function>>(name)?.ok_or_else(|| err(format!("g.list needs {name}, a function")))
@@ -318,6 +319,7 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
         .filter(|h| *h > 0.0)
         .ok_or_else(|| err("g.list needs row_height, above 0: every row is that tall"))?;
     let reveal: Option<Function> = t.get("reveal")?;
+    let margin = t.get::<Option<f64>>("reveal_margin")?.unwrap_or(0.0).max(0.0);
     let on_scroll: Option<Function> = t.get("on_scroll")?;
     let gap = scene.borrow().gap(node) as f64;
 
@@ -384,7 +386,13 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
     let on_size = lua.create_function(move |_, (w, h): (f64, f64)| {
         if let Some(s) = s.upgrade() {
             let view = (h - sc.borrow().inset_y(node) as f64).max(0.0);
-            if s.view.get_untracked() != Some(view) {
+            let before = s.view.get_untracked();
+            if before != Some(view) {
+                // The room goes with it before anyone hears: a row revealed
+                // in the new view is not held to the old one's.
+                if let Some(before) = before {
+                    s.room.set((s.room.get() + before - view).max(0.0));
+                }
                 s.view.set(view);
             }
         }
@@ -483,8 +491,9 @@ pub(crate) fn list(scene: Rc<RefCell<Scene>>, handlers: Handlers, target: usize,
             let view = s.view.get();
             let Some(at) = at else { return };
             untracked(|| {
-                let top = (at - 1.0).max(0.0) * s.pitch;
-                let bottom = top + row_height;
+                // Clear of the edges by the margin: of a foot that fades.
+                let top = ((at - 1.0).max(0.0) * s.pitch - margin).max(0.0);
+                let bottom = (at - 1.0).max(0.0) * s.pitch + row_height + margin;
                 let now = s.target.get();
                 if top < now {
                     s.glide(top);
@@ -661,6 +670,17 @@ mod tests {
         // Row 500 ends at 10000: scrolled to 9800, it is the last in view.
         assert!(shows(&scene, 500) && shows(&scene, 491));
         assert_eq!(scroll_y(&scene, node), (9800.0 - (490.0 - 3.0) * 20.0) as f32);
+    }
+
+    #[test]
+    fn reveal_keeps_clear_of_the_edges_by_its_margin() {
+        let lua = Lua::new();
+        let (scene, _, node, _scope) = mounted(&lua, 1000, "reveal = function() return 500 end, reveal_margin = 30,");
+        assert_eq!(scroll_y(&scene, node) + ((9830.0f32 / 20.0).floor() - 3.0) * 20.0, 9830.0, "thirty more than the least");
+        let (scene, _, node, _scope) = mounted(&lua, 1000, "reveal = function() return 1000 end, reveal_margin = 30,");
+        assert!(shows(&scene, 1000) && scroll_y(&scene, node) >= 0.0, "the last one, with nothing past it");
+        // The whole way down and no further: twenty thousand less the view.
+        assert_eq!(scroll_y(&scene, node) + (990.0 - 3.0) * 20.0, 19800.0);
     }
 
     #[test]

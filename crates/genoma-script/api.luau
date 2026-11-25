@@ -281,6 +281,16 @@ export type Popup = {
     [number]: any,
 }
 
+-- g.drag_picture { … }: what is seen under the pointer while something is
+-- dragged out of the interface (`drag_files`, `drag_text`); one of them,
+-- beside the surfaces. Its content is drawn live.
+export type DragPicture = {
+    -- Where its corner is, from the pointer, logical units (12, 12).
+    x: number?,
+    y: number?,
+    [number]: any,
+}
+
 export type WindowSurface = {
     -- Its title, or a function giving it as it changes.
     title: (string | () -> string)?,
@@ -386,6 +396,7 @@ export type G = {
     list: <T>(t: List<T>) -> Node,
     surface: (t: Surface) -> Surface,
     popup: (t: Popup) -> Popup,
+    drag_picture: (t: DragPicture) -> DragPicture,
     -- A window the compositor manages as a program's: tiled, in alt-tab.
     window: (t: WindowSurface) -> WindowSurface,
 

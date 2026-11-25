@@ -365,6 +365,7 @@ mod tests {
             namespace: "t".into(),
             popup: None,
             window: None,
+            picture: None,
             keyboard: "none".into(),
         }
     }
