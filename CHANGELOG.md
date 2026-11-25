@@ -41,11 +41,20 @@ changes what a shell sees.
   after the arguments, and `queue = true` waits for a name that is taken.
 - `g.list` takes `count` and `item` instead of `items`: only what comes
   into view is asked for.
+- `portal.icon_theme`: the icon theme's name, followed; once it changes,
+  `g.icon_path` and `mime:icon` find icons in the new one.
+- `g.icon_path` and `mime:icon` take a size: the drawing the icon theme has
+  for it.
 - `apps:launch` starts an application the menu leaves out (`NoDisplay`)
   too: a file's handler often is one.
 
 ### Fixed
 
+- A shape growing from no width or height inside boxes as large as their
+  content never grew: nothing around it was seen, so its transition waited
+  for ever.
+- An icon given by its path is drawn again when its file is rewritten (an
+  icon theme made anew under the same names).
 - More changes in a watched folder than the kernel keeps (a large archive
   unpacked): the folder is read again, rather than left as it was.
 

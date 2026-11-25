@@ -557,8 +557,10 @@ export type G = {
     desktop_entries: () -> { DesktopEntry },
     -- g.icon_dir(dir, …): where icon names are looked up, first match wins.
     icon_dir: (...string) -> (),
-    -- g.icon_path("firefox") → the file the icon theme gives, or nil.
-    icon_path: (name: string) -> string?,
+    -- g.icon_path("firefox", size) → the file the icon theme gives, or nil;
+    -- with a size (logical units), the one it draws for that size. A binding
+    -- that reads portal.icon_theme too finds it again in another theme.
+    icon_path: (name: string, size: number?) -> string?,
     -- g.app_icon("firefox") → an application's icon file, or nil.
     app_icon: (app_id: string) -> string?,
     -- g.text_width { text, font, size, weight, italic, tabular, tracking }:
@@ -1267,6 +1269,9 @@ export type Portal = {
     read accent: string?,
     read high_contrast: boolean,
     read reduced_motion: boolean,
+    -- The icon theme's name, "" until it is known; once it changes, icons
+    -- are found in the new one.
+    read icon_theme: string,
     -- The desktop's own file chooser, the dialog applications show. The
     -- callback runs once it closes: paths nil when it was dismissed, error
     -- set when it could not be shown.
@@ -1294,8 +1299,9 @@ export type Mime = {
     description: (self: Mime, mime: string) -> string,
     -- The icons that stand for it, the most precise first.
     icon_names: (self: Mime, mime: string) -> { string },
-    -- The first of them the icon theme has, as a file, or nil.
-    icon: (self: Mime, mime: string) -> string?,
+    -- The first of them the icon theme has, as a file (with a size, the one
+    -- drawn for it), or nil.
+    icon: (self: Mime, mime: string, size: number?) -> string?,
     -- Whether a type is a kind of another: every source file is text/plain.
     is_a: (self: Mime, mime: string, parent: string) -> boolean,
     -- What opens it, the default first, then what opens what it is a kind

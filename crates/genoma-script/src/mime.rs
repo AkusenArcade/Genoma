@@ -37,11 +37,11 @@ impl UserData for MimeRef {
         methods.add_method("description", |_, _, mime: String| Ok(mime::description(&mime)));
         // mime:icon_names("image/png") → { "image-png", "image-x-generic" }.
         methods.add_method("icon_names", |_, _, mime: String| Ok(mime::database().icons(&mime)));
-        // mime:icon("image/png") → the first of its icons the theme has, a
-        // file, or nil.
-        methods.add_method("icon", |_, _, mime: String| {
+        // mime:icon("image/png", size?) → the first of its icons the theme
+        // has, a file (the one drawn for the size), or nil.
+        methods.add_method("icon", |_, _, (mime, size): (String, Option<f64>)| {
             let names = mime::database().icons(&mime);
-            Ok(names.iter().find_map(|n| genoma_services::icons::icon_path(n)).map(|p| p.display().to_string()))
+            Ok(names.iter().find_map(|n| crate::themed(n, size)).map(|p| p.display().to_string()))
         });
         // mime:is_a("text/x-csrc", "text/plain") → true.
         methods.add_method("is_a", |_, _, (mime, parent): (String, String)| Ok(mime::database().is_a(&mime, &parent)));

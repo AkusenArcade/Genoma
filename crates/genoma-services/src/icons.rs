@@ -178,6 +178,97 @@ pub fn app_icon(app_id: &str) -> Option<PathBuf> {
     found
 }
 
+/// What was found is looked up again: the icon theme is another.
+pub fn forget() {
+    *CACHE.lock().unwrap() = None;
+}
+
+/// A directory of an icon theme and the sizes its icons are drawn for
+/// (index.theme's `Type`, `Size`, `MinSize`, `MaxSize`, `Threshold`).
+#[derive(Clone, Debug, PartialEq)]
+struct Drawn {
+    dir: String,
+    min: i64,
+    max: i64,
+    size: i64,
+}
+
+/// The directories an index.theme declares, with their sizes; those for
+/// another scale are left out.
+fn drawn(index: &str) -> Vec<Drawn> {
+    let mut out: Vec<Drawn> = Vec::new();
+    let mut section = String::new();
+    let mut keys: HashMap<String, String> = HashMap::new();
+    let mut listed: Vec<String> = Vec::new();
+    let mut close = |section: &str, keys: &mut HashMap<String, String>| {
+        let keys = std::mem::take(keys);
+        if section == "Icon Theme" {
+            if let Some(d) = keys.get("Directories") {
+                listed = d.split(',').map(|d| d.trim().to_owned()).filter(|d| !d.is_empty()).collect();
+            }
+            return;
+        }
+        let number = |key: &str| keys.get(key).and_then(|v| v.parse::<i64>().ok());
+        let Some(size) = number("Size") else { return };
+        if number("Scale").unwrap_or(1) != 1 {
+            return;
+        }
+        let (min, max) = match keys.get("Type").map(String::as_str) {
+            Some("Scalable") => (number("MinSize").unwrap_or(size), number("MaxSize").unwrap_or(size)),
+            Some("Fixed") => (size, size),
+            _ => {
+                let t = number("Threshold").unwrap_or(2);
+                (size - t, size + t)
+            }
+        };
+        out.push(Drawn { dir: section.to_owned(), min, max, size });
+    };
+    for line in index.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            close(&section, &mut keys);
+            section = name.to_owned();
+        } else if let Some((k, v)) = line.split_once('=') {
+            keys.insert(k.trim().to_owned(), v.trim().to_owned());
+        }
+    }
+    close(&section, &mut keys);
+    out.retain(|d| listed.contains(&d.dir));
+    out
+}
+
+/// The directories in the order they are to be looked in for an icon shown
+/// at `size`: those drawn for it, then the nearest, a larger one before a
+/// smaller one as far away.
+fn ordered(mut dirs: Vec<Drawn>, size: i64) -> Vec<String> {
+    dirs.sort_by_key(|d| {
+        let away = if size < d.min { d.min - size } else if size > d.max { size - d.max } else { 0 };
+        (away, size > d.max, std::cmp::Reverse(d.size))
+    });
+    dirs.into_iter().map(|d| d.dir).collect()
+}
+
+/// An icon by name as the theme draws it for a size, in logical units.
+pub fn icon_path_at(icon: &str, size: u32) -> Option<PathBuf> {
+    if Path::new(icon).is_absolute() {
+        return icon_path(icon);
+    }
+    let key = format!("icon:{size}:{icon}");
+    if let Some(found) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) {
+        return found.clone();
+    }
+    let dirs = chain(&theme().unwrap_or_else(|| "hicolor".into()));
+    let found = dirs.iter().find_map(|dir| {
+        let index = fs::read_to_string(dir.join("index.theme")).ok()?;
+        ordered(drawn(&index), size as i64).into_iter().find_map(|sub| {
+            ["svg", "png"].iter().map(|ext| dir.join(&sub).join(format!("{icon}.{ext}"))).find(|p| p.exists())
+        })
+    });
+    // A theme that declares no sizes, the unthemed pixmaps.
+    let found = found.or_else(|| icon_path(icon));
+    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, found.clone());
+    found
+}
+
 /// An icon by name (or path) through the theme, as `app_icon` finds an
 /// application's: what Quickshell's `iconPath` answers.
 pub fn icon_path(icon: &str) -> Option<PathBuf> {
@@ -312,6 +403,26 @@ fn parse_entry(id: String, text: &str, path: PathBuf) -> Option<DesktopEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_icon_is_looked_for_where_it_is_drawn_for_the_size() {
+        let index = "[Icon Theme]\nName=X\nDirectories=tiny,small,scalable,48x48/mimetypes\n\n\
+                     [tiny]\nSize=16\nMinSize=8\nMaxSize=23\nType=Scalable\n\n\
+                     [small]\nSize=28\nMinSize=24\nMaxSize=31\nType=Scalable\n\n\
+                     [scalable]\nSize=64\nMinSize=48\nMaxSize=1024\nType=Scalable\n\n\
+                     [48x48/mimetypes]\nSize=48\nType=Fixed\n\n\
+                     [hidpi]\nSize=16\nScale=2\n";
+        let dirs = drawn(index);
+        assert_eq!(dirs.len(), 4, "what is not listed is not looked in");
+        let at = |size| ordered(dirs.clone(), size);
+        assert_eq!(at(22)[..2], ["tiny", "small"]);
+        assert_eq!(at(24)[0], "small");
+        assert_eq!(at(80)[0], "scalable");
+        assert_eq!(at(40)[0], "scalable", "8 short of it, rather than 9 past the small one");
+        // Without a Type an icon is good 2 around its size.
+        let d = drawn("[Icon Theme]\nDirectories=a\n[a]\nSize=22\n");
+        assert_eq!((d[0].min, d[0].max), (20, 24));
+    }
 
     #[test]
     fn an_entry_brings_the_actions_it_lists_with_their_commands() {

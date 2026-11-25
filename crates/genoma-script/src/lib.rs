@@ -1484,6 +1484,14 @@ impl UserData for DrivesRef {
     }
 }
 
+/// An icon of the theme's, for a size when one is given.
+pub(crate) fn themed(name: &str, size: Option<f64>) -> Option<PathBuf> {
+    match size {
+        Some(s) if s >= 1.0 => genoma_services::icons::icon_path_at(name, s.round() as u32),
+        _ => genoma_services::icons::icon_path(name),
+    }
+}
+
 struct PortalRef(Rc<Portal>);
 
 impl UserData for PortalRef {
@@ -1495,6 +1503,9 @@ impl UserData for PortalRef {
         fields.add_field_method_get("accent", |_, this| Ok(this.0.appearance.get().accent));
         fields.add_field_method_get("high_contrast", |_, this| Ok(this.0.appearance.get().high_contrast));
         fields.add_field_method_get("reduced_motion", |_, this| Ok(this.0.appearance.get().reduced_motion));
+        // portal.icon_theme → its name; once it changes, icons are found in
+        // the new one.
+        fields.add_field_method_get("icon_theme", |_, this| Ok(this.0.icon_theme.get()));
     }
 
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
@@ -3074,11 +3085,12 @@ impl Script {
                 Ok(list)
             })?,
         )?;
-        // g.icon_path("firefox") → the file the icon theme gives for it, or nil.
+        // g.icon_path("firefox", size?) → the file the icon theme gives for
+        // it, the one drawn for the size when there is one, or nil.
         g.set(
             "icon_path",
-            lua.create_function(|_, name: String| {
-                Ok(genoma_services::icons::icon_path(&name).map(|p| p.display().to_string()))
+            lua.create_function(|_, (name, size): (String, Option<f64>)| {
+                Ok(themed(&name, size).map(|p| p.display().to_string()))
             })?,
         )?;
         // g.batch(fn): the signals fn sets are heard once it returns, so a

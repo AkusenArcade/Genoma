@@ -4,7 +4,9 @@
 //!
 //! Settings: `org.freedesktop.appearance` — the colour scheme, the accent
 //! colour, high contrast and reduced motion — read once and followed on
-//! `SettingChanged`. Nothing polls.
+//! `SettingChanged`. Nothing polls. The icon theme's name is followed the
+//! same way, from the desktop's own settings (`org.gnome.desktop.interface`,
+//! where every portal backend publishes it).
 //!
 //! File chooser: the desktop's own dialog to open or save files, the one
 //! the applications show. Each choice is a request whose `Response` is
@@ -27,6 +29,8 @@ const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const SETTINGS: &str = "org.freedesktop.portal.Settings";
 const APPEARANCE: &str = "org.freedesktop.appearance";
+const INTERFACE: &str = "org.gnome.desktop.interface";
+const ICON_THEME: &str = "icon-theme";
 const CHOOSER: &str = "org.freedesktop.portal.FileChooser";
 const SCREENSHOT: &str = "org.freedesktop.portal.Screenshot";
 const REQUEST: &str = "org.freedesktop.portal.Request";
@@ -91,6 +95,7 @@ type Waiting = Box<dyn FnOnce(Chosen)>;
 pub enum Update {
     Available(bool),
     Setting(String, OwnedVariant),
+    IconTheme(String),
     Chosen(u64, Chosen),
 }
 
@@ -98,6 +103,8 @@ pub struct Portal {
     /// Whether a portal answers on the session bus.
     pub available: Signal<bool>,
     pub appearance: Signal<Appearance>,
+    /// The icon theme's name, "" until it is known.
+    pub icon_theme: Signal<String>,
     bus: RefCell<Option<(Bus, Sender<Update>)>>,
     /// Choices asked for and not answered yet, by request number.
     waiting: RefCell<HashMap<u64, Waiting>>,
@@ -112,6 +119,7 @@ impl Default for Portal {
         Portal {
             available: Signal::new(false),
             appearance: Signal::new(Appearance::default()),
+            icon_theme: Signal::new(String::new()),
             bus: RefCell::new(None),
             waiting: RefCell::default(),
             queued: RefCell::default(),
@@ -258,6 +266,17 @@ pub fn set(appearance: &mut Appearance, key: &str, value: &OwnedVariant) {
     }
 }
 
+fn tell(post: &Sender<Update>, namespace: &str, key: String, value: OwnedVariant) {
+    if namespace == APPEARANCE {
+        let _ = post.send(Update::Setting(key, value));
+    } else if namespace == INTERFACE
+        && key == ICON_THEME
+        && let Ok(name) = String::try_from(value)
+    {
+        let _ = post.send(Update::IconTheme(name));
+    }
+}
+
 impl Portal {
     pub fn apply(&self, update: Update) {
         batch(|| match update {
@@ -268,6 +287,17 @@ impl Portal {
                 set(&mut new, &key, &value);
                 if new != old {
                     self.appearance.set(new);
+                }
+            }
+            Update::IconTheme(name) => {
+                let before = self.icon_theme.get_untracked().unwrap_or_default();
+                if name != before {
+                    // Looked up again in the new theme, by whoever hears of
+                    // it here. The first name is the one they were found in.
+                    if !before.is_empty() {
+                        crate::icons::forget();
+                    }
+                    self.icon_theme.set(name);
                 }
             }
             Update::Chosen(id, chosen) => {
@@ -314,7 +344,7 @@ impl Portal {
             let settings = zbus::Proxy::new(&conn, PORTAL, PATH, SETTINGS).await?;
             // Subscribed first, so nothing changes unseen between the two.
             let changes = pause.drained("portal setting changes", settings.receive_signal("SettingChanged").await?);
-            let all: HashMap<String, HashMap<String, OwnedVariant>> = match settings.call("ReadAll", &(vec![APPEARANCE],)).await {
+            let all: HashMap<String, HashMap<String, OwnedVariant>> = match settings.call("ReadAll", &(vec![APPEARANCE, INTERFACE],)).await {
                 Ok(all) => all,
                 Err(e) => {
                     log::info!("portal: {e}");
@@ -322,15 +352,15 @@ impl Portal {
                 }
             };
             let _ = post.send(Update::Available(true));
-            for (key, value) in all.into_iter().filter(|(ns, _)| ns == APPEARANCE).flat_map(|(_, keys)| keys) {
-                let _ = post.send(Update::Setting(key, value));
+            for (namespace, keys) in all {
+                for (key, value) in keys {
+                    tell(&post, &namespace, key, value);
+                }
             }
             let mut changes = changes;
             while let Some(message) = changes.next().await {
                 if let Ok((namespace, key, value)) = message.body().deserialize::<(String, String, OwnedVariant)>() {
-                    if namespace == APPEARANCE {
-                        let _ = post.send(Update::Setting(key, value));
-                    }
+                    tell(&post, &namespace, key, value);
                 }
             }
             Ok(())

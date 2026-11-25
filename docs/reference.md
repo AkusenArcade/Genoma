@@ -641,10 +641,10 @@ g.icon_dir(dir, …): where icon names are looked up, first match wins.
 ### `g.icon_path`
 
 ```luau
-icon_path: (name: string) -> string?
+icon_path: (name: string, size: number?) -> string?
 ```
 
-g.icon_path("firefox") → the file the icon theme gives, or nil.
+g.icon_path("firefox", size) → the file the icon theme gives, or nil; with a size (logical units), the one it draws for that size. A binding that reads portal.icon_theme too finds it again in another theme.
 
 ### `g.app_icon`
 
@@ -2366,6 +2366,14 @@ read high_contrast: boolean
 read reduced_motion: boolean
 ```
 
+### `portal.icon_theme`
+
+```luau
+read icon_theme: string
+```
+
+The icon theme's name, "" until it is known; once it changes, icons are found in the new one.
+
 ### `portal:open_file`
 
 ```luau
@@ -2435,10 +2443,10 @@ The icons that stand for it, the most precise first.
 ### `mime:icon`
 
 ```luau
-icon: (self: Mime, mime: string) -> string?
+icon: (self: Mime, mime: string, size: number?) -> string?
 ```
 
-The first of them the icon theme has, as a file, or nil.
+The first of them the icon theme has, as a file (with a size, the one drawn for it), or nil.
 
 ### `mime:is_a`
 
