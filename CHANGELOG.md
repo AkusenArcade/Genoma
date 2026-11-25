@@ -50,6 +50,9 @@ changes what a shell sees.
 - `g.directory { deep = true }`: with a filter, what is in the folders below
   too, as it is found, nearest first; `searching`, `capped`, and an entry's
   `within`. A home of 730 000 files: 0.7 s.
+- `g.directory { attribute, known, only }`: an extended attribute of each
+  entry, read and followed, and only those it says something of;
+  `files:set_attribute`.
 - `apps:terminal(folder)`: the desktop's terminal, in a folder.
 - `files:same_disk`: whether moving things somewhere only changes names.
 - `g.field { select = "stem" }` (or `"all"`): what is selected as it takes the

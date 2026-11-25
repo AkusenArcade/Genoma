@@ -482,7 +482,7 @@ g.folder { path, watch = true, hidden = false, details = false }: what is in a f
 ### `g.directory`
 
 ```luau
-directory: (t: { path: string | () -> string, hidden: (boolean | () -> boolean)?, sort: ("name" | "size" | "modified" | "type" | () -> string)?, descending: (boolean | () -> boolean)?, -- true folders_first: (boolean | () -> boolean)?, -- Only names containing it. filter: (string | () -> string)?, -- With a filter, what is in the folders below too, as it is found: -- this folder's own first, then the nearest. Links are not followed, -- hidden folders only with `hidden`, networks not gone into. deep: (boolean | () -> boolean)?, -- true: followed as it changes. watch: boolean? }) -> Directory
+directory: (t: { path: string | () -> string, hidden: (boolean | () -> boolean)?, sort: ("name" | "size" | "modified" | "type" | () -> string)?, descending: (boolean | () -> boolean)?, -- true folders_first: (boolean | () -> boolean)?, -- Only names containing it. filter: (string | () -> string)?, -- With a filter, what is in the folders below too, as it is found: -- this folder's own first, then the nearest. Links are not followed, -- hidden folders only with `hidden`, networks not gone into. deep: (boolean | () -> boolean)?, -- A user extended attribute read with each entry ("user.app.label"), -- followed too; not on a network. attribute: (string | () -> string)?, -- What is known of those that have none, by path: for disks without -- attributes. known: ({ [string]: string } | () -> { [string]: string })?, -- Only what the attribute says this of; with `deep`, below too. only: (string | () -> string?)?, -- true: followed as it changes. watch: boolean? }) -> Directory
 ```
 
 g.directory { path, sort = "name", … }: a folder for a file manager: read, sorted and filtered off the loop, followed, and handed out a window at a time (g.list's count and item). Each option is a value or a function, followed: path moves it to another folder, the others show the same one differently. Names sort as people do (no case, no accents, "2" before "10").
@@ -2635,6 +2635,14 @@ make_folder: (self: Files, folder: string, name: string, on_done: ((path: string
 make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> ()
 ```
 
+### `files:set_attribute`
+
+```luau
+set_attribute: (self: Files, paths: { string }, name: string, value: string?, on_done: ((failed: { string }) -> ())?) -> ()
+```
+
+A user extended attribute of each set, or taken off (nil): of the thing itself, so never a link's. Told those it could not be done to.
+
 ### `files:same_disk`
 
 ```luau
@@ -2804,6 +2812,7 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `name` | `string` | For showing; a name that is not UTF-8 has its odd bytes replaced. |
 | `path` | `string` | Byte for byte, for opening. |
 | `within` | `string?` | Found below the folder (`deep`): the way to it from there ("a/b"). |
+| `attribute` | `string?` | What the attribute asked for says of it. |
 | `dir` | `boolean` |  |
 | `link` | `boolean` | A symbolic link; the rest is what it points at. |
 | `broken` | `boolean` | A link to nothing. |

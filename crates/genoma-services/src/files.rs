@@ -1494,6 +1494,20 @@ pub fn check_name(name: &OsStr) -> Result<(), String> {
     Ok(())
 }
 
+/// An extended attribute of `path` itself set, or taken off it.
+pub fn set_attribute(path: &Path, name: &str, value: Option<&str>) -> io::Result<()> {
+    use rustix::io::Errno;
+    let done = match value {
+        Some(v) => rustix::fs::lsetxattr(path, name, v.as_bytes(), rustix::fs::XattrFlags::empty()),
+        // Where it can have none it has none.
+        None => match rustix::fs::lremovexattr(path, name) {
+            Err(Errno::NODATA | Errno::OPNOTSUPP) => Ok(()),
+            done => done,
+        },
+    };
+    done.map_err(Into::into)
+}
+
 /// Whether moving all of `paths` into `folder` is only changing names: they
 /// are on its disk.
 pub fn same_disk(paths: &[PathBuf], folder: &Path) -> bool {

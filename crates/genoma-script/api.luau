@@ -78,6 +78,8 @@ export type DirectoryEntry = {
     path: string,
     -- Found below the folder (`deep`): the way to it from there ("a/b").
     within: string?,
+    -- What the attribute asked for says of it.
+    attribute: string?,
     dir: boolean,
     -- A symbolic link; the rest is what it points at.
     link: boolean,
@@ -482,6 +484,14 @@ export type G = {
         -- this folder's own first, then the nearest. Links are not followed,
         -- hidden folders only with `hidden`, networks not gone into.
         deep: (boolean | () -> boolean)?,
+        -- A user extended attribute read with each entry ("user.app.label"),
+        -- followed too; not on a network.
+        attribute: (string | () -> string)?,
+        -- What is known of those that have none, by path: for disks without
+        -- attributes.
+        known: ({ [string]: string } | () -> { [string]: string })?,
+        -- Only what the attribute says this of; with `deep`, below too.
+        only: (string | () -> string?)?,
         -- true: followed as it changes.
         watch: boolean?,
     }) -> Directory,
@@ -1444,6 +1454,9 @@ export type Files = {
     rename: (self: Files, path: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_folder: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_file: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
+    -- A user extended attribute of each set, or taken off (nil): of the thing
+    -- itself, so never a link's. Told those it could not be done to.
+    set_attribute: (self: Files, paths: { string }, name: string, value: string?, on_done: ((failed: { string }) -> ())?) -> (),
     -- Whether moving them into a folder only changes names: they are on
     -- its disk. Found out off the loop.
     same_disk: (self: Files, paths: { string }, to: string, on_told: (same: boolean) -> ()) -> (),

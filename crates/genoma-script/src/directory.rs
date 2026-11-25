@@ -3,7 +3,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     ffi::OsString,
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::PathBuf,
@@ -24,7 +24,7 @@ use mlua::{Lua, LuaString, Table, UserData, UserDataFields, UserDataMethods, Val
 
 use crate::{
     err,
-    io::{HostRef, Post, Stop, mailbox, watch_dir},
+    io::{HostRef, Post, Stop, mailbox, watch_dir_for},
     mime::path_of,
 };
 
@@ -48,11 +48,19 @@ struct Due {
     found: Vec<Arc<Entry>>,
 }
 
+/// What is looked for below: the filter, whether hidden ones too, and what
+/// the attribute says.
+#[derive(Clone, PartialEq)]
+struct Asked {
+    filter: String,
+    hidden: bool,
+    only: Option<Arc<str>>,
+}
+
 /// A search below the folder.
 #[derive(Default)]
 struct Search {
-    /// What it looks for: the filter, and whether hidden ones too.
-    asked: Option<(String, bool)>,
+    asked: Option<Asked>,
     /// All of it was found.
     whole: bool,
 }
@@ -184,12 +192,12 @@ impl Inner {
     /// made or under way.
     fn look(self: &Rc<Self>, anew: bool) {
         let view = self.view.borrow().clone();
-        let wanted = (view.deep && !view.filter.trim().is_empty()).then(|| (directory::folded(&view.filter), view.hidden));
+        let wanted = view.looks().then(|| Asked { filter: directory::folded(&view.filter), hidden: view.hidden, only: view.only.clone() });
         {
             let mut s = self.search.borrow_mut();
             // All that has this name in it has the shorter one in it too.
             let covered = match (&s.asked, &wanted) {
-                (Some(a), Some(b)) => a == b || (s.whole && a.1 == b.1 && b.0.contains(&a.0)),
+                (Some(a), Some(b)) => a == b || (s.whole && (a.hidden, &a.only) == (b.hidden, &b.only) && b.filter.contains(&a.filter)),
                 (None, None) => true,
                 _ => false,
             };
@@ -207,28 +215,30 @@ impl Inner {
             self.capped.set(false);
             self.searching.set(wanted.is_some());
         });
-        let Some((filter, hidden)) = wanted else { return };
+        if wanted.is_none() {
+            return;
+        }
         let me = Rc::downgrade(self);
         self.host.timer(
             PAUSE,
             Box::new(move || {
                 if let Some(me) = me.upgrade().filter(|m| m.searches.load(Ordering::Relaxed) == search && !m.stopped.get()) {
-                    me.begin(search, filter.clone(), hidden);
+                    me.begin(search);
                 }
                 None
             }),
         );
     }
 
-    fn begin(&self, search: u64, filter: String, hidden: bool) {
+    fn begin(&self, search: u64) {
         let Some(post) = self.post.borrow().clone() else { return };
-        let path = self.path.borrow().clone();
+        let (path, view) = (self.path.borrow().clone(), self.view.borrow().clone());
         let cancel = Cancel { now: self.searches.clone(), started: search };
         let thread = std::thread::Builder::new().name("genoma-search".into()).spawn(move || {
             let last = post.clone();
             let post = std::sync::Mutex::new(post);
             let work = || {
-                directory::search(&path, &filter, hidden, &mime::database(), &cancel, &|found| {
+                directory::search(&path, &view, &mime::database(), &cancel, &|found| {
                     post.lock().unwrap().send(Made::Found { search, found });
                 });
             };
@@ -302,8 +312,8 @@ fn bytes(lua: &Lua, path: &std::path::Path) -> mlua::Result<LuaString> {
     lua.create_string(path.as_os_str().as_bytes())
 }
 
-fn entry(lua: &Lua, listing: &Listing, e: &Entry) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 11)?;
+fn entry(lua: &Lua, listing: &Listing, view: &View, e: &Entry) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 12)?;
     let (leaf, within) = e.leaf();
     t.raw_set("name", leaf.to_string_lossy().as_ref())?;
     if let Some(within) = within {
@@ -318,6 +328,9 @@ fn entry(lua: &Lua, listing: &Listing, e: &Entry) -> mlua::Result<Table> {
     t.raw_set("size", e.size as f64)?;
     t.raw_set("modified", e.modified)?;
     t.raw_set("mime", &*e.mime)?;
+    if let Some(a) = view.attribute_of(&listing.path, e) {
+        t.raw_set("attribute", &*a)?;
+    }
     Ok(t)
 }
 
@@ -345,7 +358,7 @@ impl UserData for Directory {
         methods.add_method("at", |lua, this, i: usize| {
             let listing = this.0.read();
             match i.checked_sub(1).and_then(|i| listing.shown.get(i)) {
-                Some(e) => Ok(LuaValue::Table(entry(lua, &listing, e)?)),
+                Some(e) => Ok(LuaValue::Table(entry(lua, &listing, &this.0.view.borrow(), e)?)),
                 None => Ok(LuaValue::Nil),
             }
         });
@@ -354,7 +367,7 @@ impl UserData for Directory {
             let listing = this.0.read();
             let list = lua.create_table()?;
             for e in listing.shown.iter().take(last).skip(first.max(1) - 1) {
-                list.raw_push(entry(lua, &listing, e)?)?;
+                list.raw_push(entry(lua, &listing, &this.0.view.borrow(), e)?)?;
             }
             Ok(list)
         });
@@ -396,7 +409,7 @@ impl UserData for Directory {
 }
 
 /// `g.directory { path, hidden, sort, descending, folders_first, filter,
-/// deep, watch }`: each a value or a function, followed: `path` moves it to
+/// deep, attribute, known, only, watch }`: each a value or a function, followed: `path` moves it to
 /// another folder, the others show the same one differently.
 pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Directory> {
     let value = move |t: &Table, name: &str| -> mlua::Result<LuaValue> {
@@ -439,12 +452,27 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
             folders_first: yes("folders_first", true)?,
             filter: text("filter")?.unwrap_or_default(),
             deep: yes("deep", false)?,
+            attribute: text("attribute")?.map(Into::into),
+            known: match value(t, "known")? {
+                LuaValue::Nil => Arc::default(),
+                LuaValue::Table(list) => {
+                    let mut known = HashMap::new();
+                    for pair in list.pairs::<LuaString, String>() {
+                        let (path, says) = pair?;
+                        known.insert(path_of(&path), says.into());
+                    }
+                    Arc::new(known)
+                }
+                _ => return Err(err("g.directory: known is a table, what is known by path")),
+            },
+            only: text("only")?.filter(|s| !s.is_empty()).map(Into::into),
         };
         Ok((path, view))
     };
     // A mistake in how it is asked for is told where it is made.
     untracked(|| asked(&t))?;
     let watch = t.get::<Option<bool>>("watch")?.unwrap_or(true);
+    let attributes = !matches!(t.get::<LuaValue>("attribute")?, LuaValue::Nil);
     let inner = Rc::new(Inner {
         host: host.clone(),
         stop: Stop::new(host),
@@ -508,11 +536,12 @@ pub fn directory(host: &HostRef, base: PathBuf, t: Table) -> mlua::Result<Direct
                     // another order of the same folder.
                     let stop = owned_by(me.stop.owner, || Stop::new(&me.host));
                     let m = Rc::downgrade(&me);
-                    watch_dir(
+                    watch_dir_for(
                         &me.host,
                         &stop,
                         path,
                         "g.directory",
+                        attributes,
                         Box::new(move |names, came| {
                             let Some(m) = m.upgrade() else { return };
                             {

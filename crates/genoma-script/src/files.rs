@@ -69,6 +69,8 @@ enum Sent {
     /// What was counted so far, and whether it is all.
     Measured(u64, Measure, bool),
     Told(u64, bool),
+    /// Those of some paths that something could not be done to.
+    Failed(u64, Vec<PathBuf>),
 }
 
 pub struct Files {
@@ -144,6 +146,14 @@ impl Files {
                 };
                 match args {
                     Ok(args) => call(&f, "files on_done", args, owner),
+                    Err(e) => log::error!("files on_done: {e}"),
+                }
+            }
+            Sent::Failed(id, list) => {
+                let Some((f, owner)) = self.waiting.borrow_mut().remove(&id) else { return };
+                let Some(lua) = f.weak_lua().try_upgrade() else { return };
+                match paths(&lua, &list) {
+                    Ok(t) => call(&f, "files on_done", t, owner),
                     Err(e) => log::error!("files on_done: {e}"),
                 }
             }
@@ -422,6 +432,26 @@ impl UserData for FilesRef {
             std::thread::Builder::new()
                 .name("genoma-files".into())
                 .spawn(move || post.send(Sent::Told(id, files::same_disk(&list, &folder))))
+                .map(|_| ())
+                .map_err(|e| err(format!("files: no thread: {e}")))
+        });
+        // files:set_attribute(paths, name, value or nil, function(failed) end).
+        methods.add_method("set_attribute", |_, this, (list, name, value, f): (Table, String, Option<String>, Option<Function>)| {
+            if !name.starts_with("user.") {
+                return Err(err("files:set_attribute: its name begins with \"user.\""));
+            }
+            let list = many(list)?;
+            let Some(post) = this.0.post.borrow().clone() else { return Err(err("files: not started")) };
+            let id = this.0.id();
+            if let Some(f) = f {
+                this.0.waiting.borrow_mut().insert(id, (f, current_owner()));
+            }
+            std::thread::Builder::new()
+                .name("genoma-files".into())
+                .spawn(move || {
+                    let failed = list.into_iter().filter(|p| files::set_attribute(p, &name, value.as_deref()).is_err()).collect();
+                    post.send(Sent::Failed(id, failed));
+                })
                 .map(|_| ())
                 .map_err(|e| err(format!("files: no thread: {e}")))
         });

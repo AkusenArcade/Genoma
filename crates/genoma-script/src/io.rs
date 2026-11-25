@@ -684,6 +684,7 @@ pub(crate) type Changed = Box<dyn FnMut(&[Vec<u8>], bool)>;
 struct Watch {
     id: u64,
     dir: PathBuf,
+    events: inotify::WatchFlags,
     wd: Option<i32>,
     armed: bool,
     /// Taken out while it is called: what it sets may watch or stop
@@ -719,6 +720,12 @@ impl Watches {
 
 /// `dir` watched until `stop` stops: `changed` hears of what happens in it.
 pub(crate) fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, changed: Changed) {
+    watch_dir_for(host, stop, dir, what, false, changed);
+}
+
+/// The same; with `attributes`, what changes in a file's attributes too.
+pub(crate) fn watch_dir_for(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, attributes: bool, changed: Changed) {
+    let events = if attributes { FILE_EVENTS | inotify::WatchFlags::ATTRIB } else { FILE_EVENTS };
     let id = WATCHES.with(|w| {
         let mut w = w.borrow_mut();
         if w.is_none() {
@@ -737,9 +744,9 @@ pub(crate) fn watch_dir(host: &HostRef, stop: &Stop, dir: PathBuf, what: &str, c
             }
         }
         let w = w.as_mut()?;
-        let (wd, armed) = watch_toward(w.fd.as_fd(), &dir, FILE_EVENTS);
+        let (wd, armed) = watch_toward(w.fd.as_fd(), &dir, events);
         w.next += 1;
-        w.watches.push(Watch { id: w.next, dir, wd, armed, changed: Some(changed) });
+        w.watches.push(Watch { id: w.next, dir, events, wd, armed, changed: Some(changed) });
         Some(w.next)
     });
     let Some(id) = id else { return };
@@ -795,7 +802,7 @@ fn watches_ready(fd: BorrowedFd<'_>) -> bool {
             let mut came = lost;
             if !all.watches[at].armed {
                 let before = all.watches[at].wd;
-                let (wd, armed) = watch_toward(all.fd.as_fd(), &all.watches[at].dir, FILE_EVENTS);
+                let (wd, armed) = watch_toward(all.fd.as_fd(), &all.watches[at].dir, all.watches[at].events);
                 all.watches[at].wd = wd;
                 all.watches[at].armed = armed;
                 if before != wd {

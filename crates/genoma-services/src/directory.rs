@@ -41,6 +41,8 @@ pub struct Entry {
     /// Seconds since 1970.
     pub modified: f64,
     pub mime: Arc<str>,
+    /// What the attribute asked for says of it.
+    pub attribute: Option<Arc<str>>,
     /// The name left the type open: the content has yet to say.
     unsure: bool,
     /// What sorts it among names.
@@ -63,11 +65,11 @@ impl Entry {
     }
 
     fn matches(&self, filter: &str) -> bool {
-        folded(&self.leaf().0.to_string_lossy()).contains(filter)
+        filter.is_empty() || folded(&self.leaf().0.to_string_lossy()).contains(filter)
     }
 
     /// The entry `name` of `dir` as it is now, or none.
-    fn read(dir: &Path, name: &OsStr, db: &Database) -> Option<Entry> {
+    fn read(dir: &Path, name: &OsStr, db: &Database, attribute: Option<&str>) -> Option<Entry> {
         let path = dir.join(name);
         let own = fs::symlink_metadata(&path).ok()?;
         let link = own.is_symlink();
@@ -96,10 +98,19 @@ impl Entry {
             size: if meta.is_dir() || broken { 0 } else { meta.len() },
             modified: meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64()),
             mime,
+            // Its own: a link has none.
+            attribute: if link { None } else { attribute.and_then(|a| attribute_of(&path, a)) },
             unsure,
             key: natural(&text).into(),
         })
     }
+}
+
+/// What attribute `name` of `path` says, when it has it and it is short.
+fn attribute_of(path: &Path, name: &str) -> Option<Arc<str>> {
+    let mut value = [0u8; 256];
+    let n = rustix::fs::lgetxattr(path, name, &mut value).ok()?;
+    std::str::from_utf8(&value[..n]).ok().filter(|v| !v.is_empty()).map(Into::into)
 }
 
 /// `text` without case or accents: what a filter matches, what sorts first.
@@ -164,13 +175,42 @@ pub struct View {
     pub folders_first: bool,
     /// Only names containing it, whatever the case and the accents.
     pub filter: String,
-    /// With a filter, what is in the folders below too.
+    /// With a filter or `only`, what is in the folders below too.
     pub deep: bool,
+    /// The extended attribute read with each entry, if any.
+    pub attribute: Option<Arc<str>>,
+    /// What is known of those that have none, by their paths.
+    pub known: Arc<HashMap<PathBuf, Arc<str>>>,
+    /// Only what the attribute says this of.
+    pub only: Option<Arc<str>>,
+}
+
+impl View {
+    /// What is looked for below, if anything is.
+    pub fn looks(&self) -> bool {
+        self.deep && (!self.filter.trim().is_empty() || self.only.is_some())
+    }
+
+    /// What the attribute says of an entry of `dir`.
+    pub fn attribute_of(&self, dir: &Path, e: &Entry) -> Option<Arc<str>> {
+        self.attribute.as_ref()?;
+        e.attribute.clone().or_else(|| if self.known.is_empty() { None } else { self.known.get(&dir.join(&e.name)).cloned() })
+    }
+
+    fn takes(&self, dir: &Path, e: &Entry, filter: &str) -> bool {
+        (self.hidden || !e.hidden()) && e.matches(filter) && self.only.as_ref().is_none_or(|o| self.attribute_of(dir, e).as_ref() == Some(o))
+    }
+
+    /// The attribute, where reading it is not a request each across a
+    /// network.
+    fn read_there(&self, dir: &Path) -> Option<&str> {
+        self.attribute.as_deref().filter(|_| !remote(dir))
+    }
 }
 
 impl Default for View {
     fn default() -> View {
-        View { hidden: false, by: By::Name, descending: false, folders_first: true, filter: String::new(), deep: false }
+        View { hidden: false, by: By::Name, descending: false, folders_first: true, filter: String::new(), deep: false, attribute: None, known: Arc::default(), only: None }
     }
 }
 
@@ -214,6 +254,7 @@ impl Listing {
     /// The folder `path` read whole.
     pub fn read(path: &Path, view: &View, db: &Database, cancel: &Cancel) -> Listing {
         let mut out = Listing { path: path.to_owned(), ..Default::default() };
+        let attribute = view.read_there(path);
         match fs::read_dir(path) {
             Ok(read) => {
                 for e in read {
@@ -221,7 +262,7 @@ impl Listing {
                         return out;
                     }
                     match e {
-                        Ok(e) => out.entries.extend(Entry::read(path, &e.file_name(), db).map(Arc::new)),
+                        Ok(e) => out.entries.extend(Entry::read(path, &e.file_name(), db, attribute).map(Arc::new)),
                         Err(e) => {
                             out.error = Some(reason(&e));
                             break;
@@ -241,8 +282,9 @@ impl Listing {
         let at: HashMap<&OsStr, usize> = self.entries.iter().enumerate().map(|(i, e)| (e.name.as_os_str(), i)).collect();
         let mut next: Vec<Option<Arc<Entry>>> = self.entries.iter().cloned().map(Some).collect();
         let mut changed = false;
+        let attribute = view.read_there(&self.path);
         for name in names {
-            let mut now = Entry::read(&self.path, name, db);
+            let mut now = Entry::read(&self.path, name, db, attribute);
             match at.get(name.as_os_str()).copied() {
                 Some(i) => {
                     let had = next[i].as_deref();
@@ -290,7 +332,7 @@ impl Listing {
         // Several names looked for one after the other: the last one's only.
         if found.len() > MOST * 2 {
             let filter = folded(&view.filter);
-            found.retain(|e| e.matches(&filter));
+            found.retain(|e| view.takes(&self.path, e, &filter));
         }
         self.next(self.entries.clone(), found, view)
     }
@@ -299,7 +341,8 @@ impl Listing {
     /// that, what is still there.
     pub fn again(&self, view: &View, db: &Database, cancel: &Cancel) -> Listing {
         let mut out = Listing::read(&self.path, view, db, cancel);
-        out.found = self.found.iter().filter_map(|e| Entry::read(&self.path, &e.name, db).map(Arc::new)).collect();
+        let attribute = view.read_there(&self.path);
+        out.found = self.found.iter().filter_map(|e| Entry::read(&self.path, &e.name, db, attribute).map(Arc::new)).collect();
         out.arrange(view);
         out
     }
@@ -307,7 +350,7 @@ impl Listing {
     /// The same entries in another view.
     pub fn arranged(&self, view: &View) -> Listing {
         // What was found is kept for what is typed next, until nothing is.
-        let found = if view.deep && !view.filter.is_empty() { self.found.clone() } else { Vec::new() };
+        let found = if view.looks() { self.found.clone() } else { Vec::new() };
         self.next(self.entries.clone(), found, view)
     }
 
@@ -346,17 +389,17 @@ impl Listing {
         let mut shown: Vec<Arc<Entry>> = self
             .entries
             .iter()
-            .filter(|e| (view.hidden || !e.hidden()) && (filter.is_empty() || e.matches(&filter)))
+            .filter(|e| view.takes(&self.path, e, &filter))
             .cloned()
             .collect();
-        if view.deep && !filter.is_empty() {
-            shown.extend(self.found.iter().filter(|e| (view.hidden || !e.hidden()) && e.matches(&filter)).cloned());
+        if view.looks() {
+            shown.extend(self.found.iter().filter(|e| view.takes(&self.path, e, &filter)).cloned());
         }
         // Looked for, what is nearer is seen first: this folder's own, then
         // those whose name begins so, then by how deep they are.
         let depth = |e: &Entry| e.name.as_bytes().iter().filter(|b| **b == b'/').count();
         let begins = |e: &Entry| folded(&e.leaf().0.to_string_lossy()).starts_with(&filter);
-        let far: HashMap<&OsStr, (bool, bool, usize)> = match view.deep && !filter.is_empty() {
+        let far: HashMap<&OsStr, (bool, bool, usize)> = match view.looks() {
             true => shown.iter().map(|e| (e.name.as_os_str(), (depth(e) > 0, view.by == By::Name && !begins(e), depth(e)))).collect(),
             false => HashMap::new(),
         };
@@ -417,12 +460,13 @@ struct Ahead {
     open: usize,
 }
 
-/// What is below `path` whose name contains `filter`, told a few at a time.
-/// Links are not followed, hidden folders only with `hidden`, and no disk
-/// that is a network's is gone into.
-pub fn search(path: &Path, filter: &str, hidden: bool, db: &Database, cancel: &Cancel, tell: &(dyn Fn(Found) + Sync)) {
-    let filter = folded(filter);
-    if filter.is_empty() || remote(path) {
+/// What is below `path` that `view` looks for, told a few at a time.
+/// Links are not followed, hidden folders only when they are shown, and no
+/// disk that is a network's is gone into.
+pub fn search(path: &Path, view: &View, db: &Database, cancel: &Cancel, tell: &(dyn Fn(Found) + Sync)) {
+    let (filter, hidden) = (folded(&view.filter), view.hidden);
+    let attribute = view.attribute.as_deref();
+    if !view.looks() || remote(path) {
         tell(Found { entries: Vec::new(), done: true, capped: false });
         return;
     }
@@ -476,8 +520,14 @@ pub fn search(path: &Path, filter: &str, hidden: bool, db: &Database, cancel: &C
                 }
                 let way = Path::new(&folder).join(&name).into_os_string();
                 // Its own are the listing's.
-                if !folder.is_empty() && folded(&name.to_string_lossy()).contains(&filter)
-                    && let Some(entry) = Entry::read(path, &way, db)
+                if !folder.is_empty()
+                    && (filter.is_empty() || folded(&name.to_string_lossy()).contains(&filter))
+                    // Asked before all the rest of it is read.
+                    && view.only.as_ref().is_none_or(|o| {
+                        let at = path.join(&way);
+                        attribute.and_then(|a| attribute_of(&at, a)).or_else(|| view.known.get(&at).cloned()).as_ref() == Some(o)
+                    })
+                    && let Some(entry) = Entry::read(path, &way, db, attribute)
                 {
                     count.fetch_add(1, Ordering::Relaxed);
                     flush(Some(Arc::new(entry)));
@@ -655,7 +705,8 @@ mod tests {
         let mut view = View { filter: "REPORT".into(), deep: true, ..Default::default() };
         let look = |hidden: bool| {
             let all = Mutex::new((Vec::new(), 0));
-            search(&dir, "REPORT", hidden, &db, &cancel(), &|f: Found| {
+            let asked = View { filter: "REPORT".into(), deep: true, hidden, ..Default::default() };
+            search(&dir, &asked, &db, &cancel(), &|f: Found| {
                 let mut a = all.lock().unwrap();
                 a.0.extend(f.entries);
                 a.1 += f.done as usize;
@@ -688,6 +739,43 @@ mod tests {
         view.filter.clear();
         let l = l.arranged(&view);
         assert!(l.found.is_empty() && l.shown.len() == 4);
+    }
+
+    #[test]
+    fn an_attribute_is_read_followed_and_looked_for() {
+        let dir = scratch("attribute");
+        for f in ["a.txt", "b.txt", "c.txt", "in/d.txt", "in/e.txt"] {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "x").unwrap();
+        }
+        let name = "user.genoma.test";
+        let set = |f: &str, v: &str| crate::files::set_attribute(&dir.join(f), name, Some(v));
+        if set("a.txt", "red").is_err() {
+            return; // Not where this runs.
+        }
+        set("in/d.txt", "red").unwrap();
+        let db = Database::default();
+        let mut view = View { attribute: Some(name.into()), deep: true, ..Default::default() };
+        let l = Listing::read(&dir, &view, &db, &cancel());
+        let of = |l: &Listing, v: &View| l.shown.iter().map(|e| v.attribute_of(&dir, e).map(|a| a.to_string())).collect::<Vec<_>>();
+        assert_eq!(names(&l), ["in", "a.txt", "b.txt", "c.txt"]);
+        assert_eq!(of(&l, &view), [None, Some("red".into()), None, None]);
+        // Another, gone, and one known apart.
+        set("b.txt", "blue").unwrap();
+        crate::files::set_attribute(&dir.join("a.txt"), name, None).unwrap();
+        view.known = Arc::new(HashMap::from([(dir.join("c.txt"), "red".into()), (dir.join("in/e.txt"), "red".into())]));
+        let l = l.updated(&["a.txt".into(), "b.txt".into()], &view, &db).unwrap();
+        assert_eq!(of(&l, &view), [None, None, Some("blue".into()), Some("red".into())]);
+        view.only = Some("red".into());
+        let l = l.arranged(&view);
+        assert_eq!(names(&l), ["c.txt"]);
+        let all = Mutex::new(Vec::new());
+        search(&dir, &view, &db, &cancel(), &|f: Found| all.lock().unwrap().extend(f.entries));
+        let l = l.joined(all.into_inner().unwrap(), &view);
+        assert_eq!(names(&l), ["c.txt", "in/d.txt", "in/e.txt"]);
+        // Gone where there is none, and off what is not there.
+        crate::files::set_attribute(&dir.join("c.txt"), name, None).unwrap();
+        assert!(set("none", "x").is_err());
     }
 
     #[test]
