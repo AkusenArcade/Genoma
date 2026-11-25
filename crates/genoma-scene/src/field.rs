@@ -295,6 +295,8 @@ impl Editor {
                 Some((a, b)) => _ = self.erase(a, b),
                 None => _ = self.erase(self.prev(caret), caret),
             },
+            // Not an editing key: whoever is around may mean it.
+            (false, "Delete" | "KP_Delete") if shift && selection.is_none() => out.used = false,
             (_, "Delete" | "KP_Delete") => match selection {
                 Some((a, b)) => _ = self.erase(a, b),
                 None => _ = self.erase(caret, self.next(caret)),
@@ -417,6 +419,19 @@ mod tests {
 
     fn key(e: &mut Editor, name: &str) -> Outcome {
         e.key(name, None, false, false, false)
+    }
+
+    #[test]
+    fn shift_delete_with_nothing_selected_is_left_to_others() {
+        let mut e = Editor::default();
+        e.set_text("abc");
+        e.move_to(1, false);
+        assert!(!e.key("Delete", None, false, true, false).used);
+        assert!(e.key("Delete", None, false, false, false).used);
+        assert_eq!(e.text(), "ac");
+        e.select_all();
+        assert!(e.key("Delete", None, false, true, false).used);
+        assert_eq!(e.text(), "");
     }
 
     #[test]

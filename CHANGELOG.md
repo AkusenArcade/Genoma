@@ -54,6 +54,7 @@ changes what a shell sees.
 - `files:same_disk`: whether moving things somewhere only changes names.
 - `g.field { select = "stem" }` (or `"all"`): what is selected as it takes the
   keys; a file's name without its ending.
+- A field leaves Shift+Delete to `on_key` while nothing in it is selected.
 - `on_drop` and `on_drop_hover` say whether what is dragged is the interface's
   own.
 - `g.pressed_at()`: where the last press was on its surface, for a menu.
