@@ -37,6 +37,8 @@ changes what a shell sees.
   URIs too, and a drop's `files` are byte for byte.
 - `on_click` is given which click in a row it is: 2 the second of a double.
 - `g.file_uri` and `g.uri_path`.
+- `g.dbus.serve`: `path` may be a list, `call` gets the caller's unique name
+  after the arguments, and `queue = true` waits for a name that is taken.
 - `g.list` takes `count` and `item` instead of `items`: only what comes
   into view is asked for.
 - `apps:launch` starts an application the menu leaves out (`NoDisplay`)

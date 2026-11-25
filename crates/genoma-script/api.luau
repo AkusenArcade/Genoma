@@ -600,13 +600,16 @@ export type G = {
         watch: (t: { [string]: any }) -> Stoppable,
         -- g.dbus.variant("y", 2): a value with the type it takes in a `v`.
         variant: (signature: string, value: any) -> any,
-        -- g.dbus.serve { bus, name, path, interfaces, on_error }: an object
+        -- g.dbus.serve { bus, name, path, interfaces, queue, on_error }: an object
         -- on the bus (MPRIS, FileManager1), on a connection of its own.
         -- interfaces = { ["org.x.Y"] = { methods = { Name = { args = "s",
         -- returns = "su", call = fn } }, properties = { Name = { signature
         -- = "d", get = fn, set = fn? } }, signals = { Name = "x" } } }.
         -- Introspect, Ping and the Properties interface are answered from
-        -- it; an error raised in `call` goes back to the caller.
+        -- it; an error raised in `call` goes back to the caller. `call`
+        -- gets the arguments, then the caller's unique name. `path` may be
+        -- a list: the same object under each. `queue = true` waits for a
+        -- name that is taken, as it is for a moment at each reload.
         serve: (t: { [string]: any }) -> Served,
     },
     pam: {

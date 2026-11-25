@@ -158,7 +158,7 @@ fn all_properties(interfaces: &Table, interface: &str) -> Result<Dyn, (String, S
 }
 
 /// The main thread's answer to one call: what Luau says, or why not.
-fn answer_call(lua: &Lua, interfaces: &Table, interface: &str, member: &str, args: &[Dyn]) -> Result<(String, Vec<Dyn>), (String, String)> {
+fn answer_call(lua: &Lua, interfaces: &Table, interface: &str, member: &str, sender: &str, args: &[Dyn]) -> Result<(String, Vec<Dyn>), (String, String)> {
     let failed = |e: mlua::Error| ("org.freedesktop.DBus.Error.Failed".to_owned(), e.to_string());
     let text = |i: usize| match args.get(i) {
         Some(Dyn::Str(s)) => Ok(s.clone()),
@@ -192,7 +192,10 @@ fn answer_call(lua: &Lua, interfaces: &Table, interface: &str, member: &str, arg
         .ok_or_else(|| ("org.freedesktop.DBus.Error.UnknownMethod".to_owned(), format!("no method {interface}.{member}")))?;
     let call: Function = method.get("call").map_err(failed)?;
     let returns: String = method.get::<Option<String>>("returns").map_err(failed)?.unwrap_or_default();
-    let values = args.iter().map(|a| to_lua(lua, a)).collect::<mlua::Result<Vec<_>>>().map_err(failed)?;
+    let mut values = args.iter().map(|a| to_lua(lua, a)).collect::<mlua::Result<Vec<_>>>().map_err(failed)?;
+    // Who calls, after what is asked: by its unique name, for what must go
+    // when it does.
+    values.push(LuaValue::String(lua.create_string(sender).map_err(failed)?));
     let out: MultiValue = call.call(MultiValue::from_iter(values)).map_err(failed)?;
     let wanted = complete_types(&returns).map_err(|e| ("org.freedesktop.DBus.Error.Failed".to_owned(), e))?.len();
     let out: Vec<Dyn> = out.iter().take(wanted).map(from_lua).collect();
@@ -244,12 +247,22 @@ impl UserData for Served {
     }
 }
 
-/// `g.dbus.serve { bus, name, path, interfaces, on_error }`.
+/// `g.dbus.serve { bus, name, path, interfaces, queue, on_error }`.
 pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
     let system = which_bus(&t)?;
     let name: Option<String> = t.get("name")?;
-    let path: String = t.get("path")?;
-    ObjectPath::try_from(path.as_str()).map_err(|e| err(format!("g.dbus.serve: path {path}: {e}")))?;
+    // One path, or several: the same object under each.
+    let served: Vec<String> = match t.get::<LuaValue>("path")? {
+        LuaValue::Table(t) => t.sequence_values::<String>().collect::<mlua::Result<_>>()?,
+        LuaValue::String(s) => vec![s.to_string_lossy()],
+        _ => Vec::new(),
+    };
+    for path in &served {
+        ObjectPath::try_from(path.as_str()).map_err(|e| err(format!("g.dbus.serve: path {path}: {e}")))?;
+    }
+    let Some(path) = served.first().cloned() else { return Err(err("g.dbus.serve wants a path, or a list of them")) };
+    // A name taken is waited for: the load before this one holds it still.
+    let queue = t.get::<Option<bool>>("queue")?.unwrap_or(false);
     let interfaces: Table = t.get("interfaces")?;
     let on_error: Option<Function> = t.get("on_error")?;
     let xml = introspection(&interfaces)?;
@@ -259,7 +272,7 @@ pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
     let (commands, commands_in) = unbounded::<Command>();
 
     // The main thread's side: each call, delivered as
-    // [serial, interface, member, args…] (or ["error", message]).
+    // [serial, interface, member, sender, args…] (or ["error", message]).
     let (defs, weak) = (interfaces.clone(), lua.weak());
     let handler = lua.create_function(move |_, values: MultiValue| {
         let Some(lua) = weak.try_upgrade() else { return Ok(()) };
@@ -271,8 +284,8 @@ pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
                     let _ = f.call::<()>(message.clone());
                 }
             }
-            [Dyn::Int(serial), Dyn::Str(interface), Dyn::Str(member), args @ ..] => {
-                let result = answer_call(&lua, &defs, interface, member, args);
+            [Dyn::Int(serial), Dyn::Str(interface), Dyn::Str(member), Dyn::Str(sender), args @ ..] => {
+                let result = answer_call(&lua, &defs, interface, member, sender, args);
                 if let Err((name, message)) = &result {
                     log::debug!("g.dbus.serve: {interface}.{member}: {name}: {message}");
                 }
@@ -296,8 +309,10 @@ pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
         };
         let calls = MessageStream::from(&conn);
         if let Some(name) = &name {
-            match conn.request_name_with_flags(name.as_str(), zbus::fdo::RequestNameFlags::DO_NOT_QUEUE).await {
+            let flags = if queue { Default::default() } else { zbus::fdo::RequestNameFlags::DO_NOT_QUEUE.into() };
+            match conn.request_name_with_flags(name.as_str(), flags).await {
                 Ok(zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner) => {}
+                Ok(zbus::fdo::RequestNameReply::InQueue) if queue => {}
                 Ok(other) => return say(format!("{name}: not ours ({other:?})")),
                 Err(e) => return say(format!("{name}: {e}")),
             }
@@ -315,7 +330,7 @@ pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
                         continue;
                     }
                     let header = message.header();
-                    if header.path().map(|p| p.as_str()) != Some(path.as_str()) {
+                    if !header.path().is_some_and(|p| served.iter().any(|s| s == p.as_str())) {
                         let _ = conn
                             .reply_error(&header, "org.freedesktop.DBus.Error.UnknownObject", &format!("no object at {}", header.path().map_or("", |p| p.as_str())))
                             .await;
@@ -346,7 +361,8 @@ pub fn serve(dbus: &Rc<Dbus>, lua: &Lua, t: Table) -> mlua::Result<Served> {
                             if let Ok(mut p) = pending.lock() {
                                 p.insert(serial, message.clone());
                             }
-                            let mut values = vec![Dyn::Int(i64::from(serial)), Dyn::Str(interface), Dyn::Str(member)];
+                            let sender = header.sender().map(|s| s.as_str().to_owned()).unwrap_or_default();
+                            let mut values = vec![Dyn::Int(i64::from(serial)), Dyn::Str(interface), Dyn::Str(member), Dyn::Str(sender)];
                             values.extend(args);
                             let _ = out.send(crate::dbus::Delivery { id, result: Ok(values), last: false });
                         }
