@@ -8,6 +8,13 @@ changes what a shell sees.
 
 ## Unreleased
 
+### Added
+
+- `t:cursor().shape`: the cursor's shape the program asked for (DECSCUSR),
+  "block", "beam" or "underline"; a hidden one is not `shown`.
+- `t.received`: the bytes the program has written, all told; read with
+  `t.changed`, how fast it writes.
+
 ### Fixed
 
 - A path's stroke with a long straight run after a curve (a line that

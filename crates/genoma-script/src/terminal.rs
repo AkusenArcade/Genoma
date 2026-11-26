@@ -23,7 +23,7 @@ use alacritty_terminal::{
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     term::{Config, Term, TermMode, cell::Flags, color::Colors},
-    vte::ansi::{Color, NamedColor, Processor, Rgb, StdSyncHandler},
+    vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use genoma_core::reactive::{Effect, Signal, current_owner};
 use genoma_scene::grid::{GridCell, GridFrame, GridRow, GridSource, flags};
@@ -214,6 +214,9 @@ pub(crate) struct Emulator {
     /// Lines the view leaves out (a folded output): first and last, each
     /// included.
     hidden: Vec<(f64, f64)>,
+    /// How many bytes the program has written, all told: how fast it
+    /// writes is the interface's to follow.
+    received: u64,
 }
 
 impl Emulator {
@@ -249,6 +252,7 @@ impl Emulator {
             marks: std::collections::HashMap::new(),
             next_mark: 1,
             hidden: Vec::new(),
+            received: 0,
         }
     }
 
@@ -450,6 +454,7 @@ impl Emulator {
     /// A chunk of what the program wrote, parsed; what the shell said in it,
     /// in order.
     fn feed(&mut self, data: &[u8]) -> Vec<Said> {
+        self.received += data.len() as u64;
         let mut said = Vec::new();
         let mut from = 0;
         let mut i = 0;
@@ -844,6 +849,9 @@ impl UserData for Terminal {
         // t.changed: a number that grows whenever the screen may have
         // changed; a binding that reads it follows the screen.
         fields.add_field_method_get("changed", |_, this| Ok(this.shared.changed.get()));
+        // t.received: the bytes the program has written, all told; read
+        // with t.changed, how fast it writes.
+        fields.add_field_method_get("received", |_, this| Ok(this.shared.em().received as f64));
         fields.add_field_method_get("cols", |_, this| Ok(this.shared.em().size.columns));
         fields.add_field_method_get("rows", |_, this| Ok(this.shared.em().size.lines));
         // The first line still kept, and the screen's first and last.
@@ -887,14 +895,24 @@ impl UserData for Terminal {
                 row[Column(e.size.columns - 1)].flags.contains(Flags::WRAPLINE)
             }))
         });
-        // t:cursor(): { line, column, shown }.
+        // t:cursor(): { line, column, shown, shape }: the shape the program
+        // asked for (DECSCUSR), "block", "beam" or "underline".
         methods.add_method("cursor", |lua, this, ()| {
             let e = this.shared.em();
             let Point { line, column } = e.term.grid().cursor.point;
+            let style = e.term.cursor_style();
             let t = lua.create_table()?;
             t.set("line", e.absolute(line))?;
             t.set("column", column.0)?;
-            t.set("shown", e.term.mode().contains(TermMode::SHOW_CURSOR))?;
+            t.set("shown", e.term.mode().contains(TermMode::SHOW_CURSOR) && style.shape != CursorShape::Hidden)?;
+            t.set(
+                "shape",
+                match style.shape {
+                    CursorShape::Beam => "beam",
+                    CursorShape::Underline => "underline",
+                    _ => "block",
+                },
+            )?;
             Ok(t)
         });
         // t:view(): what the view shows: the line at its top, how far it is

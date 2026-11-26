@@ -2949,6 +2949,7 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | Field | Type | |
 |---|---|---|
 | `changed` | `number` | Grows whenever the screen may have changed: a binding that reads it follows the screen. |
+| `received` | `number` | The bytes the program has written, all told: read with `changed`, how fast it writes. |
 | `cols` | `number` |  |
 | `rows` | `number` |  |
 | `first_line` | `number` | Lines are counted from the grid's first, and keep their number while the history grows and drops old ones: the first still kept, the screen's first and its last. |
@@ -2957,7 +2958,7 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `line` | `(self: Terminal, n: number) -> string?` | t:line(n): its text without the blanks at its end; nil once dropped. |
 | `lines` | `(self: Terminal, first: number, last: number) -> { string }` |  |
 | `wrapped` | `(self: Terminal, n: number) -> boolean` | t:wrapped(n): the line goes on into the next (cut by the width). |
-| `cursor` | `(self: Terminal) -> { line: number, column: number, shown: boolean }` |  |
+| `cursor` | `(self: Terminal) -> { line: number, column: number, shown: boolean, shape: string }` | t:cursor(): where it is, whether it is shown, and the shape the program asked for (DECSCUSR): "block", "beam" or "underline". |
 | `mark` | `(self: Terminal, id: number) -> number?` | t:mark(id): the line a mark (on_mark's id) is on now: it moves with its text when the lines rewrap; nil once it has left the history. |
 | `forget` | `(self: Terminal, id: number) -> ()` |  |
 | `row` | `(self: Terminal, n: number) -> number?` | t:row(n): the view's row line n is drawn on, from 0; nil out of view. |

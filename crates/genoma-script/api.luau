@@ -214,6 +214,9 @@ export type Terminal = {
     -- Grows whenever the screen may have changed: a binding that reads it
     -- follows the screen.
     read changed: number,
+    -- The bytes the program has written, all told: read with `changed`,
+    -- how fast it writes.
+    read received: number,
     read cols: number,
     read rows: number,
     -- Lines are counted from the grid's first, and keep their number while
@@ -227,7 +230,9 @@ export type Terminal = {
     lines: (self: Terminal, first: number, last: number) -> { string },
     -- t:wrapped(n): the line goes on into the next (cut by the width).
     wrapped: (self: Terminal, n: number) -> boolean,
-    cursor: (self: Terminal) -> { line: number, column: number, shown: boolean },
+    -- t:cursor(): where it is, whether it is shown, and the shape the program
+    -- asked for (DECSCUSR): "block", "beam" or "underline".
+    cursor: (self: Terminal) -> { line: number, column: number, shown: boolean, shape: string },
     -- t:mark(id): the line a mark (on_mark's id) is on now: it moves with
     -- its text when the lines rewrap; nil once it has left the history.
     mark: (self: Terminal, id: number) -> number?,
