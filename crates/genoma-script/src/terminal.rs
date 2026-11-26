@@ -76,7 +76,7 @@ enum Said {
     /// OSC 133: `kind` is "prompt" (A), "command" (B), "output" (C) or
     /// "done" (D, with its exit code when given); the line and column the
     /// cursor stood on.
-    Mark { kind: &'static str, line: f64, column: usize, code: Option<i32> },
+    Mark { kind: &'static str, id: u64, line: f64, column: usize, code: Option<i32> },
     /// OSC 7: the folder, from its file:// URI.
     Cwd(String),
     /// OSC 9;4: 0 none, 1 going, 2 error, 3 not known how far, 4 paused;
@@ -207,6 +207,13 @@ pub(crate) struct Emulator {
     /// The last cell the pointer reported to a program, so a move inside
     /// one cell is not told again.
     last_reported: Option<(usize, usize)>,
+    /// The marks a shell set (OSC 133), by id: the line each is on. A
+    /// resize that rewraps the lines moves them with their text.
+    marks: std::collections::HashMap<u64, f64>,
+    next_mark: u64,
+    /// Lines the view leaves out (a folded output): first and last, each
+    /// included.
+    hidden: Vec<(f64, f64)>,
 }
 
 impl Emulator {
@@ -239,15 +246,99 @@ impl Emulator {
             palette,
             selection_colour: [0.9, 0.76, 0.38, 0.35],
             last_reported: None,
+            marks: std::collections::HashMap::new(),
+            next_mark: 1,
+            hidden: Vec::new(),
+        }
+    }
+
+    /// The lines the view shows now, top to bottom: from the bottom of the
+    /// view upward, those not left out, as many as there are rows.
+    fn shown(&self) -> Vec<Line> {
+        let grid = self.term.grid();
+        let rows = self.size.lines;
+        let offset = grid.display_offset() as i32;
+        let bottom = rows as i32 - 1 - offset;
+        if self.hidden.is_empty() || self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return (0..rows as i32).map(|r| Line(r - offset)).collect();
+        }
+        let top = -(grid.history_size() as i32);
+        let mut out = Vec::with_capacity(rows);
+        let mut line = bottom;
+        while out.len() < rows && line >= top {
+            let n = self.absolute(Line(line));
+            if !self.hidden.iter().any(|(a, b)| n >= *a && n <= *b) {
+                out.push(Line(line));
+            }
+            line -= 1;
+        }
+        out.reverse();
+        out
+    }
+
+    /// The grid resized; the marks moved with their text, counted in
+    /// whole lines (a line and what wraps from it) from the cursor, which
+    /// a rewrap keeps in place.
+    fn resize(&mut self, size: Size) {
+        let wrapped = |e: &Emulator, l: Line| -> bool {
+            let row = &e.term.grid()[l];
+            row[Column(e.size.columns - 1)].flags.contains(Flags::WRAPLINE)
+        };
+        let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let cursor = self.term.grid().cursor.point.line;
+        let mut distances = Vec::new();
+        if !alt {
+            for (id, n) in &self.marks {
+                if let Some(l) = self.line_of(*n) {
+                    // Whole lines between the mark's and the cursor's.
+                    let mut d = 0i64;
+                    let mut i = l;
+                    while i < cursor {
+                        if !wrapped(self, i) {
+                            d += 1;
+                        }
+                        i += 1;
+                    }
+                    distances.push((*id, d));
+                }
+            }
+        }
+        self.size = size;
+        self.term.resize(size);
+        if alt {
+            return;
+        }
+        let cursor = self.term.grid().cursor.point.line;
+        let top = -(self.term.grid().history_size() as i32);
+        for (id, d) in distances {
+            // Back up from the cursor's line by as many whole lines.
+            let mut i = cursor;
+            let mut left = d;
+            while left > 0 && i.0 > top {
+                i -= 1;
+                if !wrapped(self, i) {
+                    left -= 1;
+                }
+            }
+            // To where that whole line begins.
+            while i.0 > top && wrapped(self, i - 1) {
+                i -= 1;
+            }
+            if left == 0 {
+                let n = self.absolute(i);
+                self.marks.insert(id, n);
+            } else {
+                self.marks.remove(&id);
+            }
         }
     }
 
     /// A cell of the view (column, row from its top) as a point of the grid.
     fn point(&self, column: usize, row: usize) -> Point {
-        let offset = self.term.grid().display_offset() as i32;
         let column = column.min(self.size.columns.saturating_sub(1));
-        let row = row.min(self.size.lines.saturating_sub(1));
-        Point::new(Line(row as i32 - offset), Column(column))
+        let shown = self.shown();
+        let line = shown.get(row).or(shown.last()).copied().unwrap_or(Line(0));
+        Point::new(line, Column(column))
     }
 
     /// A pointer event told to the program, when it asked for them: SGR's
@@ -297,7 +388,7 @@ impl Emulator {
         (line >= top && line < grid.screen_lines() as i64).then_some(Line(line as i32))
     }
 
-    fn mark(&self, payload: &[u8], out: &mut Vec<Said>) {
+    fn mark(&mut self, payload: &[u8], out: &mut Vec<Said>) {
         let text = String::from_utf8_lossy(payload);
         let mut parts = text.split(';');
         let first = parts.next().unwrap_or_default();
@@ -315,7 +406,14 @@ impl Emulator {
                 // D's exit code, the first number after it; the rest are
                 // key=value options (fish's click_events).
                 let code = if kind == "done" { parts.find_map(|p| p.parse::<i32>().ok()) } else { None };
-                out.push(Said::Mark { kind, line: self.absolute(at.line), column: at.column.0, code });
+                let line = self.absolute(at.line);
+                let id = self.next_mark;
+                self.next_mark += 1;
+                self.marks.insert(id, line);
+                // What has left the history takes its marks with it.
+                let first = self.absolute(Line(-(self.term.grid().history_size() as i32)));
+                self.marks.retain(|_, l| *l >= first);
+                out.push(Said::Mark { kind, id, line, column: at.column.0, code });
             }
             "7" => {
                 let uri = text.splitn(2, ';').nth(1).unwrap_or_default();
@@ -423,14 +521,13 @@ impl Emulator {
     /// The rows in view, as the grid node draws them.
     fn frame(&self, rows: usize) -> GridFrame {
         let grid = self.term.grid();
-        let offset = grid.display_offset() as i32;
+        let shown = self.shown();
         let columns = self.size.columns;
         let to = |rgb: Rgb, a: f32| [rgb.r as f32 / 255.0, rgb.g as f32 / 255.0, rgb.b as f32 / 255.0, a];
         let mut out = Vec::with_capacity(rows);
         let selected = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term));
         let sel = self.selection_colour;
-        for r in 0..rows.min(self.size.lines) {
-            let line = Line(r as i32 - offset);
+        for &line in shown.iter().take(rows) {
             let row = &grid[line];
             let mut cells = Vec::with_capacity(columns);
             for c in 0..columns {
@@ -588,11 +685,11 @@ impl GridSource for View {
             let cell_changed = shared.cell.get() != cell;
             shared.cell.set(cell);
             if size_changed || cell_changed {
-                e.size = Size { columns: columns.max(2), lines: rows.max(1) };
+                let wanted = Size { columns: columns.max(2), lines: rows.max(1) };
                 let px = [cell[0].round() as u16, cell[1].round() as u16];
                 e.cell = (px[0], px[1]);
-                let size = e.size;
-                e.term.resize(size);
+                let size = wanted;
+                e.resize(size);
                 shared.pty.resize(
                     size.columns as u16,
                     size.lines as u16,
@@ -686,9 +783,9 @@ impl Shared {
         }
         for s in said {
             match s {
-                Said::Mark { kind, line, column, code } => {
+                Said::Mark { kind, id, line, column, code } => {
                     if let Some(f) = &self.callbacks.on_mark {
-                        call(f, "g.terminal on_mark", (kind, line, column, code), o);
+                        call(f, "g.terminal on_mark", (kind, id, line, column, code), o);
                     }
                 }
                 Said::Cwd(path) => {
@@ -815,6 +912,74 @@ impl UserData for Terminal {
             t.set("rows", e.size.lines)?;
             Ok(t)
         });
+        // t:mark(id): the line a mark is on now (it moves with its text when
+        // the lines rewrap); nil once it has left the history.
+        methods.add_method("mark", |_, this, id: u64| {
+            let e = this.shared.em();
+            Ok(e.marks.get(&id).copied().filter(|n| e.line_of(*n).is_some()))
+        });
+        // t:forget(id): a mark no longer wanted.
+        methods.add_method("forget", |_, this, id: u64| {
+            this.shared.em().marks.remove(&id);
+            Ok(())
+        });
+        // t:row(n): the row of the view line n is drawn on, from 0; nil
+        // when it is not in view (scrolled away, or left out).
+        methods.add_method("row", |_, this, n: f64| {
+            let e = this.shared.em();
+            let Some(line) = e.line_of(n) else { return Ok(None) };
+            Ok(e.shown().iter().position(|l| *l == line))
+        });
+        // t:span(first, last): the rows of the view lines first to last are
+        // drawn on, top and bottom, from 0; nil when none is in view.
+        methods.add_method("span", |_, this, (first, last): (f64, f64)| {
+            let e = this.shared.em();
+            let shown = e.shown();
+            let mut top = None;
+            let mut bottom = None;
+            for (r, l) in shown.iter().enumerate() {
+                let n = e.absolute(*l);
+                if n >= first && n <= last {
+                    top.get_or_insert(r);
+                    bottom = Some(r);
+                }
+            }
+            Ok(top.zip(bottom).map(|(a, b)| (a, b)).map_or((None, None), |(a, b)| (Some(a), Some(b))))
+        });
+        // t:line_at(row): the line a row of the view shows.
+        methods.add_method("line_at", |_, this, row: usize| {
+            let e = this.shared.em();
+            Ok(e.shown().get(row).map(|l| e.absolute(*l)))
+        });
+        // t:hide { { first, last }, … }: lines the view leaves out (a folded
+        // output), each range's ends included; t:hide {} shows them all.
+        methods.add_method("hide", |_, this, list: Vec<Vec<f64>>| {
+            let ranges: Vec<(f64, f64)> = list.iter().filter_map(|r| Some((*r.first()?, *r.get(1)?))).filter(|(a, b)| b >= a).collect();
+            let same = this.shared.em().hidden == ranges;
+            if !same {
+                this.shared.em().hidden = ranges;
+                this.shared.bump();
+            }
+            Ok(())
+        });
+        // t:reveal(n): the view scrolled so line n is in it, about its middle
+        // when it has to move.
+        methods.add_method("reveal", |_, this, n: f64| {
+            {
+                let mut e = this.shared.em();
+                let Some(line) = e.line_of(n) else { return Ok(()) };
+                if e.shown().contains(&line) {
+                    return Ok(());
+                }
+                let rows = e.size.lines as i32;
+                let history = e.term.grid().history_size() as i32;
+                let offset = (rows / 2 - line.0).clamp(0, history);
+                let now = e.term.grid().display_offset() as i32;
+                e.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(offset - now));
+            }
+            this.shared.bump();
+            Ok(())
+        });
         // t:scroll(lines): the view moved back (positive) or forward into the
         // history; t:scroll() back to the bottom.
         methods.add_method("scroll", |_, this, lines: Option<i32>| {
@@ -840,10 +1005,8 @@ impl UserData for Terminal {
             let ch: u16 = t.get::<Option<u16>>("height")?.unwrap_or(0);
             {
                 let mut e = this.shared.em();
-                e.size = Size { columns: cols, lines: rows };
                 e.cell = (cw, ch);
-                let size = e.size;
-                e.term.resize(size);
+                e.resize(Size { columns: cols, lines: rows });
             }
             this.shared.pty.resize(cols as u16, rows as u16, cw.saturating_mul(cols as u16), ch.saturating_mul(rows as u16));
             this.shared.changed.set(this.shared.count.get() + 0.5);
@@ -1091,6 +1254,36 @@ pub fn open(t: Table) -> mlua::Result<Terminal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_at(e: &Emulator, n: f64) -> String {
+        e.text(e.line_of(n).expect("kept"))
+    }
+
+    #[test]
+    fn a_mark_keeps_its_line_when_the_lines_rewrap() {
+        let mut e = Emulator::new(40, 10, 100);
+        // A long line above (it rewraps), then a prompt with its mark.
+        e.feed(&[b"x".repeat(70).as_slice(), b"\r\nfirst\r\n\x1b]133;A\x07$ ls\r\nout one\r\nout two\r\n\x1b]133;A\x07$ "].concat());
+        let marks: Vec<(u64, f64)> = { let mut m: Vec<_> = e.marks.iter().map(|(a, b)| (*a, *b)).collect(); m.sort_by_key(|(id, _)| *id); m };
+        assert_eq!(marks.len(), 2);
+        assert_eq!(text_at(&e, marks[0].1), "$ ls");
+        e.resize(Size { columns: 20, lines: 10 });
+        assert_eq!(text_at(&e, e.marks[&marks[0].0]), "$ ls");
+        assert_eq!(text_at(&e, e.marks[&marks[1].0]), "$");
+        e.resize(Size { columns: 80, lines: 6 });
+        assert_eq!(text_at(&e, e.marks[&marks[0].0]), "$ ls");
+    }
+
+    #[test]
+    fn hidden_lines_leave_the_view() {
+        let mut e = Emulator::new(20, 4, 100);
+        e.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        let first = e.absolute(Line(0));
+        e.hidden = vec![(first + 1.0, first + 2.0)];
+        let shown: Vec<String> = e.shown().iter().map(|l| e.text(*l)).collect();
+        // d and e left out: the view reaches back into the history for a and b.
+        assert_eq!(shown, ["a", "b", "c", "f"]);
+    }
 
     #[test]
     fn a_word_is_what_spaces_bound() {

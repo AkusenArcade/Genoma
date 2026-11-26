@@ -515,10 +515,10 @@ g.pty { command, cwd, env, cols, rows, width, height, on_data, on_exit }: a prog
 ### `g.terminal`
 
 ```luau
-terminal: (t: { pty: Pty, cols: number?, rows: number?, history: number?, on_title: ((title: string) -> ())?, on_bell: (() -> ())?, on_clipboard: ((text: string) -> ())?, on_mark: ((kind: string, line: number, column: number, code: number?) -> ())?, on_cwd: ((path: string) -> ())?, on_progress: ((state: number, value: number) -> ())?, on_notify: ((title: string, body: string) -> ())? }) -> Terminal
+terminal: (t: { pty: Pty, cols: number?, rows: number?, history: number?, on_title: ((title: string) -> ())?, on_bell: (() -> ())?, on_clipboard: ((text: string) -> ())?, on_mark: ((kind: string, id: number, line: number, column: number, code: number?) -> ())?, on_cwd: ((path: string) -> ())?, on_progress: ((state: number, value: number) -> ())?, on_notify: ((title: string, body: string) -> ())? }) -> Terminal
 ```
 
-g.terminal { pty, cols, rows, history, on_title, on_bell, on_clipboard, on_mark, on_cwd, on_progress, on_notify }: what a g.pty's program writes, parsed (alacritty_terminal) into a grid and its history, in Rust: the bytes never reach Luau. on_mark(kind, line, column, code): OSC 133, kind "prompt", "command", "output" or "done" (with the exit code); on_cwd(path): OSC 7; on_progress(state, value): OSC 9;4; on_notify(title, body): OSC 777 and 9; on_clipboard(text): OSC 52 (reading the clipboard is never granted).
+g.terminal { pty, cols, rows, history, on_title, on_bell, on_clipboard, on_mark, on_cwd, on_progress, on_notify }: what a g.pty's program writes, parsed (alacritty_terminal) into a grid and its history, in Rust: the bytes never reach Luau. on_mark(kind, id, line, column, code): OSC 133, kind "prompt", "command", "output" or "done" (with the exit code), `id` what t:mark follows it by; on_cwd(path): OSC 7; on_progress(state, value): OSC 9;4; on_notify(title, body): OSC 777 and 9; on_clipboard(text): OSC 52 (reading the clipboard is never granted).
 
 ### `g.http`
 
@@ -2958,6 +2958,13 @@ size (bytes) and modified (seconds since 1970) with `details = true`.
 | `lines` | `(self: Terminal, first: number, last: number) -> { string }` |  |
 | `wrapped` | `(self: Terminal, n: number) -> boolean` | t:wrapped(n): the line goes on into the next (cut by the width). |
 | `cursor` | `(self: Terminal) -> { line: number, column: number, shown: boolean }` |  |
+| `mark` | `(self: Terminal, id: number) -> number?` | t:mark(id): the line a mark (on_mark's id) is on now: it moves with its text when the lines rewrap; nil once it has left the history. |
+| `forget` | `(self: Terminal, id: number) -> ()` |  |
+| `row` | `(self: Terminal, n: number) -> number?` | t:row(n): the view's row line n is drawn on, from 0; nil out of view. |
+| `span` | `(self: Terminal, first: number, last: number) -> (number?, number?)` | t:span(first, last): the top and bottom rows of the part of those lines in view; nil when none is. |
+| `line_at` | `(self: Terminal, row: number) -> number?` | t:line_at(row): the line a row of the view shows. |
+| `hide` | `(self: Terminal, ranges: { { number } }) -> ()` | t:hide { { first, last }, … }: lines the view leaves out (a folded output); the rows above take their place. |
+| `reveal` | `(self: Terminal, n: number) -> ()` | t:reveal(n): the view scrolled so line n is in it. |
 | `view` | `(self: Terminal) -> { first: number, offset: number, cell_width: number, cell_height: number, cols: number, rows: number }` | What the view shows: the line at its top, how far back it is scrolled, a cell's size in logical units, the cells. |
 | `scroll` | `(self: Terminal, lines: number?) -> ()` | t:scroll(lines): back into the history (positive) or forward; t:scroll() to the bottom. |
 | `modes` | `(self: Terminal) -> { [string]: boolean }` | What the program asked of the terminal: alt_screen, show_cursor, app_cursor, bracketed_paste, focus_in_out, the mouse's and the kitty keyboard protocol's modes. |

@@ -23,6 +23,10 @@ changes what a shell sees.
   writing only) reach Luau as callbacks. `t:key` sends a key as the program
   asked: xterm's bytes, or the kitty keyboard protocol's; the composed text
   of dead keys as typed. `t:paste` brackets a paste where it was asked for.
+  The shell's marks are followed by id (`t:mark`): a resize that rewraps the
+  lines moves them with their text. `t:hide` leaves ranges of lines out of
+  the view (a folded output), `t:row`, `t:span` and `t:line_at` say where
+  lines are drawn, `t:reveal` scrolls one into view.
   `t:select` / `t:select_to` / `t:selected`: a selection by character, word,
   line or block, drawn tinted. `t:mouse` tells the program the pointer when
   it asked for it (SGR or xterm's form); Shift keeps it for the terminal.
