@@ -6,6 +6,17 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Fixed
+
+- A path's stroke with a long straight run after a curve (a line that
+  rises over a tab and runs on) drew a second, brighter line along part of
+  the run: the antialiasing fringe moved a corner of the curve half a pixel
+  in, and a long, thin triangle from it to the run's far end tilted with
+  it. The triangles along the boundary are now cut short where a corner
+  moves, so each move stays near its corner.
+
 ## 0.1.25 — 2026-11-26
 
 ### Added

@@ -541,6 +541,43 @@ impl Meshes {
 mod tests {
     use super::*;
 
+    /// The coverage a mesh gives a point: the triangle it lies in, its
+    /// corners' coverage interpolated; the highest where several overlap.
+    fn coverage_at(mesh: &Mesh, p: [f32; 2]) -> f32 {
+        let mut best: f32 = 0.0;
+        for t in mesh.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| mesh.vertices[i as usize]);
+            let (pa, pb, pc) = (a.position, b.position, c.position);
+            let d = (pb[1] - pc[1]) * (pa[0] - pc[0]) + (pc[0] - pb[0]) * (pa[1] - pc[1]);
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let wa = ((pb[1] - pc[1]) * (p[0] - pc[0]) + (pc[0] - pb[0]) * (p[1] - pc[1])) / d;
+            let wb = ((pc[1] - pa[1]) * (p[0] - pc[0]) + (pa[0] - pc[0]) * (p[1] - pc[1])) / d;
+            let wc = 1.0 - wa - wb;
+            if wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4 {
+                best = best.max(wa * a.coverage + wb * b.coverage + wc * c.coverage);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn a_straight_run_after_a_curve_is_one_line() {
+        // Floema's tab line (2026-11-26): along the run after the last
+        // curve, the pixel row above the line was drawn as a second line.
+        let d = "M 0 34.5 L 121 34.5 C 125.97 34.5 130 30.47 130 25.5 L 130 14 C 130 7.92 134.92 3 141 3 L 212 3 C 218.08 3 223 7.92 223 14 L 223 25.5 C 223 30.47 227.03 34.5 232 34.5 L 640 34.5";
+        let path = outline(Some(d), &[]).unwrap();
+        let style = Style { width: 1.3, join: "miter", cap: "butt", dash: &[], dash_offset: 0.0, miter_limit: 4.0, trim: [0.0, 1.0] };
+        let (mesh, _) = stroke(&path, &style, 1.0).unwrap();
+        for x in (236..640).step_by(2) {
+            let above = coverage_at(&mesh, [x as f32 + 0.5, 33.5]);
+            let on = coverage_at(&mesh, [x as f32 + 0.5, 34.5]);
+            assert!(above < 0.3, "the row above the line is covered {above} at x {x}");
+            assert!(on > 0.99, "the line's own row is covered {on} at x {x}");
+        }
+    }
+
     #[test]
     fn path_data_and_polygons_are_read() {
         let arc = outline(Some("M 0 10 A 10 10 0 0 1 20 10 Z"), &[]).unwrap();
@@ -593,7 +630,15 @@ mod tests {
         let path = outline(Some("M0 0 H40"), &[]).unwrap();
         let (solid, _) = stroke(&path, &style(2.0, [0.0; 2], [0.0, 1.0]), 1.0).unwrap();
         let (dashed, _) = stroke(&path, &style(2.0, [5.0, 5.0], [0.0, 1.0]), 1.0).unwrap();
-        assert!(dashed.indices.len() > solid.indices.len() * 3, "four dashes, each with its own fringe");
+        // Dashes 0–5, 10–15…: the gaps are left empty, each dash has its
+        // own fringe, and the solid line covers it all.
+        for x in [2.5f32, 12.5, 22.5, 32.5] {
+            assert!(coverage_at(&dashed, [x, 0.0]) > 0.99, "a dash at {x}");
+        }
+        for x in [7.5f32, 17.5, 27.5] {
+            assert!(coverage_at(&dashed, [x, 0.0]) < 0.01, "a gap at {x}");
+            assert!(coverage_at(&solid, [x, 0.0]) > 0.99, "the solid line at {x}");
+        }
     }
 
     fn style(width: f32, dash: [f32; 2], trim: [f32; 2]) -> Style<'static> {

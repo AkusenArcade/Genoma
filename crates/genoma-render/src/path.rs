@@ -207,8 +207,7 @@ fn fringed(positions: &[[f32; 2]], indices: &[u32]) -> Mesh {
     // nothing is filled: where a vertex splits the edge on one side only
     // (a T-junction, as a stroke's inner loops leave), it lies inside.
     let grid = Grid::new(&points, &triangles);
-    let mut boundary: Vec<(u32, u32, [f32; 2])> = Vec::new();
-    let mut normals: HashMap<u32, Vec<[f32; 2]>> = HashMap::new();
+    let mut boundary: HashMap<(u32, u32), [f32; 2]> = HashMap::new();
     for (&(a, b), &(count, c)) in &edges {
         if count != 1 {
             continue;
@@ -223,7 +222,11 @@ fn fringed(positions: &[[f32; 2]], indices: &[u32]) -> Mesh {
         if grid.covers(&points, &triangles, probe) {
             continue;
         }
-        boundary.push((a, b, n));
+        boundary.insert((a, b), n);
+    }
+    refine_near_boundary(&mut points, &mut triangles, &mut boundary);
+    let mut normals: HashMap<u32, Vec<[f32; 2]>> = HashMap::new();
+    for (&(a, b), &n) in &boundary {
         normals.entry(a).or_default().push(n);
         normals.entry(b).or_default().push(n);
     }
@@ -255,14 +258,97 @@ fn fringed(positions: &[[f32; 2]], indices: &[u32]) -> Mesh {
         vertices.push(PathVertex { position: [p[0] + o[0], p[1] + o[1]], coverage: 0.0 });
         outer.insert(v, vertices.len() as u32 - 1);
     }
-    for (a, b, _) in &boundary {
-        let (ao, bo) = (outer[a], outer[b]);
-        indices.extend_from_slice(&[*a, *b, bo, *a, bo, ao]);
+    for &(a, b) in boundary.keys() {
+        let (ao, bo) = (outer[&a], outer[&b]);
+        indices.extend_from_slice(&[a, b, bo, a, bo, ao]);
     }
     let bounds = vertices.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, v| {
         [b[0].min(v.position[0]), b[1].min(v.position[1]), b[2].max(v.position[0]), b[3].max(v.position[1])]
     });
     Mesh { vertices, indices, bounds: if bounds[0] > bounds[2] { [0.0; 4] } else { bounds } }
+}
+
+/// The longest a triangle's side may be where one of its ends moves with
+/// the fringe, physical pixels.
+const NEAR_EDGE: f32 = 4.0;
+
+/// The fringe moves the boundary's corners half a pixel in, and every
+/// triangle at such a corner follows it. A tessellation joins far corners
+/// with long, thin triangles (a stroke's straight run after a curve: one
+/// triangle from a corner of the curve to the run's far end), and one end
+/// moving tilts the whole of it across what is outside, drawn as a second
+/// line. So a side longer than NEAR_EDGE with a moving end is cut in two,
+/// in both triangles it belongs to (no crack between them), until none is:
+/// the corners' moves stay near them. A cut boundary side gives two
+/// boundary sides with its normal; the middle of an inner one stays put.
+/// Only the band along the boundary is cut, not the inside of a large fill.
+fn refine_near_boundary(points: &mut Vec<[f32; 2]>, triangles: &mut Vec<[u32; 3]>, boundary: &mut HashMap<(u32, u32), [f32; 2]>) {
+    let key = |a: u32, b: u32| (a.min(b), a.max(b));
+    let mut moving: std::collections::HashSet<u32> = boundary.keys().flat_map(|&(a, b)| [a, b]).collect();
+    if moving.is_empty() {
+        return;
+    }
+    let mut sides: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (i, t) in triangles.iter().enumerate() {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            sides.entry(key(a, b)).or_default().push(i);
+        }
+    }
+    let long = |points: &Vec<[f32; 2]>, moving: &std::collections::HashSet<u32>, a: u32, b: u32| -> Option<f32> {
+        if !moving.contains(&a) && !moving.contains(&b) {
+            return None;
+        }
+        let d = sub(points[b as usize], points[a as usize]);
+        let l = dot(d, d).sqrt();
+        (l > NEAR_EDGE).then_some(l)
+    };
+    let mut work: Vec<usize> = (0..triangles.len()).collect();
+    // However the tessellation came out, the cutting ends.
+    let mut budget = triangles.len() * 64 + 4096;
+    while let Some(i) = work.pop() {
+        if budget == 0 {
+            break;
+        }
+        let t = triangles[i];
+        let mut cut: Option<(u32, u32, f32)> = None;
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if let Some(l) = long(points, &moving, a, b)
+                && cut.is_none_or(|(_, _, m)| l > m)
+            {
+                cut = Some((a, b, l));
+            }
+        }
+        let Some((a, b, _)) = cut else { continue };
+        budget -= 1;
+        let (pa, pb) = (points[a as usize], points[b as usize]);
+        points.push([(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5]);
+        let m = points.len() as u32 - 1;
+        if let Some(n) = boundary.remove(&(a, b)).or_else(|| boundary.remove(&(b, a))) {
+            boundary.insert((a, m), n);
+            boundary.insert((m, b), n);
+            moving.insert(m);
+        }
+        for j in sides.remove(&key(a, b)).unwrap_or_default() {
+            let t = triangles[j];
+            // The triangle turned so that the cut side is its first, its
+            // winding kept: (x, y, z) becomes (x, m, z) and (m, y, z).
+            let r = if key(t[0], t[1]) == key(a, b) { t } else if key(t[1], t[2]) == key(a, b) { [t[1], t[2], t[0]] } else { [t[2], t[0], t[1]] };
+            let (x, y, z) = (r[0], r[1], r[2]);
+            for (u, v) in [(y, z), (z, x)] {
+                if let Some(list) = sides.get_mut(&key(u, v)) {
+                    list.retain(|&k| k != j);
+                }
+            }
+            let k = triangles.len();
+            triangles[j] = [x, m, z];
+            triangles.push([m, y, z]);
+            for (u, v, owner) in [(x, m, j), (m, z, j), (z, x, j), (m, y, k), (y, z, k), (z, m, k)] {
+                sides.entry(key(u, v)).or_default().push(owner);
+            }
+            work.push(j);
+            work.push(k);
+        }
+    }
 }
 
 /// Triangles by the cells of a grid over them, for a point to find the
