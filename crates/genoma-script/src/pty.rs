@@ -4,8 +4,8 @@
 //! loop ever waiting on it.
 //!
 //! What it writes goes to `on_data` as bytes; a terminal emulator in Rust can
-//! take the stream instead ([`Pty::take_output`]), so the bytes never cross
-//! into Luau. What is written to it and cannot go at once (a long paste into
+//! read it on a thread of its own instead ([`Pty::take_reader`]), so the
+//! bytes never cross into Luau. What is written to it and cannot go at once (a long paste into
 //! a program that is not reading) waits, in order, and is tried again.
 
 use std::{
@@ -33,9 +33,6 @@ fn err(message: impl Into<String>) -> mlua::Error {
 /// How long a write that could not all go waits before it is tried again.
 const RETRY: Duration = Duration::from_millis(4);
 
-/// Who reads what the program writes: Luau, or a sink in Rust.
-pub(crate) type Sink = Box<dyn FnMut(&[u8])>;
-
 pub(crate) struct Inner {
     pub(crate) host: HostRef,
     master: OwnedFd,
@@ -45,7 +42,10 @@ pub(crate) struct Inner {
     /// Written, not yet taken by the terminal.
     pending: RefCell<Vec<u8>>,
     retrying: Cell<bool>,
-    sink: RefCell<Option<Sink>>,
+    /// Where reads land.
+    buf: RefCell<Vec<u8>>,
+    /// A thread reads it (a terminal's): the loop leaves it alone.
+    threaded: Cell<bool>,
     on_data: Option<Function>,
     lua: mlua::WeakLua,
     owner: Option<usize>,
@@ -53,10 +53,6 @@ pub(crate) struct Inner {
 
 impl Inner {
     fn deliver(&self, data: &[u8]) {
-        if let Some(sink) = self.sink.borrow_mut().as_mut() {
-            sink(data);
-            return;
-        }
         let Some(f) = &self.on_data else { return };
         let Some(lua) = self.lua.try_upgrade() else { return };
         if let Ok(s) = lua.create_string(data) {
@@ -64,24 +60,44 @@ impl Inner {
         }
     }
 
-    /// One read: false once the other side is gone (EIO when the last
-    /// process holding the terminal has closed it).
+    /// What is there to read, read: false once the other side is gone (EIO
+    /// when the last process holding the terminal has closed it). A program
+    /// writing without pause is read in large pieces, up to a budget, so the
+    /// loop draws between them and never waits on it long.
     fn read_once(&self) -> bool {
-        let mut buf = vec![0u8; 1 << 16];
-        match rustix::io::read(&self.master, &mut buf) {
-            Ok(0) => false,
-            Ok(n) => {
-                self.deliver(&buf[..n]);
-                true
+        if self.threaded.get() {
+            return false;
+        }
+        const BUDGET: usize = 1 << 20;
+        let mut buf = self.buf.borrow_mut();
+        let mut taken = 0;
+        let started = std::time::Instant::now();
+        loop {
+            match rustix::io::read(&self.master, &mut buf[..]) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    taken += n;
+                    let piece = buf[..n].to_vec();
+                    drop(buf);
+                    self.deliver(&piece);
+                    buf = self.buf.borrow_mut();
+                    if n < buf.len() || taken >= BUDGET || started.elapsed() > Duration::from_millis(8) {
+                        return true;
+                    }
+                }
+                Err(e) if e == rustix::io::Errno::AGAIN => return true,
+                Err(e) if e == rustix::io::Errno::INTR => {}
+                Err(_) => return false,
             }
-            Err(e) if e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR => true,
-            Err(_) => false,
         }
     }
 
     /// Everything still to be read, now: the exit is told after the last
     /// of what was written before it.
     fn drain(&self) {
+        if self.threaded.get() {
+            return;
+        }
         for _ in 0..256 {
             let mut buf = vec![0u8; 1 << 16];
             match rustix::io::read(&self.master, &mut buf) {
@@ -164,9 +180,13 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// What the program writes goes to `sink` from now on, not to `on_data`.
-    pub(crate) fn take_output(&self, sink: Sink) {
-        *self.inner.sink.borrow_mut() = Some(sink);
+    /// The terminal to be read by a thread of its own from now on: the loop
+    /// no longer reads it. What the thread reads is its to parse; the exit
+    /// is still told here.
+    pub(crate) fn take_reader(&self) -> Option<OwnedFd> {
+        let fd = self.inner.master.try_clone().ok()?;
+        self.inner.threaded.set(true);
+        Some(fd)
     }
 }
 
@@ -312,7 +332,8 @@ pub fn open(host: &HostRef, lua: &mlua::Lua, t: Table) -> mlua::Result<Pty> {
         exit: Cell::new(None),
         pending: RefCell::default(),
         retrying: Cell::new(false),
-        sink: RefCell::default(),
+        buf: RefCell::new(vec![0u8; 1 << 16]),
+        threaded: Cell::new(false),
         on_data: t.get("on_data")?,
         lua: lua.weak(),
         owner: current_owner(),

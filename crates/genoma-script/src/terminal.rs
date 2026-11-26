@@ -13,6 +13,7 @@
 use std::{
     cell::{Cell, RefCell},
     rc::{Rc, Weak},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -28,7 +29,10 @@ use genoma_core::reactive::{Effect, Signal, current_owner};
 use genoma_scene::grid::{GridCell, GridFrame, GridRow, GridSource, flags};
 use mlua::{Function, LuaString, Table, UserData, UserDataFields, UserDataMethods};
 
-use crate::{io::call, pty::Pty};
+use crate::{
+    io::{Stop, call, mailbox},
+    pty::Pty,
+};
 
 fn err(message: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(message.into())
@@ -41,11 +45,11 @@ const HISTORY: usize = 10_000;
 const OSC_MAX: usize = 4096;
 
 #[derive(Clone)]
-pub(crate) struct Listener(Rc<RefCell<Vec<Event>>>);
+pub(crate) struct Listener(Arc<Mutex<Vec<Event>>>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        self.0.borrow_mut().push(event);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
     }
 }
 
@@ -191,7 +195,7 @@ pub(crate) struct Emulator {
     pub(crate) term: Term<Listener>,
     parser: Processor<StdSyncHandler>,
     scanner: Scanner,
-    events: Rc<RefCell<Vec<Event>>>,
+    events: Arc<Mutex<Vec<Event>>>,
     pub(crate) size: Size,
     cell: (u16, u16),
     /// The colours a program is told when it asks (OSC 4, 10, 11, 12): the
@@ -207,7 +211,7 @@ pub(crate) struct Emulator {
 
 impl Emulator {
     fn new(columns: usize, lines: usize, history: usize) -> Emulator {
-        let events: Rc<RefCell<Vec<Event>>> = Rc::default();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::default();
         let config = Config { scrolling_history: history, kitty_keyboard: true, ..Config::default() };
         let size = Size { columns: columns.max(2), lines: lines.max(1) };
         let mut palette = Colors::default();
@@ -350,12 +354,21 @@ impl Emulator {
     fn feed(&mut self, data: &[u8]) -> Vec<Said> {
         let mut said = Vec::new();
         let mut from = 0;
-        for i in 0..data.len() {
+        let mut i = 0;
+        while i < data.len() {
+            // Outside a sequence only an escape can start one: skip to it.
+            if self.scanner.state == GROUND {
+                match data[i..].iter().position(|&b| b == 0x1b || b == 0x9d) {
+                    Some(k) => i += k,
+                    None => break,
+                }
+            }
             if let Some(payload) = self.scanner.step(data[i]) {
                 self.parser.advance(&mut self.term, &data[from..=i]);
                 from = i + 1;
                 self.mark(&payload, &mut said);
             }
+            i += 1;
         }
         if from < data.len() {
             self.parser.advance(&mut self.term, &data[from..]);
@@ -516,21 +529,50 @@ struct Callbacks {
 }
 
 pub(crate) struct Shared {
-    pub(crate) emulator: RefCell<Emulator>,
+    /// Parsed on a thread of its own, read here: each holds it a moment.
+    pub(crate) emulator: Arc<Mutex<Emulator>>,
+    /// The parsing thread's mailbox, stopped with the load.
+    _stop: Rc<Stop>,
     pty: Rc<crate::pty::Inner>,
     /// Bumped whenever the grid may have changed: a binding that reads it
     /// follows the screen.
     pub(crate) changed: Signal<f64>,
     count: Cell<f64>,
+    /// A change is told once a turn of the loop, however many pieces of
+    /// output came in it.
+    telling: Cell<bool>,
     callbacks: Callbacks,
     /// A cell of the view that draws it, logical units, as last drawn.
     cell: Cell<[f32; 2]>,
 }
 
 impl Shared {
+    pub(crate) fn em(&self) -> MutexGuard<'_, Emulator> {
+        self.emulator.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn bump(&self) {
         self.count.set(self.count.get() + 1.0);
         self.changed.set(self.count.get());
+    }
+
+    /// Told after this turn of the loop: output that comes in many pieces
+    /// runs the bindings that follow the screen once, not once a piece.
+    fn bump_soon(self: &Rc<Self>) {
+        if self.telling.replace(true) {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        self.pty.host.timer(
+            Duration::ZERO,
+            Box::new(move || {
+                if let Some(s) = me.upgrade() {
+                    s.telling.set(false);
+                    s.bump();
+                }
+                None
+            }),
+        );
     }
 }
 
@@ -541,7 +583,7 @@ impl GridSource for View {
     fn frame(&self, columns: usize, rows: usize, cell: [f32; 2]) -> GridFrame {
         let Some(shared) = self.0.upgrade() else { return GridFrame { rows: Vec::new() } };
         let resized = {
-            let mut e = shared.emulator.borrow_mut();
+            let mut e = shared.em();
             let size_changed = e.size.columns != columns || e.size.lines != rows;
             let cell_changed = shared.cell.get() != cell;
             shared.cell.set(cell);
@@ -574,7 +616,7 @@ impl GridSource for View {
                 }),
             );
         }
-        shared.emulator.borrow().frame(rows)
+        shared.em().frame(rows)
     }
 }
 
@@ -596,14 +638,9 @@ pub(crate) fn attach(scene: Rc<RefCell<genoma_scene::Scene>>, node: genoma_scene
 }
 
 impl Shared {
-    fn take(&self, data: &[u8]) {
-        let (said, events) = {
-            let mut e = self.emulator.borrow_mut();
-            let said = e.feed(data);
-            let events = std::mem::take(&mut *e.events.borrow_mut());
-            (said, events)
-        };
-        self.bump();
+    /// What the parsing thread found in the output: answered and told here.
+    fn told(self: &Rc<Self>, said: Vec<Said>, events: Vec<Event>) {
+        self.bump_soon();
         let o = self.callbacks.owner;
         for event in events {
             match event {
@@ -629,11 +666,11 @@ impl Shared {
                     }
                 }
                 Event::ColorRequest(index, format) => {
-                    let reply = format(self.emulator.borrow().color(index));
+                    let reply = format(self.em().color(index));
                     self.pty.write(reply.as_bytes());
                 }
                 Event::TextAreaSizeRequest(format) => {
-                    let e = self.emulator.borrow();
+                    let e = self.em();
                     let reply = format(WindowSize {
                         num_lines: e.size.lines as u16,
                         num_cols: e.size.columns as u16,
@@ -710,16 +747,16 @@ impl UserData for Terminal {
         // t.changed: a number that grows whenever the screen may have
         // changed; a binding that reads it follows the screen.
         fields.add_field_method_get("changed", |_, this| Ok(this.shared.changed.get()));
-        fields.add_field_method_get("cols", |_, this| Ok(this.shared.emulator.borrow().size.columns));
-        fields.add_field_method_get("rows", |_, this| Ok(this.shared.emulator.borrow().size.lines));
+        fields.add_field_method_get("cols", |_, this| Ok(this.shared.em().size.columns));
+        fields.add_field_method_get("rows", |_, this| Ok(this.shared.em().size.lines));
         // The first line still kept, and the screen's first and last.
         fields.add_field_method_get("first_line", |_, this| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             Ok(e.absolute(Line(-(e.term.grid().history_size() as i32))))
         });
-        fields.add_field_method_get("screen_line", |_, this| Ok(this.shared.emulator.borrow().absolute(Line(0))));
+        fields.add_field_method_get("screen_line", |_, this| Ok(this.shared.em().absolute(Line(0))));
         fields.add_field_method_get("last_line", |_, this| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             Ok(e.absolute(Line(e.size.lines as i32 - 1)))
         });
     }
@@ -728,12 +765,12 @@ impl UserData for Terminal {
         // t:line(n): its text, without the blanks at its end; nil once it
         // has left the history.
         methods.add_method("line", |_, this, n: f64| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             Ok(e.line_of(n).map(|l| e.text(l)))
         });
         // t:lines(first, last): their texts, from what is still kept.
         methods.add_method("lines", |_, this, (first, last): (f64, f64)| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             let mut out = Vec::new();
             let mut n = first;
             while n <= last && out.len() < 100_000 {
@@ -747,7 +784,7 @@ impl UserData for Terminal {
         // t:wrapped(n): whether the line goes on into the next one (it was
         // cut by the width, not ended).
         methods.add_method("wrapped", |_, this, n: f64| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             Ok(e.line_of(n).is_some_and(|l| {
                 let row = &e.term.grid()[l];
                 row[Column(e.size.columns - 1)].flags.contains(Flags::WRAPLINE)
@@ -755,7 +792,7 @@ impl UserData for Terminal {
         });
         // t:cursor(): { line, column, shown }.
         methods.add_method("cursor", |lua, this, ()| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             let Point { line, column } = e.term.grid().cursor.point;
             let t = lua.create_table()?;
             t.set("line", e.absolute(line))?;
@@ -766,7 +803,7 @@ impl UserData for Terminal {
         // t:view(): what the view shows: the line at its top, how far it is
         // scrolled back, a cell's size (logical units), and the cells.
         methods.add_method("view", |lua, this, ()| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             let offset = e.term.grid().display_offset();
             let t = lua.create_table()?;
             t.set("first", e.absolute(Line(-(offset as i32))))?;
@@ -782,7 +819,7 @@ impl UserData for Terminal {
         // history; t:scroll() back to the bottom.
         methods.add_method("scroll", |_, this, lines: Option<i32>| {
             {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 let s = match lines {
                     Some(n) => alacritty_terminal::grid::Scroll::Delta(n),
                     None => alacritty_terminal::grid::Scroll::Bottom,
@@ -793,7 +830,7 @@ impl UserData for Terminal {
             Ok(())
         });
         // t:modes(): what the program asked of the terminal.
-        methods.add_method("modes", |lua, this, ()| mode_table(lua, *this.shared.emulator.borrow().term.mode()));
+        methods.add_method("modes", |lua, this, ()| mode_table(lua, *this.shared.em().term.mode()));
         // t:resize { cols, rows, width, height }: the grid, and the program
         // told (width and height: a cell's, in pixels).
         methods.add_method("resize", |_, this, t: Table| {
@@ -802,7 +839,7 @@ impl UserData for Terminal {
             let cw: u16 = t.get::<Option<u16>>("width")?.unwrap_or(0);
             let ch: u16 = t.get::<Option<u16>>("height")?.unwrap_or(0);
             {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 e.size = Size { columns: cols, lines: rows };
                 e.cell = (cw, ch);
                 let size = e.size;
@@ -819,7 +856,7 @@ impl UserData for Terminal {
             let flag = |t: &Option<Table>, k: &str| t.as_ref().and_then(|t| t.get::<Option<bool>>(k).ok().flatten()).unwrap_or(false);
             let m = crate::keys::Mods { shift: flag(&mods, "shift"), alt: flag(&mods, "alt"), ctrl: flag(&mods, "ctrl"), logo: flag(&mods, "logo") };
             let asked = {
-                let e = this.shared.emulator.borrow();
+                let e = this.shared.em();
                 let mode = *e.term.mode();
                 crate::keys::Asked {
                     app_cursor: mode.contains(TermMode::APP_CURSOR),
@@ -831,7 +868,7 @@ impl UserData for Terminal {
             };
             let Some(bytes) = crate::keys::encode(&name, text.as_deref(), m, asked) else { return Ok(false) };
             let scrolled = {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 let back = e.term.grid().display_offset() != 0;
                 if back {
                     e.term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
@@ -850,7 +887,7 @@ impl UserData for Terminal {
         // t:select(nil) takes it away.
         methods.add_method("select", |_, this, (kind, column, row, right): (Option<String>, Option<usize>, Option<usize>, Option<bool>)| {
             {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 e.term.selection = match kind.as_deref() {
                     None => None,
                     Some(k) => {
@@ -870,7 +907,7 @@ impl UserData for Terminal {
         });
         methods.add_method("select_to", |_, this, (column, row, right): (usize, usize, Option<bool>)| {
             {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 let p = e.point(column, row);
                 if let Some(s) = e.term.selection.as_mut() {
                     s.update(p, if right.unwrap_or(false) { Side::Right } else { Side::Left });
@@ -881,7 +918,7 @@ impl UserData for Terminal {
         });
         // t:selected(): the selection's text, nil when nothing is selected.
         methods.add_method("selected", |_, this, ()| {
-            let e = this.shared.emulator.borrow();
+            let e = this.shared.em();
             Ok(e.term.selection.as_ref().filter(|s| !s.is_empty()).and(e.term.selection_to_string()).filter(|s| !s.is_empty()))
         });
         // t:mouse(event, button, column, row, mods): a pointer event at a
@@ -896,7 +933,7 @@ impl UserData for Terminal {
                 return Ok(false);
             }
             let bytes = {
-                let mut e = this.shared.emulator.borrow_mut();
+                let mut e = this.shared.em();
                 let column = column.min(e.size.columns.saturating_sub(1));
                 let row = row.min(e.size.lines.saturating_sub(1));
                 let m = (false, flag("alt"), flag("ctrl"));
@@ -920,7 +957,7 @@ impl UserData for Terminal {
         });
         // t:focus(on): told to a program that asked to know (focus in, out).
         methods.add_method("focus", |_, this, on: bool| {
-            if this.shared.emulator.borrow().term.mode().contains(TermMode::FOCUS_IN_OUT) {
+            if this.shared.em().term.mode().contains(TermMode::FOCUS_IN_OUT) {
                 this.shared.pty.write(if on { b"\x1b[I" } else { b"\x1b[O" });
             }
             Ok(())
@@ -933,7 +970,7 @@ impl UserData for Terminal {
         // t:paste(text): as pasted: inside the program's brackets when it
         // asked for them, so a pasted line does not run by itself.
         methods.add_method("paste", |_, this, text: String| {
-            let bracketed = this.shared.emulator.borrow().term.mode().contains(TermMode::BRACKETED_PASTE);
+            let bracketed = this.shared.em().term.mode().contains(TermMode::BRACKETED_PASTE);
             if bracketed {
                 // What would close the brackets early is taken out.
                 let clean = text.replace("\x1b[201~", "");
@@ -948,7 +985,7 @@ impl UserData for Terminal {
         // t:palette { colours = { 16 }, foreground, background, cursor }:
         // what a program is told when it asks.
         methods.add_method("palette", |_, this, t: Table| {
-            let mut e = this.shared.emulator.borrow_mut();
+            let mut e = this.shared.em();
             if let Some(list) = t.get::<Option<Vec<String>>>("colours")? {
                 for (i, c) in list.iter().enumerate().take(16) {
                     if let Some(c) = parse_colour(c) {
@@ -978,8 +1015,59 @@ pub fn open(t: Table) -> mlua::Result<Terminal> {
     let cols: usize = t.get::<Option<usize>>("cols")?.unwrap_or(80);
     let rows: usize = t.get::<Option<usize>>("rows")?.unwrap_or(24);
     let history: usize = t.get::<Option<usize>>("history")?.unwrap_or(HISTORY);
+    let emulator = Arc::new(Mutex::new(Emulator::new(cols, rows, history)));
+    let host = pty.inner.host.clone();
+    let stop = Stop::new(&host);
+    let weak: Rc<Cell<Option<Weak<Shared>>>> = Rc::default();
+    let reach = weak.clone();
+    let post = mailbox(&host, &stop, "terminal", move |(said, events): (Vec<Said>, Vec<Event>)| {
+        let w = reach.take();
+        if let Some(me) = w.as_ref().and_then(|w| w.upgrade()) {
+            me.told(said, events);
+        }
+        reach.set(w);
+    })?;
+    // The thread that reads the terminal and parses what it reads, as fast
+    // as the program writes, the loop free to draw meanwhile; it holds the
+    // grid a piece at a time, so drawing never waits on it long. It ends
+    // when the program's side of the terminal closes.
+    let reader = pty.take_reader().ok_or_else(|| err("g.terminal: the pty cannot be read"))?;
+    let parsing = emulator.clone();
+    std::thread::Builder::new()
+        .name("genoma-terminal".into())
+        .spawn(move || {
+            use rustix::event::{PollFd, PollFlags, poll};
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                match rustix::io::read(&reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let (said, events) = {
+                            let mut e = parsing.lock().unwrap_or_else(|e| e.into_inner());
+                            let said = e.feed(&buf[..n]);
+                            let events = std::mem::take(&mut *e.events.lock().unwrap_or_else(|e| e.into_inner()));
+                            (said, events)
+                        };
+                        post.send((said, events));
+                    }
+                    Err(e) if e == rustix::io::Errno::AGAIN => {
+                        let mut fds = [PollFd::new(&reader, PollFlags::IN)];
+                        if poll(&mut fds, None).is_err() {
+                            break;
+                        }
+                        if fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR) && !fds[0].revents().contains(PollFlags::IN) {
+                            break;
+                        }
+                    }
+                    Err(e) if e == rustix::io::Errno::INTR => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .map_err(|e| err(format!("g.terminal: no thread: {e}")))?;
     let shared = Rc::new(Shared {
-        emulator: RefCell::new(Emulator::new(cols, rows, history)),
+        emulator,
+        _stop: stop,
         pty: pty.inner.clone(),
         changed: Signal::new(0.0),
         count: Cell::new(0.0),
@@ -994,13 +1082,9 @@ pub fn open(t: Table) -> mlua::Result<Terminal> {
             owner: current_owner(),
         },
         cell: Cell::new([0.0; 2]),
+        telling: Cell::new(false),
     });
-    let me = Rc::downgrade(&shared);
-    pty.take_output(Box::new(move |data| {
-        if let Some(me) = me.upgrade() {
-            me.take(data);
-        }
-    }));
+    weak.set(Some(Rc::downgrade(&shared)));
     Ok(Terminal { shared })
 }
 

@@ -14,8 +14,9 @@ changes what a shell sees.
   runs a shell: its own session and controlling terminal, resized, read
   without the loop waiting; what is written and cannot go at once waits in
   order. `p:foreground()` and `p:cwd()` say what runs in it and where.
-- `g.terminal`: what a `g.pty`'s program writes, parsed into a grid and its
-  history in Rust (alacritty_terminal 0.26, `vendor/`); lines keep their
+- `g.terminal`: what a `g.pty`'s program writes, read and parsed into a grid
+  and its history on a thread of its own (alacritty_terminal 0.26,
+  `vendor/`), the loop free to draw meanwhile; lines keep their
   number while the history drops old ones. The shell's marks (OSC 133:
   prompt, command, output, end with its exit code), its folder (OSC 7),
   progress (OSC 9;4), notifications (OSC 777, 9) and the clipboard (OSC 52,
@@ -29,7 +30,9 @@ changes what a shell sees.
   terminal resized to the cells that fit; each row shaped once while it
   stays the same; backgrounds, underlines, box drawing (rounded corners
   too) and block elements drawn as shapes so they meet from cell to cell.
-  Two million lines through `seq`: 0.53 s (Alacritty 0.46 s). A cell's
+  Measured against Alacritty in the same compositor: 50 MB of coloured text
+  0.50 s (0.42 s), two million lines through `seq` 0.56 s (0.46 s), a key to
+  the screen 12.3 ms (12.8 ms), nothing at rest. A cell's
   letters are spaced to fill it exactly (cosmic-text's monospace width
   scales glyphs instead); characters from other fonts sit at their column.
 - `@genoma/mime`: what a file is (the shared MIME database: names, then
