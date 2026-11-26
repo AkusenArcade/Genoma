@@ -392,7 +392,7 @@ mod tests {
             ("Watched", "WatchedFile"),
             ("Folder", "Folder"),
             ("Directory", "Directory"),
-            ("Socket", "Socket"), ("WebSocket", "WebSocket"), ("Request", "HttpRequest"), ("Server", "Server"), ("Served", "Served"),
+            ("Socket", "Socket"), ("WebSocket", "WebSocket"), ("Pty", "Pty"), ("Terminal", "Terminal"), ("Request", "HttpRequest"), ("Server", "Server"), ("Served", "Served"),
             ("Timer", "Stoppable"),
             ("Watch", "Stoppable"),
             ("Auth", "Auth"),

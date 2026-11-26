@@ -26,3 +26,6 @@ debug = "line-tables-only"
 # rounding pass.
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
+# alacritty_terminal 0.26.0 counting the lines that leave for the history
+# (vendor/alacritty_terminal/GENOMA.md): marks find their lines again.
+alacritty_terminal = { path = "vendor/alacritty_terminal" }

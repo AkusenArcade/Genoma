@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
 base64 = "0.23.1"
 calloop = "0.14.5"
 futures-channel = "0.3.34"
@@ -16,7 +17,7 @@ genoma-scene = { path = "../genoma-scene" }
 genoma-services = { path = "../genoma-services" }
 log.workspace = true
 mlua = { version = "0.12", features = ["luau", "serde"] }
-rustix = { version = "1.1", features = ["fs", "process", "event", "pipe", "rand"] }
+rustix = { version = "1.1", features = ["fs", "process", "event", "pipe", "rand", "pty", "termios"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8.5"
 serde_json = { version = "1", features = ["preserve_order"] }

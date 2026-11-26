@@ -189,6 +189,83 @@ export type WebSocket = {
     close: (self: WebSocket, code: number?, reason: string?) -> (),
 }
 
+export type Pty = {
+    read pid: number,
+    read running: boolean,
+    -- The exit code once it has ended (128 plus the signal for one killed
+    -- by a signal).
+    read exit_code: number?,
+    -- p:write(bytes): as typed or pasted; what the terminal cannot take at
+    -- once waits, in order.
+    write: (self: Pty, data: string) -> (),
+    -- p:resize { cols, rows, width, height }: the program is told.
+    resize: (self: Pty, size: { cols: number, rows: number, width: number?, height: number? }) -> (),
+    -- p:foreground(): the program the terminal is given to now.
+    foreground: (self: Pty) -> { pid: number, name: string? }?,
+    -- p:cwd(): its folder, else the shell's.
+    cwd: (self: Pty) -> string?,
+    -- p:signal(2): to the program in the foreground.
+    signal: (self: Pty, number: number) -> (),
+    -- p:stop(): hung up, as a closed terminal window is.
+    stop: (self: Pty) -> (),
+}
+
+export type Terminal = {
+    -- Grows whenever the screen may have changed: a binding that reads it
+    -- follows the screen.
+    read changed: number,
+    read cols: number,
+    read rows: number,
+    -- Lines are counted from the grid's first, and keep their number while
+    -- the history grows and drops old ones: the first still kept, the
+    -- screen's first and its last.
+    read first_line: number,
+    read screen_line: number,
+    read last_line: number,
+    -- t:line(n): its text without the blanks at its end; nil once dropped.
+    line: (self: Terminal, n: number) -> string?,
+    lines: (self: Terminal, first: number, last: number) -> { string },
+    -- t:wrapped(n): the line goes on into the next (cut by the width).
+    wrapped: (self: Terminal, n: number) -> boolean,
+    cursor: (self: Terminal) -> { line: number, column: number, shown: boolean },
+    -- What the view shows: the line at its top, how far back it is
+    -- scrolled, a cell's size in logical units, the cells.
+    view: (self: Terminal) -> { first: number, offset: number, cell_width: number, cell_height: number, cols: number, rows: number },
+    -- t:scroll(lines): back into the history (positive) or forward;
+    -- t:scroll() to the bottom.
+    scroll: (self: Terminal, lines: number?) -> (),
+    -- What the program asked of the terminal: alt_screen, show_cursor,
+    -- app_cursor, bracketed_paste, focus_in_out, the mouse's and the kitty
+    -- keyboard protocol's modes.
+    modes: (self: Terminal) -> { [string]: boolean },
+    -- t:key(name, text, mods): a key from on_key, sent as the program asked
+    -- (xterm's bytes or the kitty protocol's); false when it sends nothing.
+    key: (self: Terminal, name: string, text: string?, mods: { [string]: boolean }?) -> boolean,
+    focus: (self: Terminal, on: boolean) -> (),
+    -- t:select(kind, column, row, right): a selection begun at a cell of
+    -- the view, kind "char", "word", "line" or "block"; `right`: on the
+    -- cell's right half. t:select(nil) takes it away.
+    select: (self: Terminal, kind: string?, column: number?, row: number?, right: boolean?) -> (),
+    select_to: (self: Terminal, column: number, row: number, right: boolean?) -> (),
+    -- The selection's text; nil with nothing selected.
+    selected: (self: Terminal) -> string?,
+    -- t:mouse(event, button, column, row, mods): a pointer event at a cell
+    -- of the view ("press", "release", "move", "wheel"; button 0 left,
+    -- 1 middle, 2 right, 3 none, 64/65 the wheel), told to the program when
+    -- it asked for them (SGR's form, else xterm's). False when it did not,
+    -- or Shift is held: the pointer is the terminal's then.
+    mouse: (self: Terminal, event: string, button: number, column: number, row: number, mods: { [string]: boolean }?) -> boolean,
+    write: (self: Terminal, data: string) -> (),
+    -- t:paste(text): inside the program's brackets when it asked for them.
+    paste: (self: Terminal, text: string) -> (),
+    -- t:resize { cols, rows, width, height }: a view resizes it by itself.
+    resize: (self: Terminal, size: { cols: number, rows: number, width: number?, height: number? }) -> (),
+    -- t:palette { colours = { 16 }, foreground, background, cursor,
+    -- selection, selection_alpha }: what programs are told when they ask,
+    -- and what the selection is tinted with.
+    palette: (self: Terminal, p: { colours: { string }?, foreground: string?, background: string?, cursor: string?, selection: string?, selection_alpha: number? }) -> (),
+}
+
 export type Output = {
     name: string,
     description: string,
@@ -388,6 +465,11 @@ export type G = {
     field: (t: Node) -> Node,
     -- Any outline: `d` (SVG path data) or `points`, drawn on the GPU.
     path: (t: Node) -> Node,
+    -- A terminal's grid (`terminal`, a g.terminal) in a monospace `font`
+    -- at `size`: as many cells as fit its box, the terminal resized to
+    -- them; backgrounds, box drawing and blocks drawn as shapes; each row
+    -- shaped once while it stays the same.
+    terminal_view: (t: Node) -> Node,
     -- An SVG document as nodes: `src` (a file, relative to the interface)
     -- or `source` (the text), fitted into `width` × `height` (its own size
     -- by default; numbers or bindings) with its aspect kept; `color` is what currentColor
@@ -521,6 +603,45 @@ export type G = {
         on_message: ((data: string, binary: boolean) -> ())?,
         on_close: ((code: number, reason: string) -> ())?,
     }) -> WebSocket,
+    -- g.pty { command, cwd, env, cols, rows, width, height, on_data,
+    -- on_exit }: a program on a pseudo-terminal of its own, as a terminal
+    -- emulator runs a shell (the user's $SHELL when no command is given).
+    -- It leads a session whose controlling terminal this is; it gets
+    -- TERM=xterm-256color and COLORTERM=truecolor, and not GENOMA_IPC.
+    -- on_data(bytes) as it writes them, read without the loop waiting;
+    -- on_exit(code) after the last of them.
+    pty: (t: {
+        command: { string }?,
+        cwd: string?,
+        env: { [string]: string }?,
+        cols: number?,
+        rows: number?,
+        width: number?,
+        height: number?,
+        on_data: ((data: string) -> ())?,
+        on_exit: ((code: number) -> ())?,
+    }) -> Pty,
+    -- g.terminal { pty, cols, rows, history, on_title, on_bell,
+    -- on_clipboard, on_mark, on_cwd, on_progress, on_notify }: what a
+    -- g.pty's program writes, parsed (alacritty_terminal) into a grid and
+    -- its history, in Rust: the bytes never reach Luau. on_mark(kind, line,
+    -- column, code): OSC 133, kind "prompt", "command", "output" or "done"
+    -- (with the exit code); on_cwd(path): OSC 7; on_progress(state, value):
+    -- OSC 9;4; on_notify(title, body): OSC 777 and 9; on_clipboard(text):
+    -- OSC 52 (reading the clipboard is never granted).
+    terminal: (t: {
+        pty: Pty,
+        cols: number?,
+        rows: number?,
+        history: number?,
+        on_title: ((title: string) -> ())?,
+        on_bell: (() -> ())?,
+        on_clipboard: ((text: string) -> ())?,
+        on_mark: ((kind: string, line: number, column: number, code: number?) -> ())?,
+        on_cwd: ((path: string) -> ())?,
+        on_progress: ((state: number, value: number) -> ())?,
+        on_notify: ((title: string, body: string) -> ())?,
+    }) -> Terminal,
     -- g.http { url, method, headers, body, timeout, on_done(response) }:
     -- an HTTP or HTTPS request (the server checked against the system's
     -- certificates), run off the loop. The method is GET, or POST with a

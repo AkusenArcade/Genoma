@@ -10,6 +10,7 @@
 pub mod contours;
 mod distance;
 pub mod field;
+pub mod grid;
 mod glyphs;
 mod icons;
 mod images;
@@ -66,6 +67,9 @@ pub enum Kind {
     /// A shape of any outline (`g.path`): SVG path data or a polygon,
     /// filled, stroked, dashed.
     Path,
+    /// A terminal's grid of cells (`g.terminal_view`), from a
+    /// [`grid::GridSource`].
+    Grid,
 }
 
 /// The node's meaning for assistive technology (PRD §12, question 5). Carried
@@ -170,6 +174,9 @@ pub struct Node {
     ellipsize: u8,
     max_width: Option<f32>,
     buffer: Option<Arc<ct::Buffer>>,
+    /// What a grid node shows, and its shaped rows.
+    cells: Option<std::rc::Rc<dyn grid::GridSource>>,
+    cells_cache: grid::GridCache,
     /// A field's editing state; `None` on every other node.
     edit: Option<Box<field::Editor>>,
     placeholder: String,
@@ -444,6 +451,8 @@ impl Node {
             ellipsize: 0,
             max_width: None,
             buffer: None,
+            cells: None,
+            cells_cache: grid::GridCache::default(),
             edit: (kind == Kind::Field).then(Box::default),
             placeholder: String::new(),
             placeholder_color: [0.0; 4],
@@ -1315,7 +1324,7 @@ impl Scene {
                 ..Style::default()
             },
             Kind::Box => Style { align_items: AlignItems::CENTER, flex_shrink: 0.0, ..Style::default() },
-            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader | Kind::Field | Kind::Path => {
+            Kind::Text | Kind::Icon | Kind::Image | Kind::Thread | Kind::Emitter | Kind::Shader | Kind::Field | Kind::Path | Kind::Grid => {
                 Style { flex_shrink: 0.0, ..Style::default() }
             }
         };
@@ -1571,6 +1580,14 @@ impl Scene {
             at = self.parent(id);
         }
         None
+    }
+
+    /// What grid node `node` shows (`g.terminal_view`'s terminal).
+    pub fn set_grid(&mut self, node: NodeId, source: Option<std::rc::Rc<dyn grid::GridSource>>) {
+        if let Some(n) = self.tree.get_node_context_mut(node) {
+            n.cells = source;
+            self.dirty = true;
+        }
     }
 
     /// Marks `node` as one things may be dropped on (it has an `on_drop`).
@@ -5295,6 +5312,26 @@ fn collect_turned(
             }
         }
         Kind::Field => draw_field(fonts, n, origin, &layout, scale, alpha, out),
+        Kind::Grid => {
+            if let Some(source) = n.cells.clone() {
+                let style = TextStyle { font: n.font.as_deref(), italic: false, tabular: false, weight: n.weight, tracking: 0.0 };
+                let attrs = style.attrs(fonts.db());
+                let font_key = n.font.clone().unwrap_or_default();
+                let place = grid::Place {
+                    origin: [(origin[0] + layout.padding.left) * scale, (origin[1] + layout.padding.top) * scale],
+                    scale,
+                    alpha,
+                    clip: out.clip,
+                    fade: out.fade_of(),
+                    transform: out.transform,
+                };
+                let size = [
+                    layout.size.width - layout.padding.left - layout.padding.right,
+                    layout.size.height - layout.padding.top - layout.padding.bottom,
+                ];
+                grid::draw(fonts, &mut n.cells_cache, &*source, &attrs, &font_key, n.font_size, size, &place, out.list);
+            }
+        }
         Kind::Path => {
             let w = (layout.size.width * scale).round() as u32;
             let h = (layout.size.height * scale).round() as u32;

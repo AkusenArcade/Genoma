@@ -18,6 +18,9 @@ mod http;
 mod serve;
 mod tls;
 mod websocket;
+mod pty;
+mod terminal;
+mod keys;
 mod auth;
 mod contours;
 mod directory;
@@ -3304,6 +3307,11 @@ impl Script {
         // g.websocket { url, … }: ws:// and wss://, read on the loop.
         let host = self.host.clone();
         g.set("websocket", lua.create_function(move |lua, t: Table| websocket::connect(&host, lua, t))?)?;
+        // g.pty { command, … }: a program on a pseudo-terminal of its own.
+        let host = self.host.clone();
+        g.set("pty", lua.create_function(move |lua, t: Table| pty::open(&host, lua, t))?)?;
+        // g.terminal { pty, … }: what the program writes, parsed into a grid.
+        g.set("terminal", lua.create_function(move |_, t: Table| terminal::open(t))?)?;
         let host = self.host.clone();
         g.set("greetd", lua.create_function(move |_, t: Table| greetd::connect(&host, t))?)?;
         let dbus_table = lua.create_table()?;
@@ -3349,7 +3357,7 @@ impl Script {
             })?,
         )?;
         g.set("dbus", dbus_table)?;
-        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each", "list", "path"] {
+        for kind in ["box", "capsule", "text", "icon", "image", "thread", "emitter", "shader", "field", "each", "list", "path", "terminal_view"] {
             g.set(
                 kind,
                 lua.create_function(move |_, t: Table| {
@@ -4006,6 +4014,7 @@ fn kind_of(t: &Table) -> mlua::Result<Kind> {
         "emitter" => Kind::Emitter,
         "shader" => Kind::Shader,
         "field" => Kind::Field,
+        "terminal_view" => Kind::Grid,
         other => return Err(err(format!("unknown node {other}"))),
     })
 }
@@ -4276,6 +4285,11 @@ fn mount(
         let LuaValue::String(key) = key else { continue };
         let key = key.to_string_lossy();
         if matches!(key.as_str(), "__kind" | "role" | "name" | "id" | "transition") {
+            continue;
+        }
+        // A terminal view's terminal: drawn from it, again as it changes.
+        if kind == Kind::Grid && key == "terminal" {
+            terminal::attach(scene.clone(), node, &value)?;
             continue;
         }
         if (each || list) && matches!(key.as_str(), "items" | "key" | "row") {

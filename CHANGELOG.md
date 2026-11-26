@@ -10,6 +10,28 @@ changes what a shell sees.
 
 ### Added
 
+- `g.pty`: a program on a pseudo-terminal of its own, as a terminal emulator
+  runs a shell: its own session and controlling terminal, resized, read
+  without the loop waiting; what is written and cannot go at once waits in
+  order. `p:foreground()` and `p:cwd()` say what runs in it and where.
+- `g.terminal`: what a `g.pty`'s program writes, parsed into a grid and its
+  history in Rust (alacritty_terminal 0.26, `vendor/`); lines keep their
+  number while the history drops old ones. The shell's marks (OSC 133:
+  prompt, command, output, end with its exit code), its folder (OSC 7),
+  progress (OSC 9;4), notifications (OSC 777, 9) and the clipboard (OSC 52,
+  writing only) reach Luau as callbacks. `t:key` sends a key as the program
+  asked: xterm's bytes, or the kitty keyboard protocol's; the composed text
+  of dead keys as typed. `t:paste` brackets a paste where it was asked for.
+  `t:select` / `t:select_to` / `t:selected`: a selection by character, word,
+  line or block, drawn tinted. `t:mouse` tells the program the pointer when
+  it asked for it (SGR or xterm's form); Shift keeps it for the terminal.
+- `g.terminal_view`: a terminal's grid drawn in a monospace font: the
+  terminal resized to the cells that fit; each row shaped once while it
+  stays the same; backgrounds, underlines, box drawing (rounded corners
+  too) and block elements drawn as shapes so they meet from cell to cell.
+  Two million lines through `seq`: 0.53 s (Alacritty 0.46 s). A cell's
+  letters are spaced to fill it exactly (cosmic-text's monospace width
+  scales glyphs instead); characters from other fonts sit at their column.
 - `@genoma/mime`: what a file is (the shared MIME database: names, then
   magic for what they leave open), what its type is called, its icon, and
   the applications that open it (`mimeapps.list`), with `set_default`.
