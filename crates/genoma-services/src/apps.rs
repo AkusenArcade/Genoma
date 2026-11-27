@@ -213,16 +213,35 @@ fn start(command: &[String], folder: &Path, token: Option<&str>) -> std::io::Res
 /// The terminals tried after the desktop's own choice.
 const TERMINALS: &str = "kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm";
 
+/// The head of the terminals the person prefers ($XDG_CONFIG_HOME/
+/// xdg-terminals.list, which xdg-terminal-exec reads), run from its desktop
+/// entry's Exec where xdg-terminal-exec is not installed: sets `x` to the
+/// command, or leaves it empty.
+macro_rules! list_head {
+    () => {
+        r#"x=; id=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "${XDG_CONFIG_HOME:-$HOME/.config}/xdg-terminals.list" 2>/dev/null | grep -v -e '^#' -e '^$' | head -n 1 | sed 's/:.*//');
+if [ -n "$id" ]; then case $id in *.desktop) ;; *) id=$id.desktop ;; esac;
+dirs=${XDG_DATA_HOME:-$HOME/.local/share}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; IFS=:; for d in $dirs; do
+[ -f "$d/applications/$id" ] || continue;
+x=$(sed -n '/^\[Desktop Entry\]/,/^\[/{s/^Exec=//p}' "$d/applications/$id" | head -n 1 | sed 's/ *%[a-zA-Z]//g'); break; done; unset IFS; fi;
+"#
+    };
+}
+
 /// The same, for a shell in the folder it is started in: those that would
 /// open in the home folder are told which.
-const A_TERMINAL: &str = "if command -v xdg-terminal-exec >/dev/null 2>&1; then exec xdg-terminal-exec --dir=\"$PWD\"; fi; \
-    for t in \"$TERMINAL\" kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm; do \
+const A_TERMINAL: &str = concat!(
+    "if command -v xdg-terminal-exec >/dev/null 2>&1; then exec xdg-terminal-exec --dir=\"$PWD\"; fi; ",
+    list_head!(),
+    "[ -n \"$x\" ] && exec sh -c \"$x\"; ",
+    "for t in \"$TERMINAL\" kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm; do \
     [ -n \"$t\" ] && command -v \"$t\" >/dev/null 2>&1 || continue; \
     case \"${t##*/}\" in \
     ghostty|gnome-terminal) exec \"$t\" --working-directory=\"$PWD\";; \
     konsole) exec \"$t\" --workdir \"$PWD\";; \
     wezterm) exec \"$t\" start --cwd \"$PWD\";; \
-    *) exec \"$t\";; esac; done; exit 1";
+    *) exec \"$t\";; esac; done; exit 1"
+);
 
 fn has_terminal() -> bool {
     let named = std::env::var("TERMINAL").unwrap_or_default();
@@ -233,12 +252,17 @@ fn has_terminal() -> bool {
 }
 
 /// The desktop's terminal, asked the way the freedesktop proposal asks it
-/// (`xdg-terminal-exec`), else $TERMINAL, else the first of the usual ones;
-/// each takes the command after `-e`.
-const IN_TERMINAL: &str = "if command -v xdg-terminal-exec >/dev/null 2>&1; then exec xdg-terminal-exec \"$@\"; fi; \
-    for t in \"$TERMINAL\" kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm; do \
+/// (`xdg-terminal-exec`), else the head of xdg-terminals.list, else
+/// $TERMINAL, else the first of the usual ones; each takes the command
+/// after `-e`.
+const IN_TERMINAL: &str = concat!(
+    "if command -v xdg-terminal-exec >/dev/null 2>&1; then exec xdg-terminal-exec \"$@\"; fi; ",
+    list_head!(),
+    "[ -n \"$x\" ] && exec sh -c \"$x -e \\\"\\$@\\\"\" sh \"$@\"; ",
+    "for t in \"$TERMINAL\" kitty alacritty foot ghostty wezterm konsole gnome-terminal xterm; do \
     [ -n \"$t\" ] && command -v \"$t\" >/dev/null 2>&1 && exec \"$t\" -e \"$@\"; done; \
-    echo \"no terminal for $1\" >&2; exit 1";
+    echo \"no terminal for $1\" >&2; exit 1"
+);
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -585,6 +609,42 @@ mod tests {
         StartupWMClass=firefox\nActions=new-window;private;\n\n[Desktop Action new-window]\nName=New Window\n\
         Name[it]=Nuova finestra\nExec=/usr/lib/firefox/firefox --new-window %u\n\n[Desktop Action private]\n\
         Name=New Private Window\nExec=/usr/lib/firefox/firefox --private-window %u\n";
+
+    /// The terminal at the head of xdg-terminals.list, run from its entry
+    /// (not one of its actions), the folder and the command given to it.
+    #[test]
+    fn the_terminal_preferred_is_the_lists_head() {
+        let base = std::env::temp_dir().join(format!("genoma-terminals-{}", std::process::id()));
+        let apps = base.join("data/applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(base.join("config")).unwrap();
+        // Only what the scripts read with: no terminal can be found, so a
+        // failure is told, never a window opened on the desktop.
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["sh", "sed", "grep", "head", "echo"] {
+            std::os::unix::fs::symlink(Path::new("/usr/bin").join(tool), bin.join(tool)).unwrap();
+        }
+        std::fs::write(base.join("config/xdg-terminals.list"), "# mine\n\nfake.desktop:new-window\nkitty.desktop\n").unwrap();
+        std::fs::write(apps.join("fake.desktop"), "[Desktop Entry]\nExec=echo FAKE %U\n[Desktop Action new-window]\nExec=echo WRONG\n").unwrap();
+        let run = |script: &str, args: &[&str]| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", script, "terminal"])
+                .args(args)
+                .current_dir(&base)
+                .env("PATH", &bin)
+                .env("XDG_CONFIG_HOME", base.join("config"))
+                .env("XDG_DATA_HOME", base.join("data"))
+                .env("XDG_DATA_DIRS", "/nonexistent")
+                .env_remove("TERMINAL")
+                .output()
+                .unwrap();
+            format!("{}{}", String::from_utf8_lossy(&out.stdout).trim(), String::from_utf8_lossy(&out.stderr).trim())
+        };
+        assert_eq!(run(A_TERMINAL, &[]), "FAKE");
+        assert_eq!(run(IN_TERMINAL, &["htop", "-d", "5"]), "FAKE -e htop -d 5");
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     fn firefox() -> App {
         parse("firefox", FIREFOX, &["it_IT".into(), "it".into()], Path::new("/usr/share/applications/firefox.desktop")).unwrap()
