@@ -316,6 +316,11 @@ fn question(lua: &Lua, q: &Question) -> mlua::Result<Table> {
             t.set("needed", *needed as f64)?;
             t.set("available", *available as f64)?;
         }
+        Question::Password { archive, wrong } => {
+            t.set("kind", "password")?;
+            t.set("path", bytes(lua, archive)?)?;
+            t.set("wrong", *wrong)?;
+        }
     }
     Ok(t)
 }
@@ -404,6 +409,20 @@ impl UserData for FilesRef {
         methods.add_method("trash", |_, this, (list, f): (Table, Option<Function>)| {
             this.0.start(Task::Trash { paths: many(list)? }, f)
         });
+        // files:extract(archive, folder, on_done): what it holds, into the
+        // folder; on_done is told where it came out.
+        methods.add_method("extract", |_, this, (archive, to, f): (LuaString, LuaString, Option<Function>)| {
+            this.0.start(Task::Extract { archive: whole(&archive)?, to: whole(&to)? }, f)
+        });
+        // files:compress(paths, archive, { password = … }, on_done): a new
+        // archive of the kind its name says; on_done is told its path.
+        methods.add_method("compress", |_, this, (from, archive, options, f): (Table, LuaString, Option<Table>, Option<Function>)| {
+            let password = match &options {
+                Some(o) => o.get::<Option<String>>("password")?.filter(|p| !p.is_empty()).map(files::Secret),
+                None => None,
+            };
+            this.0.start(Task::Compress { from: many(from)?, archive: whole(&archive)?, password }, f)
+        });
         methods.add_method("pause", |_, this, id: u64| {
             this.0.job(id, |j| {
                 j.paused = true;
@@ -424,11 +443,13 @@ impl UserData for FilesRef {
             this.0.job(id, |j| j.control.cancel());
             Ok(())
         });
-        // files:answer(id, "replace", for_all).
-        methods.add_method("answer", |_, this, (id, name, for_all): (u64, String, Option<bool>)| {
+        // files:answer(id, "replace", for_all); to a password,
+        // files:answer(id, "retry", false, password).
+        methods.add_method("answer", |_, this, (id, name, for_all, mut text): (u64, String, Option<bool>, Option<String>)| {
             let answer = Answer::from_name(&name).ok_or_else(|| err(format!("files: {name:?} is not an answer")))?;
             let mut takes = Ok(());
             this.0.job(id, |j| match &j.progress.question {
+                Some(Question::Password { .. }) if answer == Answer::Retry => j.control.answer_with(answer, text.take().unwrap_or_default()),
                 Some(q) if q.answers().contains(&name.as_str()) => j.control.answer(answer, for_all.unwrap_or(false)),
                 Some(q) => takes = Err(err(format!("files: {name:?} is no answer to this, {} are", q.answers().join(", ")))),
                 None => {}

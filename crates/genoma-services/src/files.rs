@@ -1,5 +1,5 @@
 //! Operations on files (`@genoma/files`): copy, move, link, delete, trash
-//! and back, as jobs that say how far they are, wait when told, stop when
+//! and back, archives opened and made, as jobs that say how far they are, wait when told, stop when
 //! told, and ask when only a person can say.
 //!
 //! What they keep to:
@@ -36,7 +36,17 @@ use std::{
 
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, RenameFlags, SeekFrom, Timespec, Timestamps};
 
-use crate::trash;
+use crate::{archive, trash};
+
+/// A password: never written out by `{:?}`.
+#[derive(Clone, PartialEq)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(…)")
+    }
+}
 
 // ---- what is asked for ---------------------------------------------------------
 
@@ -54,6 +64,13 @@ pub enum Task {
     Restore { items: Vec<trash::Item> },
     /// What the trash holds, for good.
     Erase { items: Vec<trash::Item> },
+    /// What an archive holds, into the folder `to`: one thing alone as
+    /// itself, more in a folder named after the archive; never over what is
+    /// there.
+    Extract { archive: PathBuf, to: PathBuf },
+    /// `from` into a new archive, of the kind its name says (.zip, .tar.xz,
+    /// .7z…); a password locks a zip.
+    Compress { from: Vec<PathBuf>, archive: PathBuf, password: Option<Secret> },
 }
 
 impl Task {
@@ -66,12 +83,15 @@ impl Task {
             Task::Trash { .. } => "trash",
             Task::Restore { .. } => "restore",
             Task::Erase { .. } => "erase",
+            Task::Extract { .. } => "extract",
+            Task::Compress { .. } => "compress",
         }
     }
 
     pub fn to(&self) -> Option<&Path> {
         match self {
-            Task::Copy { to, .. } | Task::Move { to, .. } | Task::Link { to, .. } => Some(to),
+            Task::Copy { to, .. } | Task::Move { to, .. } | Task::Link { to, .. } | Task::Extract { to, .. } => Some(to),
+            Task::Compress { archive, .. } => archive.parent(),
             _ => None,
         }
     }
@@ -81,6 +101,8 @@ impl Task {
             Task::Copy { from, .. } | Task::Move { from, .. } | Task::Link { from, .. } => from.len(),
             Task::Delete { paths } | Task::Trash { paths } => paths.len(),
             Task::Restore { items } | Task::Erase { items } => items.len(),
+            Task::Extract { .. } => 1,
+            Task::Compress { from, .. } => from.len(),
         }
     }
 
@@ -124,6 +146,9 @@ pub enum Question {
     Failed { path: PathBuf, error: String },
     /// More than fits where it goes.
     Space { to: PathBuf, needed: u64, available: u64 },
+    /// An archive locked by a password; `wrong`, the one given was not it.
+    /// Answered "retry" with the password, or "cancel".
+    Password { archive: PathBuf, wrong: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +187,7 @@ impl Question {
             Question::Exists { .. } => vec!["keep_both", "skip", "cancel"],
             Question::Failed { .. } => vec!["retry", "skip", "cancel"],
             Question::Space { .. } => vec!["retry", "skip", "cancel"],
+            Question::Password { .. } => vec!["retry", "cancel"],
         }
     }
 
@@ -229,6 +255,8 @@ struct Told {
     paused: bool,
     cancelled: bool,
     answer: Option<(Answer, bool)>,
+    /// What came with the answer: a password.
+    text: Option<String>,
     /// A test's: cancelled at this many checks from now.
     left: Option<u64>,
 }
@@ -264,6 +292,15 @@ impl Control {
 
     pub fn answer(&self, answer: Answer, for_all: bool) {
         self.told().answer = Some((answer, for_all));
+        self.wake.notify_all();
+    }
+
+    /// An answer with a password.
+    pub fn answer_with(&self, answer: Answer, text: String) {
+        let mut told = self.told();
+        told.text = Some(text);
+        told.answer = Some((answer, false));
+        drop(told);
         self.wake.notify_all();
     }
 
@@ -387,6 +424,8 @@ pub fn run(task: &Task, control: &Control, report: &dyn Fn(&Progress)) -> Progre
         Task::Trash { paths } => r.trash(paths),
         Task::Restore { items } => r.restore(items),
         Task::Erase { items } => r.erase(items),
+        Task::Extract { archive, to } => r.extract(archive, to),
+        Task::Compress { from, archive, password } => r.compress(from, archive, password.as_ref().map(|p| p.0.as_str())),
     };
     r.progress.state = if done.is_ok() { State::Done } else { State::Cancelled };
     r.progress.question = None;
@@ -453,7 +492,7 @@ impl Run<'_> {
             Question::Exists { replace: true, .. } => self.policy.files,
             Question::Exists { .. } => self.policy.others,
             Question::Failed { .. } => self.policy.failures.then_some(Answer::Skip),
-            Question::Space { .. } => None,
+            Question::Space { .. } | Question::Password { .. } => None,
         };
         if let Some(answer) = given {
             return Ok(answer);
@@ -488,7 +527,7 @@ impl Run<'_> {
                 Question::Exists { replace: true, .. } => self.policy.files = Some(answer),
                 Question::Exists { .. } => self.policy.others = Some(answer),
                 Question::Failed { .. } => self.policy.failures = answer == Answer::Skip,
-                Question::Space { .. } => {}
+                Question::Space { .. } | Question::Password { .. } => {}
             }
         }
         (self.report)(&self.progress);
@@ -538,6 +577,284 @@ impl Run<'_> {
         }
         self.progress.state = State::Running;
         Ok(())
+    }
+
+    // ---- archives ----------------------------------------------------------
+
+    /// The password, asked: None when it is not given.
+    fn ask_password(&mut self, archive: &Path, wrong: bool) -> Step<Option<String>> {
+        self.control.told().text = None;
+        let answer = self.ask(Question::Password { archive: archive.to_owned(), wrong })?;
+        Ok(if answer == Answer::Retry { self.control.told().text.take() } else { None })
+    }
+
+    fn extract(&mut self, archive: &Path, to: &Path) -> Step<()> {
+        if self.trying(to, |_| Ok(folder(to)))?.is_none() {
+            return Ok(());
+        }
+        let name = archive.file_name().map(|n| n.as_bytes().to_vec()).unwrap_or_default();
+        let stem = archive::stem(&name);
+        let mut password: Option<String> = None;
+        let mut raw = false;
+        loop {
+            self.progress.total_bytes = fs::metadata(archive).map(|m| m.len()).unwrap_or(0);
+            self.progress.bytes = 0;
+            self.progress.files = 0;
+            self.progress.current = archive.to_owned();
+            self.progress.state = State::Running;
+            let Some(stage) = self.trying(to, |_| Ok(Stage::new(to, &stem)))? else { return Ok(()) };
+            match self.unpack(archive, &stage.path, password.as_deref(), raw, &stem)? {
+                Unpacked::Done => return self.place(stage, to, &stem),
+                Unpacked::Locked => {
+                    let wrong = password.is_some();
+                    match self.ask_password(archive, wrong)? {
+                        Some(p) => password = Some(p),
+                        None => return Ok(()),
+                    }
+                }
+                // Not an archive: a lone file compressed (a .gz), read as one.
+                Unpacked::NotAnArchive if !raw => raw = true,
+                Unpacked::NotAnArchive => {
+                    if !self.failed(archive, "it is not an archive")? {
+                        return Ok(());
+                    }
+                }
+                Unpacked::Failed(e) => {
+                    if !self.failed(archive, e)? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Everything the archive holds, into `stage`.
+    fn unpack(&mut self, archive: &Path, stage: &Path, password: Option<&str>, raw: bool, stem: &[u8]) -> Step<Unpacked> {
+        let mut reader = match archive::Reader::open(archive, password, raw) {
+            Ok(r) => r,
+            Err(e) if !raw && e.contains("Unrecognized archive format") => return Ok(Unpacked::NotAnArchive),
+            Err(e) => return Ok(Unpacked::Failed(e)),
+        };
+        let mut disk = match archive::Disk::new() {
+            Ok(d) => d,
+            Err(e) => return Ok(Unpacked::Failed(e)),
+        };
+        let inside = stage.as_os_str().as_bytes().to_vec();
+        let mut any = false;
+        loop {
+            self.check()?;
+            let entry = match reader.next() {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(e) if unsupported_lock(&e) => return Ok(Unpacked::Failed(LOCK_UNSUPPORTED.into())),
+                Err(_) if reader.encrypted() => return Ok(Unpacked::Locked),
+                Err(e) if !any && e.contains("Unrecognized archive format") => return Ok(Unpacked::NotAnArchive),
+                Err(e) => return Ok(Unpacked::Failed(e)),
+            };
+            any = true;
+            // A lone file compressed is named after the archive.
+            let wanted = if raw { Some(stem.to_vec()) } else { entry.path() };
+            let Some(relative) = wanted.and_then(|p| safe_relative(&p)) else { continue };
+            let mut at = inside.clone();
+            at.push(b'/');
+            at.extend_from_slice(&relative);
+            if let Err(e) = entry.set_path(&at) {
+                return Ok(Unpacked::Failed(e));
+            }
+            if let Some(link) = entry.hardlink() {
+                let Some(target) = safe_relative(&link) else { continue };
+                let mut there = inside.clone();
+                there.push(b'/');
+                there.extend_from_slice(&target);
+                if let Err(e) = entry.set_hardlink(&there) {
+                    return Ok(Unpacked::Failed(e));
+                }
+            }
+            self.progress.current = PathBuf::from(OsStr::from_bytes(&relative));
+            match disk.header(entry) {
+                Ok(archive::FAILED) => {
+                    self.progress.skipped.push(PathBuf::from(OsStr::from_bytes(&relative)));
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => return Ok(Unpacked::Failed(e)),
+            }
+            if entry.kind() == archive::IFREG {
+                loop {
+                    self.check()?;
+                    let more = match reader.block() {
+                        Ok(Some((data, offset))) => match disk.write(data, offset) {
+                            Ok(()) => Ok(true),
+                            Err(e) => return Ok(Unpacked::Failed(e)),
+                        },
+                        Ok(None) => Ok(false),
+                        Err(e) => Err(e),
+                    };
+                    match more {
+                        Ok(true) => self.progress.bytes = reader.consumed().min(self.progress.total_bytes),
+                        Ok(false) => break,
+                        Err(e) if unsupported_lock(&e) => return Ok(Unpacked::Failed(LOCK_UNSUPPORTED.into())),
+                        Err(_) if entry.encrypted() || reader.encrypted() => return Ok(Unpacked::Locked),
+                        Err(e) => return Ok(Unpacked::Failed(e)),
+                    }
+                }
+            }
+            if let Err(e) = disk.finish() {
+                return Ok(Unpacked::Failed(e));
+            }
+            self.progress.files += 1;
+            self.progress.bytes = reader.consumed().min(self.progress.total_bytes);
+        }
+        Ok(Unpacked::Done)
+    }
+
+    /// What came out, put in its place: one thing alone as itself, more in a
+    /// folder named after the archive, either under a name nothing has.
+    fn place(&mut self, stage: Stage, to: &Path, stem: &[u8]) -> Step<()> {
+        self.progress.state = State::Finishing;
+        (self.report)(&self.progress);
+        let names = entries(&stage.path).unwrap_or_default();
+        let made = if names.len() == 1 {
+            let from = stage.path.join(&names[0]);
+            let Some(at) = self.trying(&from, |_| Ok(put(&from, &to.join(&names[0]))))? else { return Ok(()) };
+            at
+        } else if names.is_empty() {
+            return Ok(());
+        } else {
+            let mut stage = stage;
+            let from = stage.path.clone();
+            let Some(at) = self.trying(&from, |_| Ok(put(&from, &to.join(OsStr::from_bytes(stem)))))? else { return Ok(()) };
+            stage.kept = true;
+            at
+        };
+        self.progress.bytes = self.progress.total_bytes;
+        self.progress.made = vec![made];
+        Ok(())
+    }
+
+    fn compress(&mut self, from: &[PathBuf], archive: &Path, password: Option<&str>) -> Step<()> {
+        let Some(dir) = archive.parent().map(Path::to_owned) else { return Ok(()) };
+        if self.trying(&dir, |_| Ok(folder(&dir)))?.is_none() {
+            return Ok(());
+        }
+        self.measure(from)?;
+        loop {
+            self.progress.bytes = 0;
+            self.progress.files = 0;
+            let name = archive.file_name().map(|n| n.as_bytes().to_vec()).unwrap_or_default();
+            let Some(out) = self.trying(&dir, |_| Ok(Hidden::new_file(&dir, &name)))? else { return Ok(()) };
+            match self.pack(from, archive, &out.path, password)? {
+                Ok(()) => {
+                    self.progress.state = State::Finishing;
+                    (self.report)(&self.progress);
+                    let mut out = out;
+                    let Some(at) = self.trying(archive, |_| Ok(put(&out.path, archive)))? else { return Ok(()) };
+                    out.kept = true;
+                    self.progress.made = vec![at];
+                    return Ok(());
+                }
+                Err(e) => {
+                    if !self.failed(archive, e)? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// `from`, each under its own name, into the archive being written at
+    /// `out`; what cannot be read is asked about, as a copy asks.
+    fn pack(&mut self, from: &[PathBuf], named: &Path, out: &Path, password: Option<&str>) -> Step<Result<(), String>> {
+        let mut writer = match archive::Writer::new(named, out, password) {
+            Ok(w) => w,
+            Err(e) => return Ok(Err(e)),
+        };
+        let mut buffer = vec![0u8; 1 << 20];
+        for item in from {
+            let base = item.parent().unwrap_or(Path::new("/")).to_owned();
+            let mut stack = vec![item.clone()];
+            while let Some(path) = stack.pop() {
+                self.check()?;
+                if path == out {
+                    continue;
+                }
+                let Some(m) = self.trying(&path, |_| Ok(fs::symlink_metadata(&path)))? else { continue };
+                let relative = path.strip_prefix(&base).unwrap_or(&path).as_os_str().as_bytes().to_vec();
+                self.progress.current = path.clone();
+                let mtime = (m.mtime(), m.mtime_nsec());
+                let ft = m.file_type();
+                if ft.is_dir() {
+                    let entry = match archive::NewEntry::new(&relative, archive::IFDIR, m.mode(), 0, mtime) {
+                        Ok(e) => e,
+                        Err(e) => return Ok(Err(e)),
+                    };
+                    if let Err(e) = writer.header(&entry) {
+                        return Ok(Err(e));
+                    }
+                    let mut inside: Vec<PathBuf> = fs::read_dir(&path).into_iter().flatten().flatten().map(|e| e.path()).collect();
+                    // Written in order, the first first.
+                    inside.sort();
+                    inside.reverse();
+                    stack.extend(inside);
+                } else if ft.is_symlink() {
+                    let Some(target) = self.trying(&path, |_| Ok(fs::read_link(&path)))? else { continue };
+                    let entry = match archive::NewEntry::new(&relative, archive::IFLNK, m.mode(), 0, mtime) {
+                        Ok(e) => e,
+                        Err(e) => return Ok(Err(e)),
+                    };
+                    if let Err(e) = entry.set_symlink(target.as_os_str().as_bytes()).and_then(|_| writer.header(&entry)) {
+                        return Ok(Err(e));
+                    }
+                } else if ft.is_file() {
+                    let Some(mut file) = self.trying(&path, |_| Ok(File::open(&path)))? else { continue };
+                    let entry = match archive::NewEntry::new(&relative, archive::IFREG, m.mode(), m.len() as i64, mtime) {
+                        Ok(e) => e,
+                        Err(e) => return Ok(Err(e)),
+                    };
+                    if let Err(e) = writer.header(&entry) {
+                        return Ok(Err(e));
+                    }
+                    let mut left = m.len();
+                    while left > 0 {
+                        self.check()?;
+                        let want = buffer.len().min(left as usize);
+                        let n = match io::Read::read(&mut file, &mut buffer[..want]) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                            Err(e) => return Ok(Err(format!("{}: {}", path.display(), why(&e)))),
+                        };
+                        if let Err(e) = writer.write(&buffer[..n]) {
+                            return Ok(Err(e));
+                        }
+                        left -= n as u64;
+                        self.progress.bytes += n as u64;
+                    }
+                    // A file that shrank while read: the archive says it was
+                    // longer, so what is missing is written as nothing.
+                    if left > 0 {
+                        self.lost.insert("changes");
+                        let zeros = vec![0u8; buffer.len()];
+                        while left > 0 {
+                            let n = zeros.len().min(left as usize);
+                            if let Err(e) = writer.write(&zeros[..n]) {
+                                return Ok(Err(e));
+                            }
+                            left -= n as u64;
+                        }
+                    }
+                } else {
+                    // Devices, sockets and pipes are not kept.
+                    self.progress.skipped.push(path.clone());
+                    continue;
+                }
+                if let Err(e) = writer.finish() {
+                    return Ok(Err(e));
+                }
+                self.progress.files += 1;
+            }
+        }
+        Ok(writer.close())
     }
 
     // ---- copy and move -----------------------------------------------------
@@ -1250,6 +1567,104 @@ impl Drop for Staged {
 }
 
 /// A name of our own in `to`'s folder.
+/// libarchive reads a locked zip, not a locked 7z or rar: no password opens
+/// those, and none is asked for.
+fn unsupported_lock(error: &str) -> bool {
+    error.contains("encrypted, but currently not supported")
+}
+
+const LOCK_UNSUPPORTED: &str = "a locked 7z or rar opens only in 7-Zip";
+
+/// How reading an archive ended.
+enum Unpacked {
+    Done,
+    /// A password is needed, or the one given is not it.
+    Locked,
+    NotAnArchive,
+    Failed(String),
+}
+
+/// A name inside an archive as a path below where it goes: without a
+/// leading "/" or "./", and none that climbs out ("..") or is empty.
+fn safe_relative(name: &[u8]) -> Option<Vec<u8>> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in name.split(|b| *b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => return None,
+            p => parts.push(p),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(&b'/'))
+}
+
+/// A hidden folder or file beside where something is being made, taken away
+/// unless it is kept: what is half made is never left behind.
+struct Stage {
+    path: PathBuf,
+    kept: bool,
+}
+
+type Hidden = Stage;
+
+fn hidden_name(dir: &Path, name: &[u8]) -> PathBuf {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut hidden = b".".to_vec();
+    hidden.extend_from_slice(&name[..name.len().min(200)]);
+    hidden.extend_from_slice(format!(".genoma-{}-{n}", std::process::id()).as_bytes());
+    dir.join(OsStr::from_bytes(&hidden))
+}
+
+impl Stage {
+    /// A folder to put an archive's contents in.
+    fn new(dir: &Path, name: &[u8]) -> io::Result<Stage> {
+        let path = hidden_name(dir, name);
+        fs::create_dir(&path)?;
+        Ok(Stage { path, kept: false })
+    }
+}
+
+impl Hidden {
+    /// Where an archive is written until it is whole: nothing yet.
+    fn new_file(dir: &Path, name: &[u8]) -> io::Result<Hidden> {
+        Ok(Stage { path: hidden_name(dir, name), kept: false })
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        if fs::symlink_metadata(&self.path).is_ok_and(|m| m.is_dir()) {
+            let _ = fs::remove_dir_all(&self.path);
+        } else {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// `from` moved to `to`, or to a name nothing has beside it: never over what
+/// is there, even what appeared meanwhile. Where it went.
+fn put(from: &Path, to: &Path) -> io::Result<PathBuf> {
+    let mut at = to.to_owned();
+    for _ in 0..1000 {
+        if fs::symlink_metadata(&at).is_ok() {
+            at = free_name(&at);
+        }
+        match rustix::fs::renameat_with(CWD, from, CWD, &at, RenameFlags::NOREPLACE) {
+            Ok(()) => return Ok(at),
+            Err(rustix::io::Errno::EXIST) => at = free_name(&at),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(io::Error::new(ErrorKind::AlreadyExists, "no free name"))
+}
+
 fn beside(to: &Path) -> PathBuf {
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1710,6 +2125,160 @@ mod tests {
         };
         let done = run(task, control, &report);
         (done, asked.into_inner())
+    }
+
+    // ---- archives ----------------------------------------------------------
+
+    /// A small tree to put in archives: a folder with a file, a nested one, a
+    /// link and an empty folder; and a file beside it.
+    fn archive_sample(root: &Path) -> (PathBuf, PathBuf) {
+        let folder = root.join("photos");
+        fs::create_dir_all(folder.join("2026/empty")).unwrap();
+        fs::write(folder.join("a.txt"), b"alpha").unwrap();
+        fs::write(folder.join("2026/b.bin"), vec![7u8; 300_000]).unwrap();
+        symlink("a.txt", folder.join("link")).unwrap();
+        let file = root.join("notes.md");
+        fs::write(&file, b"# notes\n").unwrap();
+        (folder, file)
+    }
+
+    #[test]
+    fn archives_made_and_opened_again_hold_the_same() {
+        for ending in ["zip", "tar.xz", "7z", "tar.gz", "tar.zst"] {
+            let root = scratch("archive-round");
+            let _gone = Gone(vec![root.clone()]);
+            let (folder, file) = archive_sample(&root);
+            let made = quietly(&Task::Compress { from: vec![folder.clone(), file.clone()], archive: root.join(format!("both.{ending}")), password: None });
+            assert_eq!(made.state, State::Done, "{ending}");
+            let archive = made.made[0].clone();
+            assert_eq!(archive, root.join(format!("both.{ending}")));
+            // Nothing hidden is left beside it.
+            assert!(fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().as_bytes().starts_with(b".")), "{ending}");
+            let out = root.join("out");
+            fs::create_dir(&out).unwrap();
+            let opened = quietly(&Task::Extract { archive: archive.clone(), to: out.clone() });
+            assert_eq!(opened.state, State::Done, "{ending}");
+            // Two things in it: a folder named after the archive.
+            assert_eq!(opened.made, vec![out.join("both")], "{ending}");
+            assert_eq!(tree(&out.join("both/photos")), tree(&folder), "{ending}");
+            assert_eq!(fs::read(out.join("both/notes.md")).unwrap(), b"# notes\n");
+            assert!(fs::read_dir(&out).unwrap().flatten().all(|e| !e.file_name().as_bytes().starts_with(b".")), "{ending}");
+        }
+    }
+
+    #[test]
+    fn one_thing_alone_comes_out_as_itself_under_a_free_name() {
+        let root = scratch("archive-alone");
+        let _gone = Gone(vec![root.clone()]);
+        let (folder, _) = archive_sample(&root);
+        let made = quietly(&Task::Compress { from: vec![folder.clone()], archive: root.join("photos.zip"), password: None });
+        let archive = made.made[0].clone();
+        // "photos" is there already: what comes out is "photos (2)".
+        let opened = quietly(&Task::Extract { archive: archive.clone(), to: root.clone() });
+        assert_eq!(opened.made, vec![root.join("photos (2)")]);
+        assert_eq!(tree(&root.join("photos (2)")), tree(&folder));
+        // And an archive is never written over another.
+        let again = quietly(&Task::Compress { from: vec![folder], archive: archive.clone(), password: None });
+        assert_eq!(again.made, vec![root.join("photos (2).zip")]);
+    }
+
+    #[test]
+    fn a_locked_zip_asks_for_its_password_again_until_it_is_the_one() {
+        let root = scratch("archive-locked");
+        let _gone = Gone(vec![root.clone()]);
+        let (_, file) = archive_sample(&root);
+        let made = quietly(&Task::Compress { from: vec![file.clone()], archive: root.join("secret.zip"), password: Some(Secret("right".into())) });
+        assert_eq!(made.state, State::Done);
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        let control = Control::default();
+        let asked = RefCell::new(Vec::new());
+        let report = |p: &Progress| {
+            if p.state == State::Asking
+                && let Some(q) = &p.question
+            {
+                asked.borrow_mut().push(q.clone());
+                let n = asked.borrow().len();
+                control.answer_with(Answer::Retry, if n == 1 { "wrong".into() } else { "right".into() });
+            }
+        };
+        let opened = run(&Task::Extract { archive: made.made[0].clone(), to: out.clone() }, &control, &report);
+        assert_eq!(opened.state, State::Done);
+        let asked = asked.into_inner();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(matches!(asked[0], Question::Password { wrong: false, .. }));
+        assert!(matches!(asked[1], Question::Password { wrong: true, .. }));
+        assert_eq!(fs::read(out.join("notes.md")).unwrap(), b"# notes\n");
+        // Cancelled at the question, nothing is left.
+        let out2 = root.join("out2");
+        fs::create_dir(&out2).unwrap();
+        let (gave_up, _) = answered(&Task::Extract { archive: made.made[0].clone(), to: out2.clone() }, &Control::default(), |_| (Answer::Cancel, false));
+        assert_eq!(gave_up.state, State::Cancelled);
+        assert_eq!(fs::read_dir(&out2).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_locked_7z_is_said_to_be_one_that_cannot_be_opened() {
+        assert!(unsupported_lock("a.txt: The file content is encrypted, but currently not supported"));
+        assert!(!unsupported_lock("Incorrect passphrase"));
+    }
+
+    #[test]
+    fn nothing_comes_out_of_an_archive_outside_where_it_goes() {
+        let root = scratch("archive-climb");
+        let _gone = Gone(vec![root.clone()]);
+        let archive = root.join("evil.tar");
+        {
+            let mut w = archive::Writer::new(&archive, &archive, None).unwrap();
+            for (name, data) in [(&b"../outside.txt"[..], &b"no"[..]), (b"/etc/absolute.txt", b"no"), (b"inside.txt", b"yes")] {
+                let e = archive::NewEntry::new(name, archive::IFREG, 0o644, data.len() as i64, (0, 0)).unwrap();
+                w.header(&e).unwrap();
+                w.write(data).unwrap();
+                w.finish().unwrap();
+            }
+            w.close().unwrap();
+        }
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        let opened = quietly(&Task::Extract { archive, to: out.clone() });
+        assert_eq!(opened.state, State::Done);
+        assert!(!root.join("outside.txt").exists());
+        // "/etc/absolute.txt" becomes "etc/absolute.txt", inside.
+        assert_eq!(opened.made, vec![out.join("evil")]);
+        assert_eq!(fs::read(out.join("evil/inside.txt")).unwrap(), b"yes");
+        assert!(out.join("evil/etc/absolute.txt").exists());
+    }
+
+    #[test]
+    fn a_lone_compressed_file_comes_out_named_after_it() {
+        let root = scratch("archive-lone");
+        let _gone = Gone(vec![root.clone()]);
+        let plain = root.join("data.txt");
+        fs::write(&plain, b"hello hello hello").unwrap();
+        let gz = root.join("data.txt.gz");
+        let status = std::process::Command::new("gzip").args(["-k", "-c"]).arg(&plain).output().unwrap();
+        fs::write(&gz, status.stdout).unwrap();
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        let opened = quietly(&Task::Extract { archive: gz, to: out.clone() });
+        assert_eq!(opened.state, State::Done);
+        assert_eq!(opened.made, vec![out.join("data.txt")]);
+        assert_eq!(fs::read(out.join("data.txt")).unwrap(), b"hello hello hello");
+    }
+
+    #[test]
+    fn an_extraction_cancelled_leaves_nothing_half_made() {
+        let root = scratch("archive-cancel");
+        let _gone = Gone(vec![root.clone()]);
+        let (folder, _) = archive_sample(&root);
+        let made = quietly(&Task::Compress { from: vec![folder], archive: root.join("p.tar"), password: None });
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        let control = Control::default();
+        control.told().left = Some(3);
+        let stopped = run(&Task::Extract { archive: made.made[0].clone(), to: out.clone() }, &control, &|_| {});
+        assert_eq!(stopped.state, State::Cancelled);
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
     }
 
     fn quietly(task: &Task) -> Progress {

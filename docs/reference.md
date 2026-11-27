@@ -2612,6 +2612,22 @@ For good: ask first.
 trash: (self: Files, paths: { string }, on_done: ((result: FileResult) -> ())?) -> number
 ```
 
+### `files:extract`
+
+```luau
+extract: (self: Files, archive: string, to: string, on_done: ((result: FileResult) -> ())?) -> number
+```
+
+What an archive holds (zip, tar with any compression, 7z, rar, iso, a lone .gz…), into a folder: one thing alone as itself, more in a folder named after the archive, either under a name nothing has; never outside it. A locked one asks for its password. `made` is where it came out.
+
+### `files:compress`
+
+```luau
+compress: (self: Files, paths: { string }, archive: string, options: { password: string? }?, on_done: ((result: FileResult) -> ())?) -> number
+```
+
+A new archive of `paths`, each under its own name, of the kind its name says (.zip, .tar.xz, .7z, .tar.gz, .tar.zst…), never over another: "name (2).zip" then. A password locks a zip (AES-256).
+
 ### `files:pause`
 
 ```luau
@@ -2635,10 +2651,10 @@ What is whole stays, what is half made is taken away.
 ### `files:answer`
 
 ```luau
-answer: (self: Files, id: number, answer: string, for_all: boolean?) -> ()
+answer: (self: Files, id: number, answer: string, for_all: boolean?, text: string?) -> ()
 ```
 
-`for_all`: and to every question of that kind this job asks.
+`for_all`: and to every question of that kind this job asks; `text`, the password a "password" question is answered "retry" with.
 
 ### `files:rename`
 
@@ -3305,7 +3321,7 @@ What only a person can say. `answers` are the ones it takes.
 
 | Field | Type | |
 |---|---|---|
-| `kind` | `"exists" \| "failed" \| "space"` | "exists": the name is taken; "failed": it could not be done; "space": more than fits. |
+| `kind` | `"exists" \| "failed" \| "space" \| "password"` | "exists": the name is taken; "failed": it could not be done; "space": more than fits; "password": an archive is locked, answered "retry" with the password (files:answer's fourth) or "cancel". |
 | `answers` | `{ string }` | "replace", "merge" (a folder into the one there), "keep_both", "skip", "retry", "cancel". To "space", "skip" goes on anyway. |
 | `path` | `string` |  |
 | `to` | `string?` | Of "exists": what is there. |
@@ -3314,13 +3330,14 @@ What only a person can say. `answers` are the ones it takes.
 | `error` | `string?` | Of "failed": why, in words. |
 | `needed` | `number?` | Of "space", bytes. |
 | `available` | `number?` |  |
+| `wrong` | `boolean?` | Of "password": the one given was not it. |
 
 ### FileJob
 
 | Field | Type | |
 |---|---|---|
 | `id` | `number` |  |
-| `kind` | `"copy" \| "move" \| "link" \| "delete" \| "trash" \| "restore" \| "erase"` |  |
+| `kind` | `"copy" \| "move" \| "link" \| "delete" \| "trash" \| "restore" \| "erase" \| "extract" \| "compress"` |  |
 | `state` | `"waiting" \| "preparing" \| "running" \| "paused" \| "asking" \| "finishing"` | "waiting" for the ones before it; "finishing": the disk is writing the last of it. |
 | `count` | `number` | How many things were asked for, and the folder they go to. |
 | `to` | `string?` |  |

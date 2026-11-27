@@ -17,6 +17,30 @@ changes what a shell sees.
   player's position is now read again only when its state, rate or track
   changes; otherwise it runs on from `Seeked` and the clock, as MPRIS has it.
 
+## Unreleased
+
+### Added
+
+- `files:extract(archive, folder, on_done)` and
+  `files:compress(paths, archive, { password }, on_done)`: archives opened
+  and made as jobs like a copy (progress, pause, cancel, nothing half made
+  left behind), through libarchive, so every format a desktop meets is read
+  (zip, tar with any compression, 7z, rar, iso, a lone .gz) and zip, tar.*
+  and 7z are written. What one archive holds comes out as itself when it is
+  one thing, in a folder named after the archive when it is more, under a
+  name nothing has; nothing comes out outside it. A zip can be locked with
+  a password (AES-256); a locked archive asks for its password (a
+  `"password"` question, answered `files:answer(id, "retry", false,
+  password)`). Genoma now links libarchive.
+
+### Changed
+
+- `apps:terminal` and an application that runs in a terminal take, where
+  xdg-terminal-exec is not installed, the terminal at the head of
+  `$XDG_CONFIG_HOME/xdg-terminals.list` (its desktop entry's command)
+  before `$TERMINAL`: the choice a settings page writes is followed even
+  without xdg-terminal-exec.
+
 ## 0.1.26 — 2026-11-27
 
 ### Added

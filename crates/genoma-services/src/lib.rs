@@ -22,6 +22,7 @@ pub mod compositor;
 pub mod directory;
 pub mod displays;
 pub mod drives;
+pub mod archive;
 pub mod files;
 pub mod gamma;
 pub mod icons;

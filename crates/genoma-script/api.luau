@@ -1518,8 +1518,9 @@ export type FileSeen = { dir: boolean, size: number, modified: number }
 -- What only a person can say. `answers` are the ones it takes.
 export type FileQuestion = {
     -- "exists": the name is taken; "failed": it could not be done;
-    -- "space": more than fits.
-    kind: "exists" | "failed" | "space",
+    -- "space": more than fits; "password": an archive is locked, answered
+    -- "retry" with the password (files:answer's fourth) or "cancel".
+    kind: "exists" | "failed" | "space" | "password",
     -- "replace", "merge" (a folder into the one there), "keep_both",
     -- "skip", "retry", "cancel". To "space", "skip" goes on anyway.
     answers: { string },
@@ -1533,11 +1534,13 @@ export type FileQuestion = {
     -- Of "space", bytes.
     needed: number?,
     available: number?,
+    -- Of "password": the one given was not it.
+    wrong: boolean?,
 }
 
 export type FileJob = {
     id: number,
-    kind: "copy" | "move" | "link" | "delete" | "trash" | "restore" | "erase",
+    kind: "copy" | "move" | "link" | "delete" | "trash" | "restore" | "erase" | "extract" | "compress",
     -- "waiting" for the ones before it; "finishing": the disk is writing
     -- the last of it.
     state: "waiting" | "preparing" | "running" | "paused" | "asking" | "finishing",
@@ -1590,12 +1593,23 @@ export type Files = {
     -- For good: ask first.
     delete: (self: Files, paths: { string }, on_done: ((result: FileResult) -> ())?) -> number,
     trash: (self: Files, paths: { string }, on_done: ((result: FileResult) -> ())?) -> number,
+    -- What an archive holds (zip, tar with any compression, 7z, rar, iso, a
+    -- lone .gz…), into a folder: one thing alone as itself, more in a folder
+    -- named after the archive, either under a name nothing has; never
+    -- outside it. A locked one asks for its password. `made` is where it
+    -- came out.
+    extract: (self: Files, archive: string, to: string, on_done: ((result: FileResult) -> ())?) -> number,
+    -- A new archive of `paths`, each under its own name, of the kind its
+    -- name says (.zip, .tar.xz, .7z, .tar.gz, .tar.zst…), never over
+    -- another: "name (2).zip" then. A password locks a zip (AES-256).
+    compress: (self: Files, paths: { string }, archive: string, options: { password: string? }?, on_done: ((result: FileResult) -> ())?) -> number,
     pause: (self: Files, id: number) -> (),
     resume: (self: Files, id: number) -> (),
     -- What is whole stays, what is half made is taken away.
     cancel: (self: Files, id: number) -> (),
-    -- `for_all`: and to every question of that kind this job asks.
-    answer: (self: Files, id: number, answer: string, for_all: boolean?) -> (),
+    -- `for_all`: and to every question of that kind this job asks; `text`,
+    -- the password a "password" question is answered "retry" with.
+    answer: (self: Files, id: number, answer: string, for_all: boolean?, text: string?) -> (),
     -- At once, and never over another; the new path, or why not.
     rename: (self: Files, path: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
     make_folder: (self: Files, folder: string, name: string, on_done: ((path: string?, error: string?) -> ())?) -> (),
