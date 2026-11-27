@@ -6,6 +6,17 @@ break interfaces, and each such change is marked **Breaking** with what to
 change. Internal work (performance, refactors) is listed only when it
 changes what a shell sees.
 
+## Unreleased
+
+### Fixed
+
+- A player's position after a seek in Firefox or Zen went back to 0 and
+  stayed wrong until pause and play: the `PropertiesChanged` that follow a
+  seek (the title losing and regaining " - YouTube") read `Position` again,
+  which these browsers answer with 0 for long stretches while playing. A
+  player's position is now read again only when its state, rate or track
+  changes; otherwise it runs on from `Seeked` and the clock, as MPRIS has it.
+
 ## 0.1.26 — 2026-11-27
 
 ### Added

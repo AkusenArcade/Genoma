@@ -62,6 +62,20 @@ impl Player {
         }
         if self.length > 0.0 { p.clamp(0.0, self.length) } else { p.max(0.0) }
     }
+
+    /// Whether this fresh reading of a player changes how its position runs
+    /// from `before`, the reading it replaces: another state, another rate,
+    /// another track. Anything else in a PropertiesChanged leaves the
+    /// position where `Seeked` and the clock put it. MPRIS never announces a
+    /// position there, and Firefox and Zen answer it with 0 for long
+    /// stretches while playing (logged 2026-11-27): read again after a
+    /// title change, it threw a seek away.
+    fn moves_position(&self, before: &Player) -> bool {
+        // Firefox and Zen drop the length from later metadata of the same
+        // track: a length that comes or goes is not another track.
+        let other_length = self.length > 0.0 && before.length > 0.0 && self.length != before.length;
+        self.status != before.status || self.rate != before.rate || self.track_id != before.track_id || other_length
+    }
 }
 
 pub enum Update {
@@ -194,8 +208,14 @@ impl Media {
         batch(|| {
             let mut players = self.players.get_untracked().unwrap_or_default();
             match update {
-                Update::Player(p) => match players.iter_mut().find(|q| q.name == p.name) {
-                    Some(q) => *q = *p,
+                Update::Player(mut p) => match players.iter_mut().find(|q| q.name == p.name) {
+                    Some(q) => {
+                        if !p.moves_position(q) {
+                            p.position = q.position;
+                            p.position_at = q.position_at;
+                        }
+                        *q = *p;
+                    }
                     None => players.push(*p),
                 },
                 Update::Seeked { name, position, at } => {
@@ -320,4 +340,79 @@ pub enum Action {
     Seek(f64),
     /// Seconds from the start.
     SetPosition(f64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn player(status: &'static str, title: &str, position: f64) -> Player {
+        Player {
+            name: "org.mpris.MediaPlayer2.firefox.instance_1_1".into(),
+            identity: String::new(),
+            desktop_entry: String::new(),
+            status,
+            title: title.into(),
+            artist: String::new(),
+            album: String::new(),
+            album_artist: String::new(),
+            art_url: String::new(),
+            length: 569.0,
+            track_id: "/org/mpris/MediaPlayer2/firefox".into(),
+            rate: if status == "playing" { 1.0 } else { 0.0 },
+            can_play: true,
+            can_pause: true,
+            can_go_next: false,
+            can_go_previous: false,
+            can_seek: true,
+            can_control: true,
+            position_supported: true,
+            position,
+            position_at: Instant::now(),
+        }
+    }
+
+    fn position(media: &Media) -> f64 {
+        media.players.get_untracked().unwrap()[0].position
+    }
+
+    #[test]
+    fn a_title_change_keeps_a_seek() {
+        let media = Media::default();
+        media.apply(Update::Player(Box::new(player("playing", "Video", 14.0))));
+        let name = player("playing", "", 0.0).name;
+        media.apply(Update::Seeked { name, position: 122.8, at: Instant::now() });
+        // Zen's next PropertiesChanged: the title loses " - YouTube", and
+        // Position answers 0.
+        media.apply(Update::Player(Box::new(player("playing", "Video - YouTube", 0.0))));
+        assert_eq!(position(&media), 122.8);
+    }
+
+    #[test]
+    fn a_length_that_goes_keeps_the_position() {
+        let media = Media::default();
+        media.apply(Update::Player(Box::new(player("playing", "Video", 50.0))));
+        let mut p = player("playing", "Video", 0.0);
+        p.length = 0.0;
+        media.apply(Update::Player(Box::new(p)));
+        assert_eq!(position(&media), 50.0);
+    }
+
+    #[test]
+    fn a_new_state_reads_the_position_again() {
+        let media = Media::default();
+        media.apply(Update::Player(Box::new(player("playing", "Video", 50.0))));
+        media.apply(Update::Player(Box::new(player("paused", "Video", 134.0))));
+        assert_eq!(position(&media), 134.0);
+    }
+
+    #[test]
+    fn another_track_reads_the_position_again() {
+        let media = Media::default();
+        media.apply(Update::Player(Box::new(player("playing", "Video", 50.0))));
+        let mut p = player("playing", "Next", 0.0);
+        p.length = 200.0;
+        media.apply(Update::Player(Box::new(p)));
+        assert_eq!(position(&media), 0.0);
+    }
 }
