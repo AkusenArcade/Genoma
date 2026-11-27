@@ -14,6 +14,9 @@ changes what a shell sees.
   "block", "beam" or "underline"; a hidden one is not `shown`.
 - `t.received`: the bytes the program has written, all told; read with
   `t.changed`, how fast it writes.
+- The desktop's theme file names two more things for apps to read through
+  `theme.desktop()`: `fonts.mono`, what a grid of letters is set in, and
+  `terminal` (its sixteen ANSI colours and its selection).
 
 ### Fixed
 

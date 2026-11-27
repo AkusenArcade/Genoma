@@ -141,15 +141,18 @@ end
 --     "colours": { "background": "#…", "text": "#…", "primary": "#…",
 --                  "secondary": "#…", "alert": "#…" },
 --     "sizes": { "radius": 16, "control_height": 32, "text_size": 14 },
---     "fonts": { … }
+--     "fonts": { "technical": "…", "expressive": "…", "mono": "…" },
+--     "terminal": { "colours": [ 16 × "#…" ], "selection": "#…" }
 --   }
 --
 -- `colours.background`, `text` and `primary` are needed, the others are
 -- optional; the kit's tokens are taken from them as theme.follow takes
 -- them from a shell's theme (accent ← primary, danger ← alert, the rest
 -- worked out). `sizes` set the kit's sizes it names. Anything else —
--- `fonts`, sizes the kit has no token for — is the shell's to say and the
--- app's to read (theme.desktop()). The file is written whole, atomically;
+-- `fonts` (`mono` is what a grid of letters is set in: a terminal), the
+-- `terminal`'s sixteen ANSI colours (normal then bright, black first) and
+-- its selection, sizes the kit has no token for — is the shell's to say
+-- and the app's to read (theme.desktop()). The file is written whole, atomically;
 -- a change crosses over `kit_move`, so an open app retints with the
 -- desktop. Without the file, or after theme.follow_desktop(false), the
 -- kit's own tokens.
